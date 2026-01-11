@@ -1,0 +1,5 @@
+{
+  "name": "Simulation & QA Matrix v7.0",
+  "description": "A high-fidelity dashboard for managing adversarial reinforcement learning agents, telemetry-driven balance tuning, and automated CI/CD simulation loops.",
+  "requestFramePermissions": []
+}

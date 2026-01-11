@@ -1,0 +1,7 @@
+{
+  "name": "Xandria Meta-Engine Protocol",
+  "description": "A sovereign game generation substrate (v7.0 Prime) featuring visual node transpilation, intent interpretation via Gemini, and cloud forge builds.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

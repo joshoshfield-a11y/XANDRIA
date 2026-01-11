@@ -1,0 +1,5 @@
+{
+  "name": "UEA Sovereign Substrate",
+  "description": "A high-fidelity simulation and dashboard for the Universal Engine Architecture (UEA), featuring the 72-operator taxonomy, stochastic state controller, and multi-layered development stack.",
+  "requestFramePermissions": []
+}

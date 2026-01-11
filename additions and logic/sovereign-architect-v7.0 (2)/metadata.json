@@ -1,0 +1,8 @@
+{
+  "name": "Sovereign Architect v7.0",
+  "description": "A Meta-Hyper-System that architecturally synthesizes specialized sub-engines based on high-level Resonance Intent.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

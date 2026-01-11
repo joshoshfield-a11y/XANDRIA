@@ -1,0 +1,7 @@
+{
+  "name": "AETHELGARD: Sovereign Asset Forge",
+  "description": "A high-fidelity meta-generator for 3D models, PBR textures, and full-scale environmental assets using Gemini 3 intelligence.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

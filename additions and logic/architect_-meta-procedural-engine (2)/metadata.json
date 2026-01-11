@@ -1,0 +1,7 @@
+{
+  "name": "ARCHITECT: Meta-Procedural Engine",
+  "description": "A high-level meta-generator that synthesizes specialized procedural generation engines for no-code intent-to-app platforms.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

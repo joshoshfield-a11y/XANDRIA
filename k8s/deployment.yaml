@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xandria-unified
+  labels:
+    app: xandria
+    component: unified-engine
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: xandria
+      component: unified-engine
+  template:
+    metadata:
+      labels:
+        app: xandria
+        component: unified-engine
+    spec:
+      containers:
+      - name: xandria
+        image: xandria:latest
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: XANDRIA_STOCHASTIC_KAPPA
+          value: "0.5"
+        - name: XANDRIA_STOCHASTIC_THETA
+          value: "1.0"
+        - name: XANDRIA_STOCHASTIC_SIGMA
+          value: "0.2"
+        - name: XANDRIA_MAX_MEMORY
+          value: "1073741824"  # 1GB
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: xandria-storage
+          mountPath: /app/generated
+      volumes:
+      - name: xandria-storage
+        persistentVolumeClaim:
+          claimName: xandria-pvc

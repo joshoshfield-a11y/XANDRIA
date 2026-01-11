@@ -1,0 +1,76 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XANDRIA | Omni-Graphics Forge</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+    
+    :root {
+      --xandria-bg: #000000;
+      --xandria-accent: #00f3ff;
+    }
+
+    body {
+      background-color: var(--xandria-bg);
+      color: #ffffff;
+      font-family: 'Space Grotesk', sans-serif;
+      overflow: hidden;
+      margin: 0;
+    }
+
+    .fira { font-family: 'Fira Code', monospace; }
+
+    .hud-overlay {
+      pointer-events: none;
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+    }
+    
+    .hud-element {
+      pointer-events: auto;
+    }
+
+    .glass-hud {
+      background: rgba(0, 5, 10, 0.6);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 243, 255, 0.2);
+      box-shadow: 0 0 40px rgba(0, 0, 0, 0.7);
+    }
+
+    .crt-effect::after {
+      content: " ";
+      display: block;
+      position: absolute;
+      top: 0; left: 0; bottom: 0; right: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
+      z-index: 20;
+      background-size: 100% 2px, 3px 100%;
+      pointer-events: none;
+    }
+  </style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom": "https://esm.sh/react-dom@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "three": "https://esm.sh/three@0.170.0",
+    "three/examples/jsm/": "https://esm.sh/three@0.170.0/examples/jsm/",
+    "simplex-noise": "https://esm.sh/simplex-noise@4.0.1",
+    "three/": "https://esm.sh/three@^0.182.0/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="crt-effect">
+  <div id="root"></div>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>

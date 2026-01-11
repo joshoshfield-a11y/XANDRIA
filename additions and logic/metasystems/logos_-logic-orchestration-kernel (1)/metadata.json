@@ -1,0 +1,5 @@
+{
+  "name": "Logos: Logic Orchestration Kernel",
+  "description": "A sovereign system architect and autonomous code generation platform utilizing Entity Component System (ECS) design, formal verification, and AST-driven synthesis.",
+  "requestFramePermissions": []
+}

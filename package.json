@@ -1,0 +1,214 @@
+{
+  "name": "xandria-unified",
+  "version": "2.0.0",
+  "description": "XANDRIA - Unified Intent-to-Code Generation System with 216 operators and triadic convergence",
+  "main": "dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "scripts": {
+    "dev": "vite dev --port 3000",
+    "build": "npm run build:web",
+    "build:dev": "vite build --mode development",
+    "build:web": "vite build --mode production",
+    "build:desktop": "npm run build:web && electron-builder --publish=never",
+    "build:android": "npm run build:web && npx cap build android",
+    "serve": "vite preview --port 3000",
+    "test": "npm run test:all",
+    "test:all": "tsx tests/UnifiedTestSuite.ts",
+    "test:unit": "tsx tests/UnifiedTestSuite.ts --unit-only",
+    "test:graphics": "tsx tests/UnifiedTestSuite.ts --graphics-only",
+    "test:performance": "tsx tests/UnifiedTestSuite.ts --performance-only",
+    "test:report": "tsx tests/UnifiedTestSuite.ts --generate-report",
+    "lint": "eslint src/**/*.{ts,tsx} --fix",
+    "type-check": "tsc --noEmit",
+    "docs": "typedoc --out docs/api src/",
+    "clean": "rm -rf dist node_modules/.vite",
+    "docker:build": "docker build -t xandria:latest .",
+    "docker:run": "docker run -p 3000:3000 xandria:latest",
+    "k8s:deploy": "kubectl apply -f k8s/",
+    "k8s:undeploy": "kubectl delete -f k8s/",
+    "package": "npm run build:desktop",
+    "dist": "npm run build:desktop",
+    "android:run": "npx cap run android",
+    "android:build": "npx cap build android",
+    "ios:run": "npx cap run ios",
+    "ios:build": "npx cap build ios",
+    "deploy:web": "npm run build:web && npx gh-pages -d dist",
+    "deploy:docker": "npm run docker:build && docker push xandria:latest",
+    "release": "npm run test:all && npm run build && npm run package"
+  },
+  "dependencies": {
+    "@capacitor/android": "^5.0.0",
+    "@capacitor/app": "^5.0.0",
+    "@capacitor/core": "^5.0.0",
+    "@capacitor/device": "^5.0.0",
+    "@capacitor/haptics": "^5.0.0",
+    "@capacitor/ios": "^5.0.0",
+    "@capacitor/splash-screen": "^5.0.0",
+    "@capacitor/status-bar": "^5.0.0",
+    "@google/genai": "^1.35.0",
+    "@types/react": "^19.2.8",
+    "@types/react-dom": "^19.2.3",
+    "cannon-es": "^0.20.0",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "helmet": "^7.0.0",
+    "lucide-react": "^0.562.0",
+    "morgan": "^1.10.0",
+    "rxjs": "^7.8.0",
+    "three": "^0.160.0",
+    "three-stdlib": "^2.29.4",
+    "uuid": "^9.0.0",
+    "zod": "^3.21.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^5.0.0",
+    "@types/cors": "^2.8.0",
+    "@types/express": "^4.17.0",
+    "@types/jest": "^29.5.0",
+    "@types/morgan": "^1.9.0",
+    "@types/node": "^20.0.0",
+    "@types/three": "^0.160.0",
+    "@types/uuid": "^9.0.0",
+    "@typescript-eslint/eslint-plugin": "^5.59.0",
+    "@typescript-eslint/parser": "^5.59.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "electron": "^39.2.7",
+    "electron-builder": "^24.0.0",
+    "eslint": "^8.40.0",
+    "gh-pages": "^5.0.0",
+    "jest": "^29.5.0",
+    "prettier": "^2.8.0",
+    "ts-jest": "^29.1.0",
+    "tsx": "^4.21.0",
+    "typedoc": "^0.24.0",
+    "typescript": "^5.0.0",
+    "vite": "^7.3.1"
+  },
+  "imports": {
+    "#xandria-engine": "./core/ai.mjs",
+    "#xandria-graphics": "./graphics/engines/UnifiedGraphicsEngine.ts",
+    "#xandria-tests": "./tests/UnifiedTestSuite.ts"
+  },
+  "keywords": [
+    "ai",
+    "code-generation",
+    "intent-to-code",
+    "unified-engine",
+    "triadic-convergence",
+    "synesthetic-processing",
+    "3d-graphics",
+    "web-development",
+    "game-development",
+    "api-generation",
+    "low-code",
+    "no-code",
+    "typescript",
+    "three.js",
+    "electron",
+    "capacitor",
+    "docker",
+    "kubernetes"
+  ],
+  "author": "XANDRIA Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA.git"
+  },
+  "bugs": {
+    "url": "https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA/issues"
+  },
+  "homepage": "https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA#readme",
+  "electron": {
+    "appId": "com.xandria.unified",
+    "productName": "XANDRIA",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "core/**/*",
+      "graphics/**/*",
+      "tests/**/*",
+      "additions and logic/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "capacitor": {
+    "appId": "com.xandria.unified",
+    "appName": "XANDRIA",
+    "webDir": "dist",
+    "bundledWebRuntime": false,
+    "plugins": {
+      "SplashScreen": {
+        "launchShowDuration": 3000,
+        "backgroundColor": "#1e1e2e",
+        "androidSplashResourceName": "splash",
+        "androidScaleType": "CENTER_CROP"
+      }
+    },
+    "android": {
+      "buildOptions": {
+        "releaseType": "APK"
+      }
+    },
+    "ios": {
+      "scheme": "XANDRIA"
+    }
+  },
+  "volta": {
+    "node": "18.16.0",
+    "npm": "9.5.1"
+  }
+}

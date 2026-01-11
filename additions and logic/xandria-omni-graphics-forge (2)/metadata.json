@@ -1,0 +1,5 @@
+{
+  "name": "XANDRIA Omni-Graphics Forge",
+  "description": "A procedural graphics generator component for the XANDRIA sovereign intent-to-code engine, specialized in synthesizing video assets through the 72-Operator Canon.",
+  "requestFramePermissions": []
+}

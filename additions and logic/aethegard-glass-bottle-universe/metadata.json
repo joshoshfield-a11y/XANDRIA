@@ -1,0 +1,8 @@
+{
+  "name": "Aethegard Glass Bottle Universe",
+  "description": "A self-contained digital ecosystem featuring a sandboxed browser, a sovereign AI chat architect, and a code manifestation engine.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Mythos: Asset Synthesis Pipeline",
+  "description": "A sovereign procedural content generation engine that harmonizes 3D geometry, semantic truth graphs, and auto-rigging kernels into unified USD outputs.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

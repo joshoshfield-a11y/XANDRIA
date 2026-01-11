@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: xandria-service
+  labels:
+    app: xandria
+spec:
+  selector:
+    app: xandria
+    component: unified-engine
+  ports:
+  - name: http
+    port: 80
+    targetPort: 3000
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: xandria-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - xandria.example.com
+    secretName: xandria-tls
+  rules:
+  - host: xandria.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: xandria-service
+            port:
+              number: 80

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xandria-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xandria-config
+data:
+  NODE_ENV: "production"
+  XANDRIA_STOCHASTIC_KAPPA: "0.5"
+  XANDRIA_STOCHASTIC_THETA: "1.0"
+  XANDRIA_STOCHASTIC_SIGMA: "0.2"
+  XANDRIA_MAX_MEMORY: "1073741824"
+  XANDRIA_GRAPHICS_STAGE: "planetary"
+  XANDRIA_TARGET_FPS: "60"
+  XANDRIA_TEST_TIMEOUT: "30000"
+  XANDRIA_ENABLE_SEALING: "true"
+  XANDRIA_MAX_INTENT_SIZE: "10000"

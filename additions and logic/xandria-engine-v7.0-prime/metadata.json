@@ -1,0 +1,7 @@
+{
+  "name": "Xandria Engine v7.0 Prime",
+  "description": "A sovereign code generation engine that transforms natural language intents into high-fidelity 3D artifacts and applications using the Xandria Operator Canon.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

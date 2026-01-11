@@ -1,0 +1,68 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UEA Sovereign Substrate | V7.0 Prime</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    body {
+      background-color: #020205;
+      color: #d1d1f0;
+      font-family: 'Space Grotesk', sans-serif;
+      margin: 0;
+      overflow: hidden;
+    }
+    .fira { font-family: 'Fira Code', monospace; }
+    .glass {
+      background: rgba(10, 10, 20, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(0, 243, 255, 0.1);
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+    }
+    .glow-cyan { text-shadow: 0 0 10px rgba(0, 243, 255, 0.5); }
+    
+    @keyframes glitch {
+      0% { transform: translate(0); }
+      20% { transform: translate(-2px, 2px); }
+      40% { transform: translate(-2px, -2px); }
+      60% { transform: translate(2px, 2px); }
+      80% { transform: translate(2px, -2px); }
+      100% { transform: translate(0); }
+    }
+    .glitch-hover:hover { animation: glitch 0.2s infinite; }
+
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0, 243, 255, 0.3); border-radius: 10px; }
+
+    #v-canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: -1;
+      opacity: 0.6;
+    }
+  </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "recharts": "https://esm.sh/recharts@^3.6.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.34.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+  <canvas id="v-canvas"></canvas>
+  <div id="root"></div>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>

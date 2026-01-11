@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sovereign Architect v7.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Fira+Code:wght@400;600&display=swap');
+        
+        body {
+            background-color: #020205;
+            color: #d1d1f0;
+            font-family: 'Space Grotesk', sans-serif;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .fira { font-family: 'Fira Code', monospace; }
+
+        .glass {
+            background: rgba(10, 10, 20, 0.85);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 243, 255, 0.1);
+        }
+
+        .scanline {
+            width: 100%;
+            height: 2px;
+            background: rgba(0, 243, 255, 0.1);
+            position: absolute;
+            top: 0;
+            animation: scan 8s linear infinite;
+        }
+
+        @keyframes scan {
+            from { top: 0; }
+            to { top: 100%; }
+        }
+
+        .glitch-text {
+            text-shadow: 1px 0 #ff00c1, -1px 0 #00fff9;
+        }
+
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.1);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0, 243, 255, 0.2);
+        }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
+    "recharts": "https://esm.sh/recharts@^3.6.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+    <div id="root"></div>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
