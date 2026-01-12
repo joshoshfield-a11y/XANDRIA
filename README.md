@@ -1,6 +1,6 @@
 # XANDRIA - Unified Intent-to-Code Generation System
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/joshoshfield-a11y/XANDRIA)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE.md)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 
@@ -37,7 +37,7 @@
 ### **Installation**
 ```bash
 # Clone the repository
-git clone https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA.git
+git clone https://github.com/joshoshfield-a11y/XANDRIA.git
 cd XANDRIA
 
 # Install dependencies
@@ -322,9 +322,9 @@ This project is licensed under the MIT License - see the [LICENSE.md](./LICENSE.
 
 ## 📞 **Support**
 
-- **Issues**: [GitHub Issues](https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA/discussions)
-- **Documentation**: [Wiki](https://github.com/joshoshfield-a11y/UNIFIED-TENSOR-LOGIC-XANDRIA/wiki)
+- **Issues**: [GitHub Issues](https://github.com/joshoshfield-a11y/XANDRIA/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/joshoshfield-a11y/XANDRIA/discussions)
+- **Documentation**: [Wiki](https://github.com/joshoshfield-a11y/XANDRIA/wiki)
 
 ## 🔄 **Changelog**
 
