@@ -1,10 +1,15 @@
 # XANDRIA - Unified Intent-to-Code Generation System
 
 [![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/joshoshfield-a11y/XANDRIA)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE.md)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE.md)
+[![CI](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml/badge.svg)](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml)
+[![Accessibility](https://img.shields.io/badge/accessibility-WCAG%202.1%20AA-green.svg)](./CONTRIBUTING.md#accessibility-guidelines)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 
-**XANDRIA transforms natural language intentions into production-ready applications through triadic convergence (VOID→FABRIC→ARTIFACT) using 216 unified operators and synesthetic processing.**
+**Transform natural language intentions into production-ready applications through triadic convergence (VOID→FABRIC→ARTIFACT) using 216 unified operators and synesthetic processing.**
+
+[🚀 Quick Start](#-quick-start) • [📚 Documentation](#-documentation) • [🤝 Contributing](#-contributing) • [🎯 Features](#-key-features)
 
 ## 🌟 **Key Features**
 
@@ -337,6 +342,42 @@ This project is licensed under the MIT License - see the [LICENSE.md](./LICENSE.
 
 ### **Version 1.x - Legacy Systems**
 - Original Xandria, UEA, x13-CORE, Alpha, and UTL-Native implementations
+
+## 👥 **Contributors Hall of Fame**
+
+We extend our heartfelt gratitude to all contributors who have helped make XANDRIA a reality:
+
+### **Core Contributors**
+- **Project Maintainers**: The XANDRIA development team
+- **Open Source Community**: Contributors from around the world
+- **Accessibility Advocates**: Ensuring inclusive design for everyone
+
+### **Special Thanks**
+- **AI Research Community**: For advancing the field of intent-to-code generation
+- **Open Source Ecosystem**: TypeScript, Three.js, Node.js, and countless other projects
+- **Beta Testers**: Early adopters who provided invaluable feedback
+- **Documentation Contributors**: Making complex systems accessible to all
+
+### **How to Get Recognized**
+- **Star the repository** ⭐
+- **Contribute code, docs, or tests** 🚀
+- **Report and fix accessibility issues** ♿
+- **Share XANDRIA with others** 📣
+
+---
+
+## 📞 **Community & Support**
+
+- **🐛 [Issues](https://github.com/joshoshfield-a11y/XANDRIA/issues)** - Report bugs and request features
+- **💬 [Discussions](https://github.com/joshoshfield-a11y/XANDRIA/discussions)** - Community forum
+- **📖 [Documentation](https://github.com/joshoshfield-a11y/XANDRIA/wiki)** - Guides and tutorials
+- **🤝 [Contributing](./CONTRIBUTING.md)** - How to contribute
+- **📜 [Code of Conduct](./CODE_OF_CONDUCT.md)** - Community standards
+
+### **Stay Connected**
+- **Follow** [@XANDRIA](https://twitter.com/xandria) on Twitter
+- **Join** our [Discord community](https://discord.gg/xandria)
+- **Subscribe** to our [newsletter](https://xandria.dev/newsletter)
 
 ---
 
