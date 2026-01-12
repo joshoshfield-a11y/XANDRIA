@@ -1,7 +1,7 @@
 # XANDRIA - Unified Intent-to-Code Generation System
 
 [![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/joshoshfield-a11y/XANDRIA)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![CI](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml/badge.svg)](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml)
 [![Accessibility](https://img.shields.io/badge/accessibility-WCAG%202.1%20AA-green.svg)](./CONTRIBUTING.md#accessibility-guidelines)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen.svg)](https://nodejs.org/)
