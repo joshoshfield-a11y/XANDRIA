@@ -135,7 +135,7 @@
       "core/**/*",
       "graphics/**/*",
       "tests/**/*",
-      "additions and logic/**/*",
+      "additions-and-logic/**/*",
       "node_modules/**/*",
       "package.json"
     ],

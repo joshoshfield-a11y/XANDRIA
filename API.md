@@ -6,7 +6,7 @@
 
 #### **Constructor**
 ```typescript
-import { XUAXUN_Engine } from './additions and logic/synthesized_engine'
+import { XUAXUN_Engine } from './additions-and-logic/synthesized_engine'
 
 const engine = new XUAXUN_Engine()
 ```

@@ -49,7 +49,7 @@ npm run dev
 
 ### **Basic Usage**
 ```typescript
-import { XUAXUN_Engine } from './additions and logic/synthesized_engine';
+import { XUAXUN_Engine } from './additions-and-logic/synthesized_engine';
 
 const engine = new XUAXUN_Engine();
 
@@ -86,7 +86,7 @@ XANDRIA/
 ├── core/                     # XUAXUN Engine (unified)
 ├── graphics/engines/         # UnifiedGraphicsEngine
 ├── tests/                    # UnifiedTestSuite
-├── additions and logic/      # Synthesized systems
+├── additions-and-logic/      # Synthesized systems
 ├── apps/                     # Application templates
 └── generated/               # Artifact vault
 ```

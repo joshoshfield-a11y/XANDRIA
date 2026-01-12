@@ -24,7 +24,7 @@
     "core/**/*",
     "graphics/**/*",
     "tests/**/*",
-    "additions and logic/**/*"
+    "additions-and-logic/**/*"
   ],
   "exclude": [
     "node_modules",
