@@ -61,7 +61,7 @@ RESPOND ONLY WITH VALID JSON matching this exact schema:
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
+        model: 'llama3-8b-8192',
         messages: [
           { role: 'system', content: SYSTEM_DNA },
           { role: 'user', content: `MANIFEST INTENT: "${intent}"\nASSET_CONTEXT: ${JSON.stringify(assetsContext)}\nACTION: Architect a high-fidelity 3D substrate with physics.` }
