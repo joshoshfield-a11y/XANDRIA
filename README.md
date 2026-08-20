@@ -7,6 +7,7 @@ XANDRIA is an AI-native engine that transforms natural language into fully inter
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Powered by Gemini](https://img.shields.io/badge/AI-Gemini%203%20Pro-blue)](https://aistudio.google.com)
 [![Three.js](https://img.shields.io/badge/3D-Three.js%200.182-black)](https://threejs.org)
+[![CI](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml/badge.svg)](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml)
 
 ---
 
