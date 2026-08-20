@@ -1,36 +1,3 @@
-import { GoogleGenAI, Type } from '@google/genai';
-
-const SYSTEM_DNA = `[DNA_v7_PRIME: OMNI_MANIFEST, PHYSICS_ENGINE, CHRONOS_VCS, ASSET_FORGE]
-CORE_DIRECTIVE: You are the Xandria v7.0 Meta-Generator.
-RULES:
-1. Manifest complete 3D apps with configurable physics (cannon-es compatible).
-2. Physics: Explicitly define mass, friction, and restitution for EVERY entity. 0 mass = static.
-3. UI: Ensure the generated App.tsx is a high-performance React component.
-4. VCS: Be descriptive in your generated "Manifested" commit messages.
-JSON Schema Requirement:
-{
-  "scene": {
-    "background": "hexColor",
-    "physics": { "gravity": [x, y, z], "friction": number, "restitution": number },
-    "entities": [
-      {
-        "type": "box|sphere|torus|plane|cylinder",
-        "position": [x, y, z],
-        "rotation": [x, y, z],
-        "mass": number,
-        "color": "hexColor",
-        "wireframe": boolean,
-        "assetId": "string (optional)"
-      }
-    ]
-  },
-  "files": {
-    "App.tsx": "Complete React component using Three.js and Cannon-es",
-    "physics-engine.ts": "Physics logic helper",
-    "manifest.json": "Documentation"
-  }
-}`;
-
 export default async function handler(req, res) {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -49,69 +16,71 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Intent is required' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'Server configuration error: GEMINI_API_KEY not set' });
+    return res.status(500).json({ error: 'Server configuration error: GROQ_API_KEY not set' });
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = 'gemini-3-pro-preview';
+  const SYSTEM_DNA = `You are the Xandria v7.0 Meta-Generator. You generate structured 3D scene configurations.
+
+RULES:
+1. Manifest complete 3D apps with configurable physics (cannon-es compatible).
+2. Physics: Explicitly define mass, friction, and restitution for EVERY entity. 0 mass = static.
+3. UI: Ensure the generated App.tsx is a high-performance React component.
+4. VCS: Be descriptive in your generated "Manifested" commit messages.
+
+RESPOND ONLY WITH VALID JSON matching this exact schema:
+{
+  "scene": {
+    "background": "hexColor string",
+    "physics": { "gravity": [x, y, z], "friction": number, "restitution": number },
+    "entities": [
+      {
+        "type": "box|sphere|torus|plane|cylinder",
+        "position": [x, y, z],
+        "rotation": [x, y, z],
+        "mass": number,
+        "color": "hexColor",
+        "wireframe": false,
+        "assetId": "string (optional)"
+      }
+    ]
+  },
+  "files": {
+    "App.tsx": "string — complete React component",
+    "physics-engine.ts": "string — physics helper",
+    "manifest.json": "string — documentation"
+  }
+}`;
 
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: `MANIFEST INTENT: "${intent}"\nASSET_CONTEXT_INJECTED: ${JSON.stringify(assetsContext)}\nACTION: Architect a high-fidelity 3D substrate with physics.`,
-      config: {
-        systemInstruction: SYSTEM_DNA,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            scene: {
-              type: Type.OBJECT,
-              properties: {
-                background: { type: Type.STRING },
-                physics: {
-                  type: Type.OBJECT,
-                  properties: {
-                    gravity: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                    friction: { type: Type.NUMBER },
-                    restitution: { type: Type.NUMBER }
-                  }
-                },
-                entities: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      type: { type: Type.STRING },
-                      position: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                      rotation: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                      mass: { type: Type.NUMBER },
-                      color: { type: Type.STRING },
-                      wireframe: { type: Type.BOOLEAN },
-                      assetId: { type: Type.STRING }
-                    }
-                  }
-                }
-              },
-              required: ['background', 'entities']
-            },
-            files: {
-              type: Type.OBJECT,
-              properties: {
-                'App.tsx': { type: Type.STRING },
-                'physics-engine.ts': { type: Type.STRING },
-                'manifest.json': { type: Type.STRING }
-              }
-            }
-          },
-          required: ['scene', 'files']
-        }
-      }
+    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: SYSTEM_DNA },
+          { role: 'user', content: `MANIFEST INTENT: "${intent}"\nASSET_CONTEXT: ${JSON.stringify(assetsContext)}\nACTION: Architect a high-fidelity 3D substrate with physics.` }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_tokens: 4096
+      })
     });
 
-    const text = response.text;
+    if (!groqRes.ok) {
+      const errText = await groqRes.text();
+      console.error('Groq API error:', groqRes.status, errText);
+      return res.status(502).json({ error: `AI provider error: ${groqRes.status}` });
+    }
+
+    const groqData = await groqRes.json();
+    const text = groqData.choices?.[0]?.message?.content;
+
     if (!text) {
       return res.status(500).json({ error: 'Null collapse in probability manifold.' });
     }
