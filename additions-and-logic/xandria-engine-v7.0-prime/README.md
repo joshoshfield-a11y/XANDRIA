@@ -25,6 +25,15 @@ npm run dev
 
 ---
 
+## Deploy to Vercel
+
+```bash
+cd additions-and-logic/xandria-engine-v7.0-prime
+npx vercel --prod
+```
+
+Then set `GEMINI_API_KEY` in your Vercel project settings. The key stays server-side — never in the client bundle.
+
 ## First Manifestation
 
 1. Type any intent in the input field — `"a solar system"` is a good first test
