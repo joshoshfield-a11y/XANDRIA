@@ -16,9 +16,9 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Intent is required' });
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'Server configuration error: GROQ_API_KEY not set' });
+    return res.status(500).json({ error: 'Server configuration error: OPENROUTER_API_KEY not set' });
   }
 
   const SYSTEM_DNA = `You are the Xandria v7.0 Meta-Generator. You generate structured 3D scene configurations.
@@ -54,38 +54,43 @@ RESPOND ONLY WITH VALID JSON matching this exact schema:
 }`;
 
   try {
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://xandria-omega.vercel.app',
+        'X-Title': 'Xandria v7.0 Prime'
       },
       body: JSON.stringify({
-        model: 'llama3-8b-8192',
+        model: 'meta-llama/llama-3.1-8b-instruct:free',
         messages: [
           { role: 'system', content: SYSTEM_DNA },
           { role: 'user', content: `MANIFEST INTENT: "${intent}"\nASSET_CONTEXT: ${JSON.stringify(assetsContext)}\nACTION: Architect a high-fidelity 3D substrate with physics.` }
         ],
-        response_format: { type: 'json_object' },
         temperature: 0.7,
         max_tokens: 4096
       })
     });
 
-    if (!groqRes.ok) {
-      const errText = await groqRes.text();
-      console.error('Groq API error:', groqRes.status, errText);
-      return res.status(502).json({ error: `AI provider error: ${groqRes.status}` });
+    if (!orRes.ok) {
+      const errText = await orRes.text();
+      console.error('OpenRouter API error:', orRes.status, errText);
+      return res.status(502).json({ error: `AI provider error: ${orRes.status}` });
     }
 
-    const groqData = await groqRes.json();
-    const text = groqData.choices?.[0]?.message?.content;
+    const orData = await orRes.json();
+    const text = orData.choices?.[0]?.message?.content;
 
     if (!text) {
       return res.status(500).json({ error: 'Null collapse in probability manifold.' });
     }
 
-    const parsed = JSON.parse(text);
+    // Extract JSON from the response (model might wrap it in markdown)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonStr = jsonMatch ? jsonMatch[0] : text;
+    const parsed = JSON.parse(jsonStr);
+
     res.setHeader('Access-Control-Allow-Origin', '*');
     return res.status(200).json(parsed);
   } catch (error) {
