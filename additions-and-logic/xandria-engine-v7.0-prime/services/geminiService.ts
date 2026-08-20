@@ -17,7 +17,6 @@ export async function manifestIntent(intent: string, assetsContext: any[] = []) 
       config: {
         systemInstruction: SYSTEM_DNA,
         responseMimeType: "application/json",
-        tools: [{ googleSearch: {} }], // Enable search for asset grounding
         responseSchema: {
           type: Type.OBJECT,
           properties: {
