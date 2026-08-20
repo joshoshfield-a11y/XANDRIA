@@ -1,7 +1,7 @@
 {
   "name": "xandria",
   "version": "7.0.0",
-  "description": "XANDRIA — Intent to 3D Physics Simulation.",
+  "description": "XANDRIA \u2014 Intent to 3D Physics Simulation.",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -10,7 +10,10 @@
   "scripts": {
     "dev": "npm run dev --workspace=additions-and-logic/xandria-engine-v7.0-prime",
     "build": "npm run build --workspace=additions-and-logic/xandria-engine-v7.0-prime",
-    "preview": "npm run preview --workspace=additions-and-logic/xandria-engine-v7.0-prime"
+    "preview": "npm run preview --workspace=additions-and-logic/xandria-engine-v7.0-prime",
+    "test": "node --test tests/operators.test.mjs tests/reflector.test.mjs tests/seal.test.mjs",
+    "test:smoke": "node tests/smoke.mjs",
+    "test:all": "npm test && npm run test:smoke"
   },
   "engines": {
     "node": ">=20.0.0",
