@@ -32,7 +32,15 @@ cd additions-and-logic/xandria-engine-v7.0-prime
 npx vercel --prod
 ```
 
-Then set `GEMINI_API_KEY` in your Vercel project settings. The key stays server-side — never in the client bundle.
+**Required: Set Environment Variables in Vercel Dashboard**
+
+Go to your Vercel project → Settings → Environment Variables, then add:
+
+| Variable | Value | Location |
+|---|---|---|
+| `GEMINI_API_KEY` | Your key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Server (Production) |
+
+⚠️ **Never commit the real key.** `.env` is gitignored. The key stays server-side — never in the client bundle.
 
 ## First Manifestation
 
