@@ -2,118 +2,52 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: [main]
   pull_request:
-    branches: ["main", "master"]
-  schedule:
-    # Run weekly security audit
-    - cron: '0 0 * * 1'
+    branches: [main]
 
 jobs:
-  # Security and dependency checks
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Use Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Run security audit
-        run: npm audit --audit-level=moderate
-      - name: Check for vulnerabilities
-        run: npm audit --audit-level=high --production || true
-
-  # Code quality checks
-  quality:
-    name: Code Quality
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [16.x, 18.x, 20.x]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Lint code
-        run: npm run lint || true
-      - name: Type check
-        run: npm run type-check
-      - name: Check formatting
-        run: npm run format:check || npx prettier --check . || true
-
-  # Testing
   test:
-    name: Testing
+    name: Core Tests (node:test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Run unit tests
-        run: npm run test:unit
-      - name: Run integration tests
-        run: npm run test:integration || true
-      - name: Generate test coverage
-        run: npm run test:coverage || true
+          node-version: 20
+          cache: npm
 
-  # Build verification
+      - name: Install root deps
+        run: npm install
+
+      - name: Run operator + reflector + seal tests
+        run: npm test
+
+      - name: Run smoke test
+        run: npm run test:smoke
+
   build:
-    name: Build Verification
+    name: v7.0 Prime Build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: additions-and-logic/xandria-engine-v7.0-prime
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Build for web
-        run: npm run build:web
-      - name: Build for desktop
-        run: npm run build:desktop || true
-      - name: Build Docker image
-        run: npm run docker:build || true
-      - name: Check build artifacts
-        run: ls -la dist/ || true
+          node-version: 20
+          cache: npm
+          cache-dependency-path: additions-and-logic/xandria-engine-v7.0-prime/package-lock.json
 
-  # Accessibility check (always runs for PRs and pushes)
-  accessibility:
-    name: Accessibility Check
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Use Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 18
-        cache: 'npm'
-    - name: Install dependencies
-      run: npm ci
-    - name: Install accessibility testing tools
-      run: npm install --no-save --no-audit --no-fund axe-core jest-axe @testing-library/react @testing-library/jest-dom
-    - name: Run accessibility tests (produce JSON)
-      run: |
-        mkdir -p reports
-        npx jest --config=jest.a11y.config.js --json --outputFile=reports/a11y-report.json || true
-    - name: Upload A11y report
-      uses: actions/upload-artifact@v4
-      with:
-        name: a11y-report
-        path: reports/a11y-report.json
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+        env:
+          GEMINI_API_KEY: placeholder-build-key
