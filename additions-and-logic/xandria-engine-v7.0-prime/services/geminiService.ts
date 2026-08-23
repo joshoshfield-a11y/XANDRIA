@@ -4,7 +4,7 @@
  * Maintains backward compatibility with existing imports
  */
 
-import { unifiedBridge } from '../../unified/UnifiedOperatorBridge';
+import { unifiedBridge } from '../src/bridge';
 
 export interface ManifestRequest {
   intent: string;
