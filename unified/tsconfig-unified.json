@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@engine/*": ["XANDRIAv3.0/src/engine/*"],
+      "@config/*": ["XANDRIAv3.0/src/config/*"],
+      "@tests/*": ["XANDRIAv3.0/src/tests/*"],
+      "@graphics/*": ["XANDRIAv3.0/src/graphics/*"],
+      "@synesthesia/*": ["XANDRIAv3.0/src/synesthesia/*"],
+      "@bridge": ["./UnifiedOperatorBridge.ts"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "XANDRIAv3.0/src/**/*",
+    "graphics/**/*",
+    "tests/**/*",
+    "core/**/*",
+    "*.ts",
+    "*.tsx"
+  ],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
