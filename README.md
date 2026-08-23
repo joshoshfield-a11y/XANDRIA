@@ -1,3 +1,18 @@
+# 🜂 XANDRIA
+
+> **Unified Engine v4.0** — [View Complete Architecture Spec](XANDRIA_ARCHITECTURE_v4.0.md)
+
+## Quick Links
+
+| Resource | Description |
+|----------|-------------|
+| [Architecture v4.0](XANDRIA_ARCHITECTURE_v4.0.md) | Complete 72-operator lattice, 13-layer stack, 530-file map |
+| [Unified Layer](unified/) | Consolidation bridge — v3.0 engine → v7.0 demo |
+| [v7.0 Prime Demo](additions-and-logic/xandria-engine-v7.0-prime/) | Deployed React + Three.js + physics demo |
+| [Core Engine](XANDRIAv3.0/) | 72-operator lattice, XUAXUN synthesis, stochastic evolution |
+
+---
+
 # XANDRIA
 
 **Type any intent. Watch a 3D world with real physics appear in seconds.**
