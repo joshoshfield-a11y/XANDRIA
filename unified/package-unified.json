@@ -1,0 +1,68 @@
+{
+  "name": "xandria-unified",
+  "version": "4.0.0",
+  "description": "XANDRIA Unified Engine — 72-operator lattice, 13-layer stack, autonomous software generation",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
+    "test:smoke": "node smoke.mjs",
+    "test:all": "npm test && npm run test:smoke",
+    "test:engine": "node --test XANDRIAv3.0/src/tests/*.test.ts",
+    "test:quality": "node XANDRIAv3.0/src/tests/test-jmetric.js",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write .",
+    "engine:synthesize": "node -e "import('./src/engine/entry.mjs').then(m => m.cli())"",
+    "app:v7": "cd additions-and-logic/xandria-engine-v7.0-prime && npm run dev",
+    "app:aethegard": "cd additions-and-logic/aethegard-glass-bottle-universe && npm run dev",
+    "app:logos": "cd additions-and-logic/logos_-logic-orchestration-kernel && npm run dev",
+    "app:mythos": "cd additions-and-logic/mythos_-asset-synthesis-pipeline && npm run dev",
+    "app:simulation": "cd additions-and-logic/simulation-&-qa-matrix-v7.0 && npm run dev",
+    "app:architect": "cd additions-and-logic/architect_-meta-procedural-engine && npm run dev",
+    "app:meta": "cd additions-and-logic/xandria-meta-engine-protocol && npm run dev",
+    "deploy": "vercel --prod",
+    "deploy:staging": "vercel"
+  },
+  "dependencies": {
+    "@google/genai": "^1.34.0",
+    "@react-three/cannon": "^6.6.0",
+    "@react-three/drei": "^9.105.0",
+    "@react-three/fiber": "^8.16.0",
+    "@vercel/node": "^3.0.0",
+    "cannon-es": "^0.20.0",
+    "jszip": "^3.10.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.182.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/three": "^0.182.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "typescript": "^5.4.0",
+    "vite": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "xandria",
+    "game-engine",
+    "procedural-generation",
+    "operator-lattice",
+    "autonomous-software",
+    "threejs",
+    "react",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshoshfield-a11y/XANDRIA.git"
+  }
+}
