@@ -21,9 +21,24 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@engine/*": [
+        "./src/engine/*"
+      ],
+      "@tests/*": [
+        "./src/tests/*"
+      ],
+      "@config/*": [
+        "./src/config/*"
       ]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "./*",
+    "src/**/*",
+    "components/**/*",
+    "services/**/*"
+  ]
 }
