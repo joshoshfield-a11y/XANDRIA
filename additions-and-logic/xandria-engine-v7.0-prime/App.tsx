@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { UnifiedOperatorBridge, ManifestResult } from '../../unified/UnifiedOperatorBridge';
+import { UnifiedOperatorBridge, ManifestResult } from './src/bridge';
 import { LatticeVisualizer } from './components/LatticeVisualizer';
 import { ArtifactViewer } from './components/ArtifactViewer';
 import { AssetStore } from './components/AssetStore';
