@@ -17,6 +17,13 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
+      '@engine': path.resolve(__dirname, './src/engine'),
+      '@tests': path.resolve(__dirname, './src/tests'),
+      '@config': path.resolve(__dirname, './src/config'),
     }
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
   }
 });
