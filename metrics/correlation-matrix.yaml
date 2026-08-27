@@ -1,0 +1,31 @@
+id: MET-XANDRIA-001
+kind: metric
+name: "Correlation Matrix Accuracy"
+underlying_objective: "Correct identification of meaningful variable relationships without spurious correlation"
+counter_metrics:
+  - name: "False Discovery Rate"
+    why_counter: "High correlation counts may include spurious relationships"
+    measurement_method: "Benjamini-Hochberg procedure on p-values"
+  - name: "Omitted Variable Bias"
+    why_counter: "Correlations may disappear when confounders are included"
+    measurement_method: "Sensitivity analysis with expanded variable sets"
+gaming_paths:
+  - "Cherry-picking time windows to maximize correlation"
+  - "Omitting variables that would weaken desired correlations"
+  - "Using non-stationary data to inflate correlation coefficients"
+  - "P-hacking via multiple comparison without correction"
+off_dashboard_audit:
+  method: "Blind human expert evaluation of top 20 correlations"
+  cadence: "weekly"
+  independent: true
+  human_review: required
+  delayed_outcome_check: required
+expiry:
+  review_after_days: 30
+  randomization: true
+  retirement_condition: "When ground-truth causal graph becomes available"
+reflexivity_risk: "Publishing correlation rankings may cause users to only report variables that correlate highly, suppressing null results"
+status_vector:
+  semantic: 4
+  implementation: 5
+  operational: 2
