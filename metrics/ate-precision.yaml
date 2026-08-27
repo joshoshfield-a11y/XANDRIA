@@ -1,0 +1,34 @@
+id: MET-XANDRIA-002
+kind: metric
+name: "Average Treatment Effect Precision"
+underlying_objective: "Unbiased estimation of causal intervention effects with valid confidence intervals"
+counter_metrics:
+  - name: "Selection Bias Residual"
+    why_counter: "Propensity matching may leave hidden confounders"
+    measurement_method: "Sensitivity analysis to unmeasured confounding (e.g., VanderWeele bounds)"
+  - name: "Overlap Violation Rate"
+    why_counter: "Poor overlap produces extrapolated estimates"
+    measurement_method: "Propensity score distribution overlap coefficient"
+  - name: "Placebo Test Failure Rate"
+    why_counter: "Method may detect effects where none should exist"
+    measurement_method: "Run ATE on known null interventions"
+gaming_paths:
+  - "Trimming samples to achieve desired significance"
+  - "Selecting covariates post-hoc to minimize standard error"
+  - "Reporting only significant subgroups"
+  - "Using weak instruments that amplify bias"
+off_dashboard_audit:
+  method: "Independent replication on holdout dataset with preregistered specification"
+  cadence: "bi_weekly"
+  independent: true
+  human_review: required
+  delayed_outcome_check: required
+expiry:
+  review_after_days: 45
+  randomization: true
+  retirement_condition: "When randomized controlled trial data replaces observational estimates"
+reflexivity_risk: "Publishing ATE estimates may cause implementers to select only interventions with positive published effects, creating publication bias in practice"
+status_vector:
+  semantic: 5
+  implementation: 4
+  operational: 2
