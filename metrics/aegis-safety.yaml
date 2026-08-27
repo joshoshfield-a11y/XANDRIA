@@ -1,0 +1,34 @@
+id: MET-XANDRIA-004
+kind: metric
+name: "Aegis Safety Filter Efficacy"
+underlying_objective: "Prevention of harmful, biased, or policy-violating generated content without excessive false positives"
+counter_metrics:
+  - name: "False Positive Rate (Overblocking)"
+    why_counter: "Overly aggressive filtering may block valid creative content"
+    measurement_method: "Adversarial benign content suite: content that should pass but might trigger filters"
+  - name: "Adversarial Bypass Rate"
+    why_counter: "Sophisticated prompts may evade filters"
+    measurement_method: "Red-team prompt injection attempts with human safety review"
+  - name: "Latency Cost of Safety"
+    why_counter: "Safety checks may degrade user experience"
+    measurement_method: "Generation latency with vs without safety pipeline"
+gaming_paths:
+  - "Tuning filter thresholds to maximize pass rate while allowing borderline content"
+  - "Using euphemisms or encoding to bypass keyword filters"
+  - "Exploiting context window limits to hide harmful content in long prompts"
+  - "Reporting false positives to pressure filter loosening"
+off_dashboard_audit:
+  method: "Independent red-team evaluation by external safety researchers"
+  cadence: "monthly"
+  independent: true
+  human_review: required
+  delayed_outcome_check: required
+expiry:
+  review_after_days: 14
+  randomization: true
+  retirement_condition: "When safety filter achieves <1% false positive and <0.1% bypass on adversarial suite"
+reflexivity_risk: "Publishing Aegis efficacy metrics may cause attackers to specifically target known filter weaknesses, accelerating arms race"
+status_vector:
+  semantic: 4
+  implementation: 3
+  operational: 1
