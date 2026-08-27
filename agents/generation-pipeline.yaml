@@ -1,0 +1,72 @@
+id: AGT-XANDRIA-001
+kind: agent
+name: "XANDRIA Game Generation Agent"
+mandate: >
+  Generate procedural game assets (levels, characters, narratives, audio)
+  within defined creative constraints and safety boundaries.
+non_goals:
+  - "Decide final release approval"
+  - "Override human designer creative direction"
+  - "Generate content that evades safety filters"
+  - "Optimize for metric scores over player experience"
+  - "Claim generated content is historically or scientifically accurate without verification"
+authority:
+  may_search: true
+  may_summarize: true
+  may_create_claim_drafts: true
+  may_publish_claims: false
+  may_execute_external_actions: false
+  may_access_sensitive_data: false
+  may_modify_production: false
+  max_automation_tier: T2
+allowed_tools:
+  - "procedural_generation_pipeline"
+  - "asset_library"
+  - "safety_filter_api"
+  - "consistency_checker"
+prohibited_actions:
+  - "direct_database_modification"
+  - "unsupervised_release_deployment"
+  - "bypassing_safety_filters"
+  - "claiming_external_validation_without_source"
+data_sources:
+  - source: "asset_library"
+    provenance: "internally_curated"
+    trust_level: verified
+  - source: "player_feedback_db"
+    provenance: "anonymized_user_reports"
+    trust_level: community
+uncertainty_policy: >
+  Always state confidence level for generated content.
+  Flag elements that deviate from training distribution.
+  Provide alternative interpretations for ambiguous narrative elements.
+escalation_conditions:
+  - "Safety filter triggers on generated content"
+  - "Consistency checker flags critical contradiction"
+  - "Generated content resembles copyrighted material"
+  - "Confidence below 0.7 for any core game element"
+  - "User reports harm or offense"
+required_outputs:
+  - "confidence_estimate"
+  - "safety_filter_result"
+  - "consistency_check_result"
+  - "source_attribution_for_referenced_assets"
+  - "alternative_versions"
+independent_oracles:
+  - oracle: "human_designer_review"
+    check_frequency: "every_100_generations"
+  - oracle: "player_focus_group"
+    check_frequency: "monthly"
+audit:
+  immutable_trace: true
+  independent_review_required: true
+  log_retention_days: 90
+  evaluation_suite: "gmecp_benchmark_v2"
+  reward_hacking_tests:
+    - "adversarial_benign_content_injection"
+    - "metric_optimization_without_quality"
+    - "safety_filter_evasion_attempts"
+reversibility:
+  has_kill_switch: true
+  rollback_procedure: "Revert to last human-approved generation checkpoint"
+  max_irreversible_actions_per_session: 0
