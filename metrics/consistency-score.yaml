@@ -1,0 +1,34 @@
+id: MET-XANDRIA-005
+kind: metric
+name: "Cross-Module Consistency Score"
+underlying_objective: "Generated game elements remain internally consistent across narrative, mechanics, visuals, and audio"
+counter_metrics:
+  - name: "Forced Consistency Cost"
+    why_counter: "Enforcing consistency may reduce creative diversity"
+    measurement_method: "Measure entropy of generated outputs before and after consistency enforcement"
+  - name: "Edge Case Inconsistency Rate"
+    why_counter: "Rare combinations may escape consistency checks"
+    measurement_method: "Stochastic sampling of low-probability element combinations"
+  - name: "Human Perceived Inconsistency"
+    why_counter: "Formal consistency may not match human perception"
+    measurement_method: "Blind user survey: 'Does this feel coherent?'"
+gaming_paths:
+  - "Generating only safe, highly consistent but boring content"
+  - "Hiding inconsistencies in less-scrutinized elements (e.g., background lore)"
+  - "Using consistency rules as excuse to reject innovative but valid designs"
+  - "Overfitting to historical consistency patterns"
+off_dashboard_audit:
+  method: "Expert game designer review of 10 randomly selected generated games"
+  cadence: "weekly"
+  independent: true
+  human_review: required
+  delayed_outcome_check: optional
+expiry:
+  review_after_days: 30
+  randomization: true
+  retirement_condition: "When consistency can be verified by formal proof rather than heuristic"
+reflexivity_risk: "Consistency scoring may cause generators to avoid innovative combinations that humans would find coherent but the metric penalizes"
+status_vector:
+  semantic: 3
+  implementation: 4
+  operational: 2
