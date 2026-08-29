@@ -104,3 +104,31 @@ XANDRIA/
 
 ## License
 MIT
+
+---
+
+## 🔷 ARCF Governance
+
+XANDRIA integrates the [Alexandria Reality-Contact Framework](https://github.com/joshoshfield-a11y/alexandria-os) for empirical validation of all claims, metrics, and automated agents.
+
+### Metric Cards
+
+Every major subsystem maintains a YAML metric record with counter-metrics, gaming paths, off-dashboard audit plans, and expiry rules:
+
+| Metric | File | Status |
+|--------|------|--------|
+| Correlation Matrix Accuracy | [`metrics/correlation-matrix.yaml`](metrics/correlation-matrix.yaml) | Semantic: 4, Implementation: 5, Operational: 2 |
+| ATE Precision | [`metrics/ate-precision.yaml`](metrics/ate-precision.yaml) | Semantic: 5, Implementation: 4, Operational: 2 |
+| GMECP Pass Rate | [`metrics/gmecp-pass-rate.yaml`](metrics/gmecp-pass-rate.yaml) | Semantic: 4, Implementation: 4, Operational: 1 |
+| Aegis Safety Filter | [`metrics/aegis-safety.yaml`](metrics/aegis-safety.yaml) | Semantic: 4, Implementation: 3, Operational: 1 |
+| Cross-Module Consistency | [`metrics/consistency-score.yaml`](metrics/consistency-score.yaml) | Semantic: 3, Implementation: 4, Operational: 2 |
+
+### Agent Constitution
+
+The generation pipeline agent is registered with mandate, non-goals, authority bounds, and kill-switch:
+
+- [`agents/generation-pipeline.yaml`](agents/generation-pipeline.yaml)
+
+### Pre-Mortem Required
+
+Before any T2-T4 decision (reversible pilot through consequential automation), run the pre-mortem gate defined in `alexandria-os/runtime/pre-mortem-gate.yaml`.
