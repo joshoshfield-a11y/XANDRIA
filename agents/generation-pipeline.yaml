@@ -70,3 +70,7 @@ reversibility:
   has_kill_switch: true
   rollback_procedure: "Revert to last human-approved generation checkpoint"
   max_irreversible_actions_per_session: 0
+status_vector:
+  semantic: 4
+  implementation: 4
+  operational: 1
