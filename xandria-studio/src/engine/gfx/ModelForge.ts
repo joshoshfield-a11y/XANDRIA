@@ -11,6 +11,7 @@
  */
 import * as THREE from 'three';
 import { Rng } from '../core/Rng';
+import type { ForgeCustom } from '@spec';
 
 export type HeadStyle = 'visor' | 'horned' | 'helmet' | 'mohawk' | 'hood' | 'antenna' | 'crest';
 export type ArmorStyle = 'none' | 'pads' | 'plate' | 'bandolier';
@@ -35,18 +36,19 @@ const EXTRAS: Extra[] = ['cape', 'backpack', 'spikes', 'belt', 'skirt', 'pauldro
 export function forgeHumanoidPlan(
   seed: number,
   base: { skin?: string; shirt?: string; pants?: string; accent?: string; bulk?: number } = {},
+  hints?: ForgeCustom,
 ): HumanoidPlan {
   const rng = new Rng(seed ^ 0xf04e);
   const extras: Extra[] = [];
   const shuffled = [...EXTRAS].sort(() => rng.next() - 0.5);
   for (const e of shuffled) if (rng.next() < 0.28) extras.push(e);
   return {
-    height: rng.range(0.92, 1.22),
-    bulk: (base.bulk ?? 1) * rng.range(0.88, 1.18),
+    height: hints?.height ?? rng.range(0.92, 1.22),
+    bulk: (hints?.bulk ?? ((base.bulk ?? 1) * rng.range(0.88, 1.18))),
     headSize: rng.range(0.85, 1.3),
     legLen: rng.range(0.88, 1.12),
-    headStyle: rng.pick(HEAD_STYLES),
-    armor: rng.pick(ARMOR_STYLES),
+    headStyle: hints?.headStyle ?? rng.pick(HEAD_STYLES),
+    armor: hints?.armor ?? rng.pick(ARMOR_STYLES),
     extras,
     colors: {
       skin: base.skin ?? '#d8a077',
@@ -67,13 +69,13 @@ export interface VehiclePlan {
   nose: 'flat' | 'wedge' | 'splitter';
 }
 
-export function forgeVehiclePlan(seed: number): VehiclePlan {
+export function forgeVehiclePlan(seed: number, hints?: ForgeCustom): VehiclePlan {
   const rng = new Rng(seed ^ 0xca22);
   return {
     bodyLen: rng.range(3.2, 4.2),
     cabinLen: rng.range(1.3, 2.1),
     cabinZ: rng.range(-0.6, 0.2),
-    spoiler: rng.pick(['none', 'lip', 'wing', 'ducktail'] as const),
+    spoiler: hints?.vehicleSpoiler ?? rng.pick(['none', 'lip', 'wing', 'ducktail'] as const),
     scoop: rng.next() < 0.45,
     fenders: rng.next() < 0.5,
     nose: rng.pick(['flat', 'wedge', 'splitter'] as const),

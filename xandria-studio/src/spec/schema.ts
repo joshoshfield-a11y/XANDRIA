@@ -160,6 +160,59 @@ export interface AudioSpec {
   musicVolume: number; // 0..1
 }
 
+// ---------------- custom freeform layer ----------------
+/** Parametric overrides — the "describe anything" surface. Every field optional,
+ *  every value range-checked: infinite variety inside guaranteed-playable bounds. */
+export const QUALITY_MODES = ['retro', 'standard', 'high'] as const;
+export type QualityMode = (typeof QUALITY_MODES)[number];
+
+export const FLORA_IDS = ['pine', 'oak', 'palm', 'cactus', 'deadtree', 'mushroom', 'crystalflora'] as const;
+export type FloraId = (typeof FLORA_IDS)[number];
+
+export const HEAD_STYLES = ['visor', 'horned', 'helmet', 'mohawk', 'hood', 'antenna', 'crest'] as const;
+export const ARMOR_STYLES = ['none', 'pads', 'plate', 'bandolier'] as const;
+export const SPOILER_STYLES = ['none', 'lip', 'wing', 'ducktail'] as const;
+
+export interface BiomeCustom {
+  terrainFrequency?: number;  // 0.3..3 — noise frequency multiplier
+  heightScale?: number;       // 0..2.5 — terrain height multiplier
+  waterBias?: number;         // -5..8 — water level offset
+  floraMix?: Partial<Record<FloraId, number>>; // species → weight 0..10
+}
+export interface ForgeCustom {
+  headStyle?: (typeof HEAD_STYLES)[number];
+  armor?: (typeof ARMOR_STYLES)[number];
+  bulk?: number;              // 0.7..1.9
+  height?: number;            // 0.85..1.3
+  vehicleSpoiler?: (typeof SPOILER_STYLES)[number];
+}
+export interface EnemyMods {
+  size?: number;        // 0.5..2.5 scale multiplier
+  speed?: number;       // 0.3..3 movement multiplier
+  aggression?: number;  // 0..3 fire/chase rate multiplier
+  glow?: string;        // #rrggbb — eye/muzzle glow override
+}
+export interface WeaponMods {
+  projectileSpeed?: number; // 5..200 m/s
+  rateOfFire?: number;      // 0.5..20 shots/s multiplier base
+  spread?: number;          // 0..0.5 radians
+  pellets?: number;         // 1..12 (shotgun)
+  beamColor?: string;       // #rrggbb
+}
+export interface AssetPacks {
+  enabled: boolean;
+  /** name → GLB/GLTF URL (https only). Online-only; procedural fallback always. */
+  packs?: Record<string, string>;
+}
+export interface CustomSpec {
+  biome?: BiomeCustom;
+  forge?: ForgeCustom;
+  enemyMods?: EnemyMods;
+  weaponMods?: WeaponMods;
+  quality?: QualityMode;
+  assets?: AssetPacks;
+}
+
 export interface GameSpec {
   meta: MetaSpec;
   theme: ThemeSpec;
@@ -170,6 +223,7 @@ export interface GameSpec {
   pickups: PickupSpec;
   rules: RulesSpec;
   audio: AudioSpec;
+  custom?: CustomSpec;
 }
 
 // ---------------- defaults ----------------
@@ -345,6 +399,77 @@ export function validateSpec(spec: unknown): ValidationResult {
     if (!inEnum(spec.audio.mode, SCALE_MODES)) err('audio.mode', `must be one of ${SCALE_MODES.join('|')}`);
     if (!num(spec.audio.sfxVolume, 0, 1)) err('audio.sfxVolume', 'must be 0..1');
     if (!num(spec.audio.musicVolume, 0, 1)) err('audio.musicVolume', 'must be 0..1');
+  }
+
+  // custom freeform layer (optional; every present field range-checked)
+  const c = (spec as Record<string, unknown>).custom;
+  if (c !== undefined) {
+    if (!isObj(c)) err('custom', 'must be an object');
+    else {
+      const b = c.biome;
+      if (b !== undefined) {
+        if (!isObj(b)) err('custom.biome', 'must be an object');
+        else {
+          if (b.terrainFrequency !== undefined && !num(b.terrainFrequency, 0.3, 3)) err('custom.biome.terrainFrequency', 'must be 0.3..3');
+          if (b.heightScale !== undefined && !num(b.heightScale, 0, 2.5)) err('custom.biome.heightScale', 'must be 0..2.5');
+          if (b.waterBias !== undefined && !num(b.waterBias, -5, 8)) err('custom.biome.waterBias', 'must be -5..8');
+          if (b.floraMix !== undefined) {
+            if (!isObj(b.floraMix)) err('custom.biome.floraMix', 'must be an object');
+            else for (const [k, w] of Object.entries(b.floraMix)) {
+              if (!inEnum(k, FLORA_IDS)) err(`custom.biome.floraMix.${k}`, `unknown species (${FLORA_IDS.join('|')})`);
+              else if (!num(w, 0, 10)) err(`custom.biome.floraMix.${k}`, 'weight must be 0..10');
+            }
+          }
+        }
+      }
+      const f = c.forge;
+      if (f !== undefined) {
+        if (!isObj(f)) err('custom.forge', 'must be an object');
+        else {
+          if (f.headStyle !== undefined && !inEnum(f.headStyle, HEAD_STYLES)) err('custom.forge.headStyle', `must be one of ${HEAD_STYLES.join('|')}`);
+          if (f.armor !== undefined && !inEnum(f.armor, ARMOR_STYLES)) err('custom.forge.armor', `must be one of ${ARMOR_STYLES.join('|')}`);
+          if (f.bulk !== undefined && !num(f.bulk, 0.7, 1.9)) err('custom.forge.bulk', 'must be 0.7..1.9');
+          if (f.height !== undefined && !num(f.height, 0.85, 1.3)) err('custom.forge.height', 'must be 0.85..1.3');
+          if (f.vehicleSpoiler !== undefined && !inEnum(f.vehicleSpoiler, SPOILER_STYLES)) err('custom.forge.vehicleSpoiler', `must be one of ${SPOILER_STYLES.join('|')}`);
+        }
+      }
+      const em = c.enemyMods;
+      if (em !== undefined) {
+        if (!isObj(em)) err('custom.enemyMods', 'must be an object');
+        else {
+          if (em.size !== undefined && !num(em.size, 0.5, 2.5)) err('custom.enemyMods.size', 'must be 0.5..2.5');
+          if (em.speed !== undefined && !num(em.speed, 0.3, 3)) err('custom.enemyMods.speed', 'must be 0.3..3');
+          if (em.aggression !== undefined && !num(em.aggression, 0, 3)) err('custom.enemyMods.aggression', 'must be 0..3');
+          if (em.glow !== undefined && !isHex(em.glow)) err('custom.enemyMods.glow', 'must be #rrggbb');
+        }
+      }
+      const wm = c.weaponMods;
+      if (wm !== undefined) {
+        if (!isObj(wm)) err('custom.weaponMods', 'must be an object');
+        else {
+          if (wm.projectileSpeed !== undefined && !num(wm.projectileSpeed, 5, 200)) err('custom.weaponMods.projectileSpeed', 'must be 5..200');
+          if (wm.rateOfFire !== undefined && !num(wm.rateOfFire, 0.5, 20)) err('custom.weaponMods.rateOfFire', 'must be 0.5..20');
+          if (wm.spread !== undefined && !num(wm.spread, 0, 0.5)) err('custom.weaponMods.spread', 'must be 0..0.5');
+          if (wm.pellets !== undefined && (!Number.isInteger(wm.pellets) || (wm.pellets as number) < 1 || (wm.pellets as number) > 12)) err('custom.weaponMods.pellets', 'must be integer 1..12');
+          if (wm.beamColor !== undefined && !isHex(wm.beamColor)) err('custom.weaponMods.beamColor', 'must be #rrggbb');
+        }
+      }
+      if (c.quality !== undefined && !inEnum(c.quality, QUALITY_MODES)) err('custom.quality', `must be one of ${QUALITY_MODES.join('|')}`);
+      const as = c.assets;
+      if (as !== undefined) {
+        if (!isObj(as)) err('custom.assets', 'must be an object');
+        else {
+          if (typeof as.enabled !== 'boolean') err('custom.assets.enabled', 'must be boolean');
+          if (as.packs !== undefined) {
+            if (!isObj(as.packs)) err('custom.assets.packs', 'must be an object');
+            else for (const [k, u] of Object.entries(as.packs)) {
+              if (typeof u !== 'string' || !/^https:\/\/.+\.(glb|gltf)(\?.*)?$/i.test(u))
+                err(`custom.assets.packs.${k}`, 'must be an https URL ending in .glb/.gltf');
+            }
+          }
+        }
+      }
+    }
   }
 
   // coherence rules (genre sanity)

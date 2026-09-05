@@ -43,7 +43,7 @@ export class CharacterController {
     private events: ControllerEvents = {},
   ) {
     this.body = engine.physics.capsule(0.42, 1.7, [spawn.x, spawn.y + 1.2, spawn.z], { mass: 70 });
-    this.rig = makeHumanoid(engine.mats, colors, engine.spec.meta.seed);
+    this.rig = makeHumanoid(engine.mats, colors, engine.spec.meta.seed, engine.spec.custom?.forge);
     engine.scene.add(this.rig.group);
     engine.physics.addStepHandler((dt) => this.fixedUpdate(dt));
   }

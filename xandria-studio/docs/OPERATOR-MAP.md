@@ -41,12 +41,13 @@ operator family, and the module that now executes it.
 | 21 | IUDICIUM — rules, difficulty, timers | 8 | ✓ | `spec.rules`, `Objectives.ts`, `generator/generate.ts` |
 | 22 | ORDO — game states & flow | 7 | ✓ | `src/engine/Engine.ts` (loading/ready/playing/paused/won/lost) |
 | 23 | FACIES — HUD & UI | 8 | ✓ | `src/engine/game/HUD.ts` |
-| 24 | FABULA — naming & flavor text | 6 | ✓ | `src/generator/generate.ts` (+ optional `llm.ts`) |
+| 24 | FABULA — naming & flavor text | 6 | ✓ | `src/generator/generate.ts` (+ optional `llm.ts` flavor/architect modes) |
 | 25 | MACHINA — generation orchestration | 10 | ✓ | `src/generator/`, `src/runtime/main.ts`, `scripts/export.ts` |
-| 26 | VINCULUM — contracts & validation | 7 | ✓ | `src/spec/schema.ts` (validateSpec / normalizeSpec) |
+| 26 | VINCULUM — contracts & validation | 7 | ✓ | `src/spec/schema.ts` (validateSpec / normalizeSpec, incl. the `custom` freeform layer) |
+| 29 | PONTUS — bridges to external assets | 4 | | `src/engine/gfx/AssetBridge.ts` (opt-in online GLTF/GLB packs, procedural fallback) |
 | 27 | ITERUM — determinism & replay | 5 | ✓ | `Rng.ts`, `stableStringify`, Engine test-mode substeps |
 | 28 | EXIRE — export & packaging | 6 | ✓ | `scripts/export.ts`, `electron/`, vite single-file build |
-| | **Total** | **216** | | |
+| | **Total** | **220** (216 legacy + 4 bridge) | | |
 
 ## The semantic shift
 
@@ -57,6 +58,7 @@ operator family, and the module that now executes it.
 | Validation: none (hope) | Validation: `validateSpec`, 100% of generated specs |
 | Output: a demo scene | Output: a playable, winnable/losable, exportable game |
 | Determinism: none | Determinism: seeded end-to-end, bit-identical replays |
+| Creativity: fixed catalog | Creativity: `spec.custom` freeform layer (biomes, forge hints, enemy/weapon mods, quality, online asset packs) |
 
 Any prompt written in the old operator vocabulary still works: the generator's
 keyword tables recognize the operator names themselves, so lattice-era intents

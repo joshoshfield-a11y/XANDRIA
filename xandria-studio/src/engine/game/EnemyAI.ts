@@ -38,6 +38,8 @@ export class Enemy {
   private wanderTarget: THREE.Vector3 | null = null;
   private hoverPhase: number;
   private rng: Rng;
+  private speedMult = 1;
+  private aggroMult = 1;
 
   constructor(
     private engine: Engine,
@@ -47,29 +49,35 @@ export class Enemy {
     private events: EnemyEvents,
     seed: number,
   ) {
+    const mods = engine.spec.custom?.enemyMods;
+    this.speedMult = mods?.speed ?? 1;
+    this.aggroMult = mods?.aggression ?? 1;
+    const sz = mods?.size ?? 1;
     this.health = this.maxHealth = spec.health;
     this.home = spawn.clone();
     this.rng = new Rng(seed);
     this.hoverPhase = this.rng.range(0, Math.PI * 2);
 
     if (spec.kind === 'walker' || spec.kind === 'brute') {
-      const bulk = spec.kind === 'brute' ? 1.7 : 1;
+      const bulk = (spec.kind === 'brute' ? 1.7 : 1) * sz;
       this.body = engine.physics.capsule(0.42 * bulk, 1.7 * bulk, [spawn.x, spawn.y + 1.4 * bulk, spawn.z], {
         mass: 70 * bulk,
         group: GROUP.ENEMY,
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.ENEMY | GROUP.PROJECTILE,
       });
-      this.rig = makeHumanoid(engine.mats, { ...ENEMY_COLORS[spec.kind], skin: '#8f8a80', bulk }, seed);
+      this.rig = makeHumanoid(engine.mats, { ...ENEMY_COLORS[spec.kind], skin: '#8f8a80', bulk }, seed, engine.spec.custom?.forge);
+      if (sz !== 1) this.rig.group.scale.setScalar(sz);
       engine.scene.add(this.rig.group);
     } else if (spec.kind === 'drone' || spec.kind === 'flyer') {
-      this.body = engine.physics.sphere(0.5, [spawn.x, spawn.y + 2.5, spawn.z], {
+      this.body = engine.physics.sphere(0.5 * sz, [spawn.x, spawn.y + 2.5, spawn.z], {
         mass: 8,
         group: GROUP.ENEMY,
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE,
         material: engine.physics.slipperyMat,
       });
       this.body.linearDamping = 0.85;
-      this.rig = makeDrone(engine.mats, spec.kind === 'flyer' ? '#8a4a2e' : '#5e2e2e', '#ff4444', seed);
+      this.rig = makeDrone(engine.mats, spec.kind === 'flyer' ? '#8a4a2e' : '#5e2e2e', mods?.glow ?? '#ff4444', seed);
+      if (sz !== 1) this.rig.group.scale.setScalar(sz);
       engine.scene.add(this.rig.group);
     } else if (spec.kind === 'turret') {
       this.body = engine.physics.cylinder(0.65, 0.8, 1.4, [spawn.x, spawn.y + 0.7, spawn.z], {
@@ -77,9 +85,22 @@ export class Enemy {
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE,
       });
       this.turret = makeTurret(engine.mats);
+      if (sz !== 1) this.turret.group.scale.setScalar(sz);
       this.turret.group.position.set(spawn.x, spawn.y, spawn.z);
       engine.scene.add(this.turret.group);
     }
+    const glowRoot = this.rig?.group ?? this.turret?.group;
+    if (mods?.glow && glowRoot) this.applyGlow(mods.glow, glowRoot);
+  }
+
+  private applyGlow(color: string, root: THREE.Object3D) {
+    root.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        const mat = m.material as THREE.MeshStandardMaterial;
+        if (mat && 'emissive' in mat) { mat.emissive = new THREE.Color(color); mat.emissiveIntensity = 0.55; }
+      }
+    });
   }
 
   get position(): THREE.Vector3 {
@@ -123,7 +144,7 @@ export class Enemy {
     const dist = pos.distanceTo(playerPos);
     this.attackCd -= dt;
 
-    const aggroR = this.spec.kind === 'turret' ? 42 : 30;
+    const aggroR = (this.spec.kind === 'turret' ? 42 : 30) * this.aggroMult;
     const attackR = this.spec.kind === 'walker' || this.spec.kind === 'brute' ? 2.2 : 26;
 
     if (dist < attackR && this.attackCd <= 0) this.state = 'attack';
@@ -135,7 +156,7 @@ export class Enemy {
         const b = this.body!;
         if (this.state === 'chase' || this.state === 'attack') {
           const dir = playerPos.clone().sub(pos).setY(0).normalize();
-          const sp = this.spec.speed * (this.state === 'attack' ? 0.4 : 1);
+          const sp = this.spec.speed * this.speedMult * (this.state === 'attack' ? 0.4 : 1);
           b.velocity.x = dir.x * sp;
           b.velocity.z = dir.z * sp;
           this.rig!.group.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
@@ -150,8 +171,8 @@ export class Enemy {
             this.wanderTarget = this.home.clone().add(new THREE.Vector3(this.rng.range(-8, 8), 0, this.rng.range(-8, 8)));
           }
           const dir = this.wanderTarget.clone().sub(pos).setY(0).normalize();
-          b.velocity.x = dir.x * this.spec.speed * 0.3;
-          b.velocity.z = dir.z * this.spec.speed * 0.3;
+          b.velocity.x = dir.x * this.spec.speed * this.speedMult * 0.3;
+          b.velocity.z = dir.z * this.spec.speed * this.speedMult * 0.3;
         }
         this.rig!.group.position.set(pos.x, pos.y - 0.85 * (this.spec.kind === 'brute' ? 1.7 : 1), pos.z);
         const planar = Math.hypot(b.velocity.x, b.velocity.z);
@@ -171,7 +192,7 @@ export class Enemy {
           const orbit = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(Math.sin(t * 0.7 + this.hoverPhase) > 0 ? 1 : -1);
           dir.multiplyScalar(d > 10 ? 1 : -0.3).add(orbit.multiplyScalar(0.8)).normalize();
         }
-        const sp = this.spec.speed;
+        const sp = this.spec.speed * this.speedMult;
         b.velocity.x = dir.x * sp;
         b.velocity.z = dir.z * sp;
         b.velocity.y = (hoverY - pos.y) * 2.2;

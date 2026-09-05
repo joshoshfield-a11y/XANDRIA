@@ -11,6 +11,7 @@ export interface Projectile {
   life: number;
   damage: number;
   friendly: boolean;
+  color: string;
 }
 
 const POOL = 64;
@@ -18,10 +19,12 @@ const POOL = 64;
 export class Projectiles {
   pool: Projectile[] = [];
   onHit: (p: Projectile, hitBody: CANNON.Body | null, point: THREE.Vector3) => void = () => {};
+  private matCache = new Map<string, THREE.Material>();
 
   constructor(private engine: Engine, private color = '#7af7ff') {
     const geo = new THREE.SphereGeometry(0.14, 6, 6);
     const mat = engine.mats.glow(color, 2.5);
+    this.matCache.set(color, mat);
     for (let i = 0; i < POOL; i++) {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.visible = false;
@@ -32,14 +35,22 @@ export class Projectiles {
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.ENEMY,
       });
       body.allowSleep = false;
-      this.pool.push({ active: false, mesh, body, life: 0, damage: 10, friendly: true });
+      this.pool.push({ active: false, mesh, body, life: 0, damage: 10, friendly: true, color });
     }
   }
 
-  fire(from: THREE.Vector3, dir: THREE.Vector3, opts: { speed?: number; damage?: number; friendly?: boolean; life?: number } = {}) {
+  fire(from: THREE.Vector3, dir: THREE.Vector3, opts: { speed?: number; damage?: number; friendly?: boolean; life?: number; color?: string } = {}) {
     const p = this.pool.find((x) => !x.active);
     if (!p) return;
     p.active = true;
+    p.color = opts.color ?? this.color;
+    if (p.color !== this.color) {
+      let m = this.matCache.get(p.color);
+      if (!m) { m = this.engine.mats.glow(p.color, 2.5); this.matCache.set(p.color, m); }
+      p.mesh.material = m;
+    } else {
+      p.mesh.material = this.matCache.get(this.color)!;
+    }
     p.life = opts.life ?? 2.2;
     p.damage = opts.damage ?? 10;
     p.friendly = opts.friendly ?? true;
@@ -57,7 +68,7 @@ export class Projectiles {
       const pos = toV3(p.body.position);
       if (p.life <= 0 || pos.y < -80) { this.kill(p); continue; }
       // trail
-      if (this.engine.frame % 2 === 0) this.engine.particles.trail(pos, this.color);
+      if (this.engine.frame % 2 === 0) this.engine.particles.trail(pos, p.color);
       p.mesh.position.copy(pos);
     }
     // collision via contact events — cheap scan: raycast along motion each frame

@@ -188,12 +188,35 @@ file with **network disabled** to prove offline playability.
 
 ## 7. Where the LLM fits (and doesn't)
 
-`src/generator/llm.ts` accepts any OpenAI-compatible endpoint. It may only
-suggest: display name, description, palette accents, mood, music tempo. Its
-output passes through `normalizeSpec` + `validateSpec` like everything else —
-if it hallucinates an invalid value, that field is dropped silently and the
-deterministic value stands. Remove the LLM entirely and every feature of the
-engine still works.
+`src/generator/llm.ts` accepts any OpenAI-compatible endpoint, in two modes:
+
+- **flavor** — the LLM may only suggest display name, description, palette
+  accents, mood, music tempo.
+- **architect** — the LLM proposes a full partial spec: theme, world, enemies,
+  weapons, and the freeform `custom` layer (biome tuning, forge hints, enemy /
+  weapon mods, quality, asset packs). This is the "describe it → make it" path.
+
+Either way, output is merged onto the deterministic base and passes through
+`validateSpec` + `normalizeSpec` like everything else. Architect mode falls
+back architect → flavor → deterministic on any failure. Remove the LLM
+entirely and every feature of the engine still works.
+
+## 7b. The custom layer (spec.custom)
+
+`custom` is the freeform creativity layer of the GameSpec contract:
+
+- `quality`: `retro` (pixelated PS2 look), `standard` (clean, no pixelation),
+  `high` (no retro pass, full device pixel ratio).
+- `biome`: terrain frequency/height multipliers, water level bias, and
+  `floraMix` — arbitrary weighted mixes of all seven flora species, decoupled
+  from the environment preset.
+- `forge`: humanoid/vehicle design hints (head style, armor, bulk, height,
+  spoiler) that override ModelForge's seeded rolls.
+- `enemyMods`: size/speed/aggression multipliers and glow color for all enemies.
+- `weaponMods`: projectile speed, fire rate, spread, pellet count, beam color.
+- `assets`: opt-in **online** GLTF/GLB pack URLs, loaded by
+  `src/engine/gfx/AssetBridge.ts` with hard timeouts and scattered as hero
+  props. Additive only — any failure keeps the procedural world.
 
 ## 8. Performance notes
 

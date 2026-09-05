@@ -24,6 +24,9 @@ export class Terrain {
     this.cell = this.size / (this.res - 1);
     this.maxHeight = t.maxHeight;
     const noise = new Noise2D(spec.meta.seed);
+    const bio = spec.custom?.biome;
+    const freq = bio?.terrainFrequency ?? 1;
+    const hscale = bio?.heightScale ?? 1;
     const h: number[][] = [];
     const half = this.size / 2;
     const flat = opts.flatCenters ?? [new THREE.Vector3(0, 0, 0)];
@@ -34,15 +37,16 @@ export class Terrain {
         const x = -half + i * this.cell, z = -half + j * this.cell;
         let y = 0;
         const nx = x / this.size, nz = z / this.size;
-        const base = noise.fbm(nx * 3 + 10, nz * 3 + 10, 5, 2, 0.5);
+        const base = noise.fbm(nx * 3 * freq + 10, nz * 3 * freq + 10, 5, 2, 0.5);
         switch (t.type) {
           case 'flat': y = base * 0.6; break;
           case 'hills': y = (base + 0.3) * t.maxHeight * (0.4 + t.roughness * 0.6); break;
           case 'mountains': y = Math.pow(Math.abs(base) + 0.15, 1.6) * t.maxHeight * 1.4 * (0.5 + t.roughness); break;
-          case 'canyon': { const r = Math.abs(noise.get(nx * 2, nz * 2 + 5)); y = (r < 0.18 ? -0.6 : 0.8 + base * 0.5) * t.maxHeight; break; }
+          case 'canyon': { const r = Math.abs(noise.get(nx * 2 * freq, nz * 2 * freq + 5)); y = (r < 0.18 ? -0.6 : 0.8 + base * 0.5) * t.maxHeight; break; }
           case 'islands': { const d = Math.hypot(nx, nz) * 2; y = (base + 0.35 - d * d * 0.9) * t.maxHeight; break; }
           case 'platforms': y = Math.round((base + 1) * 3) * (t.maxHeight / 6); break;
         }
+        y *= hscale;
         // edge falloff: rim rises (or drops) for boundary
         const edge = Math.max(Math.abs(nx), Math.abs(nz)) * 2; // 0..1
         if (spec.world.boundary === 'cliffs') y -= Math.pow(Math.max(0, edge - 0.85) / 0.15, 2) * 40;
@@ -116,7 +120,7 @@ export class Terrain {
       const wm = new THREE.MeshStandardMaterial({ color: spec.theme.environment === 'volcanic' ? '#ff5a1f' : '#2a6fb0', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3, emissive: spec.theme.environment === 'volcanic' ? '#ff3300' : '#000000', emissiveIntensity: 0.8 });
       this.water = new THREE.Mesh(new THREE.PlaneGeometry(this.size * 3, this.size * 3), wm);
       this.water.rotation.x = -Math.PI / 2;
-      this.water.position.y = t.waterLevel;
+      this.water.position.y = t.waterLevel + (bio?.waterBias ?? 0);
       scene.add(this.water);
     }
   }

@@ -114,22 +114,30 @@ export class PlayerAvatar {
   shoot(dir: THREE.Vector3, muzzle?: THREE.Vector3): boolean {
     if (!this.projectiles || this.fireCd > 0 || this.ammo <= 0) return false;
     const w = this.spec.player.weapon;
+    const wm = this.spec.custom?.weaponMods;
+    const spd = wm?.projectileSpeed ?? 0;
+    const spdMult = spd > 0 ? spd / 42 : 1; // normalized against base blaster-ish speed
+    const rof = wm?.rateOfFire ?? 1;
+    const extraSpread = wm?.spread ?? 0;
+    const beam = wm?.beamColor ? { color: wm.beamColor } : {};
     const from = muzzle ?? this.ctrl.position.clone().add(new THREE.Vector3(0, 1.3, 0));
     if (w === 'shotgun') {
-      this.fireCd = 0.7;
-      for (let i = 0; i < 5; i++) {
+      this.fireCd = 0.7 / rof;
+      const pellets = wm?.pellets ?? 5;
+      for (let i = 0; i < pellets; i++) {
         const spread = dir.clone();
-        spread.x += (Math.random() - 0.5) * 0.12;
-        spread.y += (Math.random() - 0.5) * 0.12;
-        spread.z += (Math.random() - 0.5) * 0.12;
-        this.projectiles.fire(from, spread.normalize(), { speed: 42, damage: 9, friendly: true, life: 0.8 });
+        const amt = 0.12 + extraSpread;
+        spread.x += (Math.random() - 0.5) * amt;
+        spread.y += (Math.random() - 0.5) * amt;
+        spread.z += (Math.random() - 0.5) * amt;
+        this.projectiles.fire(from, spread.normalize(), { speed: 42 * spdMult, damage: 9, friendly: true, life: 0.8, ...beam });
       }
     } else if (w === 'rifle') {
-      this.fireCd = 0.12;
-      this.projectiles.fire(from, dir, { speed: 55, damage: 8, friendly: true });
+      this.fireCd = 0.12 / rof;
+      this.projectiles.fire(from, dir, { speed: 55 * spdMult, damage: 8, friendly: true, ...beam });
     } else {
-      this.fireCd = 0.34;
-      this.projectiles.fire(from, dir, { speed: 38, damage: 16, friendly: true });
+      this.fireCd = 0.34 / rof;
+      this.projectiles.fire(from, dir, { speed: 38 * spdMult, damage: 16, friendly: true, ...beam });
     }
     if (this.ammo !== Infinity) this.ammo--;
     this.engine.audio.play(w === 'blaster' ? 'laser' : 'shoot');

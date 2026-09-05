@@ -10,17 +10,17 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import type { GameSpec } from '@spec';
 
 const RetroShader = {
-  uniforms: { tDiffuse: { value: null }, pixelSize: { value: 2.0 }, resolution: { value: new THREE.Vector2(1, 1) }, vignette: { value: 0.35 } },
+  uniforms: { tDiffuse: { value: null }, pixelSize: { value: 2.0 }, resolution: { value: new THREE.Vector2(1, 1) }, vignette: { value: 0.35 }, quantize: { value: 24.0 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
-    uniform sampler2D tDiffuse; uniform float pixelSize; uniform vec2 resolution; uniform float vignette;
+    uniform sampler2D tDiffuse; uniform float pixelSize; uniform vec2 resolution; uniform float vignette; uniform float quantize;
     varying vec2 vUv;
     void main(){
       vec2 d = pixelSize / resolution;
       vec2 uv = pixelSize > 0.0 ? floor(vUv / d + 0.5) * d : vUv;
       vec4 col = texture2D(tDiffuse, uv);
-      // slight color quantization for the retro feel
-      col.rgb = floor(col.rgb * 24.0 + 0.5) / 24.0;
+      // slight color quantization for the retro feel (quantize <= 1.0 disables it)
+      if (quantize > 1.0) col.rgb = floor(col.rgb * quantize + 0.5) / quantize;
       float dist = distance(vUv, vec2(0.5));
       col.rgb *= smoothstep(0.95, 0.45, dist * vignette * 2.0);
       gl_FragColor = col;
@@ -38,15 +38,24 @@ export class PostFX {
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
+    const quality = spec.custom?.quality ?? 'retro';
     try {
       this.composer = new EffectComposer(renderer);
       this.composer.addPass(new RenderPass(scene, camera));
       if (spec.theme.bloom) {
-        const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.45, 0.6, 0.82);
+        const bloom = new UnrealBloomPass(
+          new THREE.Vector2(innerWidth, innerHeight),
+          quality === 'high' ? 0.35 : 0.45, 0.6, 0.82,
+        );
         this.composer.addPass(bloom);
       }
-      if (spec.theme.retroFilter) {
+      if (spec.theme.retroFilter && quality !== 'high') {
         this.retroPass = new ShaderPass(RetroShader);
+        if (quality === 'standard') {
+          this.retroPass.uniforms.pixelSize.value = 0;      // no pixelation
+          this.retroPass.uniforms.quantize.value = 0;       // no color quantization
+          this.retroPass.uniforms.vignette.value = 0.25;
+        }
         this.composer.addPass(this.retroPass);
         this.resize(innerWidth, innerHeight);
       }

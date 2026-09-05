@@ -43,7 +43,7 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   const aiColors = ['#3f6fd8', '#e8a13c', '#4fbf67', '#c94fd8', '#e1e4e8'];
   const aiCount = Math.max(1, spec.enemies.find((e) => e.kind === 'racer')?.count ?? 3);
   for (let i = 0; i < aiCount; i++) {
-    const c = makeCar(engine.mats, aiColors[i % aiColors.length], spec.meta.seed + i * 31);
+    const c = makeCar(engine.mats, aiColors[i % aiColors.length], spec.meta.seed + i * 31, spec.custom?.forge);
     c.group.children.forEach((ch) => { ch.position.y -= 0.35; });
     scene.add(c.group);
     // stagger behind start

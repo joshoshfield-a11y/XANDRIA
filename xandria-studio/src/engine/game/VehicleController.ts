@@ -58,7 +58,7 @@ export class VehicleController {
     }
     this.vehicle.addToWorld(physics.world);
 
-    const car = makeCar(engine.mats, color, engine.spec.meta.seed);
+    const car = makeCar(engine.mats, color, engine.spec.meta.seed, engine.spec.custom?.forge);
     this.mesh = car.group;
     this.wheels = car.wheels;
     // wheels authored with origin at ground; shift mesh so origin ≈ chassis center

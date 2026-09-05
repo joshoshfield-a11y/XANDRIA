@@ -16,6 +16,7 @@ import { Particles } from './gfx/Particles';
 import { PostFX } from './gfx/PostFX';
 import { Terrain } from './world/Terrain';
 import { HUD } from './game/HUD';
+import { AssetBridge } from './gfx/AssetBridge';
 
 export type EngineState = 'loading' | 'ready' | 'playing' | 'paused' | 'won' | 'lost';
 
@@ -42,6 +43,7 @@ export class Engine {
   readonly postfx: PostFX;
   sky!: SkyRig;
   terrain!: Terrain;
+  assetBridge: AssetBridge;
   readonly container: HTMLElement;
   readonly testMode: boolean;
 
@@ -63,12 +65,16 @@ export class Engine {
     this.testMode = opts.testMode ?? new URLSearchParams(location.search).has('test');
     this.rng = new Rng(spec.meta.seed);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: !spec.theme.retroFilter, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({ antialias: !(spec.theme.retroFilter && (spec.custom?.quality ?? 'retro') === 'retro'), powerPreference: 'high-performance' });
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    const pr = spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66 : Math.min(devicePixelRatio, 2);
+    const quality = spec.custom?.quality ?? 'retro';
+    const pr = quality === 'high' ? Math.min(devicePixelRatio, 2)
+      : quality === 'standard' ? Math.min(devicePixelRatio, 1.5)
+      : spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
+      : Math.min(devicePixelRatio, 2);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(container.clientWidth || innerWidth, container.clientHeight || innerHeight);
     container.appendChild(this.renderer.domElement);
@@ -98,6 +104,16 @@ export class Engine {
 
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(container);
+
+    // opt-in online asset packs — additive only; failures keep the procedural world
+    this.assetBridge = new AssetBridge(spec, this.scene, this.terrain);
+    if (this.assetBridge.enabled && !this.testMode) {
+      this.assetBridge.load().then((r) => {
+        if (r.loaded.length) console.info(`[xandria] asset packs loaded: ${r.loaded.join(', ')}`);
+        if (r.failed.length) console.warn(`[xandria] asset packs failed (procedural fallback kept): ${r.failed.join(', ')}`);
+      });
+    }
+
     this.state = 'ready';
   }
 
@@ -180,6 +196,7 @@ export class Engine {
     this.resizeObs.disconnect();
     this.input.dispose();
     this.audio.dispose();
+    this.assetBridge.dispose();
     this.postfx.dispose();
     this.renderer.dispose();
   }

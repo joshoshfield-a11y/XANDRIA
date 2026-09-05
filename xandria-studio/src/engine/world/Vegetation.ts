@@ -180,6 +180,15 @@ interface VInstance { x: number; y: number; z: number; rot: number; scale: numbe
 
 const LOD_DIST = [55, 130]; // high < 55m, medium < 130m, else low
 
+/** Build a weighted species list from a custom flora mix (weights 0..10). */
+export function speciesFromMix(mix: Partial<Record<SpeciesId, number>>): SpeciesId[] {
+  const out: SpeciesId[] = [];
+  for (const [sp, w] of Object.entries(mix) as [SpeciesId, number][]) {
+    for (let i = 0; i < Math.max(0, Math.round(w)); i++) out.push(sp);
+  }
+  return out;
+}
+
 export class Vegetation {
   private tiers: { mesh: THREE.InstancedMesh; sp: SpeciesId; lod: 0 | 1 | 2; foliage: boolean }[] = [];
   private instances: VInstance[] = [];
@@ -191,7 +200,9 @@ export class Vegetation {
   constructor(spec: GameSpec, terrain: Terrain, mats: MaterialLibrary, scene: THREE.Scene, opts: VegetationOptions) {
     if (opts.count <= 0) return;
     const rng = new Rng(spec.meta.seed ^ 0xbe09);
-    const species = speciesFor(spec.theme.environment).filter((s) => {
+    const mix = spec.custom?.biome?.floraMix;
+    const mixed = mix ? speciesFromMix(mix) : [];
+    const species = (mixed.length > 0 ? mixed : speciesFor(spec.theme.environment)).filter((s) => {
       // crystalflora doubles as crystal scatter; respect that toggle
       if (s === 'crystalflora') return spec.world.scatter.crystals;
       return true;

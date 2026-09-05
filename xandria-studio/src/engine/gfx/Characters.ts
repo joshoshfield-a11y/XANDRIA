@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import type { MaterialLibrary } from './Materials';
 import { forgeHumanoidPlan, forgeDronePlan, forgeVehiclePlan, type HumanoidPlan } from './ModelForge';
+import type { ForgeCustom } from '@spec';
 
 export interface CharacterRig {
   group: THREE.Group;
@@ -113,8 +114,8 @@ function dressTorso(torso: THREE.Mesh, group: THREE.Group, plan: HumanoidPlan, a
 }
 
 /** Forged chunky humanoid, ~1.8m tall before plan scaling. Origin at feet. */
-export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shirt?: string; pants?: string; accent?: string; bulk?: number }, seed = 1): CharacterRig {
-  const plan = forgeHumanoidPlan(seed, colors);
+export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shirt?: string; pants?: string; accent?: string; bulk?: number }, seed = 1, hints?: ForgeCustom): CharacterRig {
+  const plan = forgeHumanoidPlan(seed, colors, hints);
   const { height, bulk, legLen } = plan;
   const skin = mats.flat(plan.colors.skin, { roughness: 0.8 });
   const shirt = mats.flat(plan.colors.shirt, { roughness: 0.85 });
@@ -255,8 +256,8 @@ export function makeTurret(mats: MaterialLibrary, color = '#5a6270', accent = '#
 }
 
 /** Forged low-poly car: silhouette varies by seed. Origin at chassis center. */
-export function makeCar(mats: MaterialLibrary, color: string, seed = 1): { group: THREE.Group; wheels: THREE.Mesh[]; bodyMesh: THREE.Mesh } {
-  const plan = forgeVehiclePlan(seed);
+export function makeCar(mats: MaterialLibrary, color: string, seed = 1, hints?: ForgeCustom): { group: THREE.Group; wheels: THREE.Mesh[]; bodyMesh: THREE.Mesh } {
+  const plan = forgeVehiclePlan(seed, hints);
   const group = new THREE.Group();
   const paint = mats.flat(color, { roughness: 0.35, metalness: 0.5 });
   const dark = mats.flat('#1c1f24', { roughness: 0.6 });
