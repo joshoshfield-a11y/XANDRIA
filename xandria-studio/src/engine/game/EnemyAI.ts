@@ -69,7 +69,7 @@ export class Enemy {
         material: engine.physics.slipperyMat,
       });
       this.body.linearDamping = 0.85;
-      this.rig = makeDrone(engine.mats, spec.kind === 'flyer' ? '#8a4a2e' : '#5e2e2e');
+      this.rig = makeDrone(engine.mats, spec.kind === 'flyer' ? '#8a4a2e' : '#5e2e2e', '#ff4444', seed);
       engine.scene.add(this.rig.group);
     } else if (spec.kind === 'turret') {
       this.body = engine.physics.cylinder(0.65, 0.8, 1.4, [spawn.x, spawn.y + 0.7, spawn.z], {

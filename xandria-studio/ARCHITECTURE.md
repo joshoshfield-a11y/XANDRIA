@@ -57,13 +57,21 @@ xandria-studio/
 │   │   │   └── Physics.ts   cannon-es world, materials, raycast helpers
 │   │   ├── gfx/
 │   │   │   ├── Materials.ts palette-driven MeshStandardMaterial library
-│   │   │   ├── Sky.ts       gradient dome, sun/moon, stars, fog by time/weather
+│   │   │   ├── Sky.ts       day/dusk: physical Preetham atmosphere; night: gradient
+│   │   │   │                dome + stars; fog by time/weather
+│   │   │   ├── Atmosphere.ts  OP-22 port: turbidity/Rayleigh/Mie from spec
+│   │   │   ├── ModelForge.ts  deterministic parametric model synthesis — forged
+│   │   │   │                body plans, headgear, armor, vehicle/drone variants
 │   │   │   ├── PostFX.ts    bloom + retro shader (pixelate, quantize, vignette)
-│   │   │   ├── Characters.ts procedural box-rig humanoids, drones, turrets, cars
+│   │   │   ├── Characters.ts forged rigs (humanoids, drones, turrets, cars) with
+│   │   │   │                the shared CharacterRig animation contract
 │   │   │   └── Particles.ts pooled 4096-point particles + weather systems
 │   │   ├── world/
 │   │   │   ├── Terrain.ts   heightfield from spec.world.terrain, water plane
-│   │   │   ├── Scatter.ts   instanced trees/rocks/crystals/ruins + colliders
+│   │   │   ├── Scatter.ts   instanced rocks/crystals/ruins + colliders
+│   │   │   ├── Vegetation.ts  OP-08 port: species flora (pine/oak/palm/cactus/
+│   │   │   │                deadtree/mushroom/crystalflora), 3 LOD tiers
+│   │   │   │                rebucketed by camera distance, GPU wind sway
 │   │   │   └── Structures.ts city blocks, arena cover, platforms, race track
 │   │   ├── game/
 │   │   │   ├── Cameras.ts         third-person / first-person / top-down /

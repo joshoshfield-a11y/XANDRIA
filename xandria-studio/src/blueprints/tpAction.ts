@@ -25,6 +25,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   scene.add(structures.group);
   const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: [{ x: 0, z: 0, r: 12 }],
+    engine,
   });
 
   // --- combat systems

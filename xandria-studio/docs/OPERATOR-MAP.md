@@ -20,11 +20,11 @@ operator family, and the module that now executes it.
 |---|---------------|-----------|---------|------------------------|
 | 1 | GENESIS — world seeding & creation | 12 | ✓ | `src/generator/generate.ts`, `src/engine/core/Rng.ts` |
 | 2 | TERRA — terrain shaping | 10 | ✓ | `src/engine/world/Terrain.ts` |
-| 3 | CAELUM — sky, time of day, weather | 9 | ✓ | `src/engine/gfx/Sky.ts`, `Particles.ts` (weather) |
+| 3 | CAELUM — sky, time of day, weather | 9 | ✓ | `src/engine/gfx/Sky.ts` + `Atmosphere.ts` (physical Preetham sky), `Particles.ts` (weather) |
 | 4 | MATERIA — palettes & materials | 8 | ✓ | `src/engine/gfx/Materials.ts`, `spec.theme.palette` |
 | 5 | STRUCTURA — buildings, arenas, tracks | 11 | ✓ | `src/engine/world/Structures.ts` |
-| 6 | FLORA — scatter & props | 7 | ✓ | `src/engine/world/Scatter.ts` |
-| 7 | CORPUS — character bodies | 9 | ✓ | `src/engine/gfx/Characters.ts` |
+| 6 | FLORA — scatter & props | 7 | ✓ | `src/engine/world/Vegetation.ts` (species/LOD/wind flora), `Scatter.ts` |
+| 7 | CORPUS — character bodies | 9 | ✓ | `src/engine/gfx/ModelForge.ts` + `Characters.ts` (seeded forged rigs) |
 | 8 | MOTUS — locomotion & movement | 12 | ✓ | `src/engine/game/CharacterController.ts` |
 | 9 | VEHICULUM — vehicles & driving | 8 | ✓ | `src/engine/game/VehicleController.ts` |
 | 10 | VISUS — cameras & framing | 8 | ✓ | `src/engine/game/Cameras.ts` |

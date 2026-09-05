@@ -8,17 +8,24 @@ import { Rng } from '../core/Rng';
 import type { Terrain } from './Terrain';
 import type { MaterialLibrary } from '../gfx/Materials';
 import { GROUP, type Physics } from '../core/Physics';
+import { Vegetation } from './Vegetation';
+import type { Engine } from '../Engine';
 
 export interface ScatterOptions {
   exclusion?: Array<{ x: number; z: number; r: number }>;
   maxSlope?: number;
+  /** when provided, vegetation LOD + wind updates register on the engine loop */
+  engine?: Engine;
 }
 
 interface InstanceSet { mesh: THREE.InstancedMesh; positions: THREE.Vector3[]; radius: number }
 
+const _camTmp = new THREE.Vector3();
+
 export class Scatter {
   sets: InstanceSet[] = [];
   colliders: { x: number; z: number; r: number }[] = [];
+  vegetation?: Vegetation;
 
   constructor(spec: GameSpec, terrain: Terrain, mats: MaterialLibrary, physics: Physics, scene: THREE.Scene, opts: ScatterOptions = {}) {
     const rng = new Rng(spec.meta.seed ^ 0x5ca7);
@@ -73,43 +80,29 @@ export class Scatter {
     };
 
     const density = sc.density;
-    const treeCount = sc.trees ? Math.round((env === 'forest' || env === 'jungle' ? 140 : 40) * density) : 0;
+    // trees scale with world area: ~1 per 90m² in forests, sparser elsewhere
+    const area = terrain.size * terrain.size;
+    const perTree = env === 'forest' || env === 'jungle' ? 90
+      : env === 'city' || env === 'neon-city' || env === 'arena' ? 6000 : 650;
+    const treeCount = sc.trees ? Math.min(2200, Math.round((area / perTree) * density)) : 0;
     const rockCount = sc.rocks ? Math.round(70 * density) : 0;
     const crysCount = sc.crystals ? Math.round(50 * density) : 0;
     const ruinCount = sc.ruins ? Math.round(24 * density) : 0;
 
-    // trees: trunk + cone foliage merged look via two instanced meshes at same transforms
+    // trees: full vegetation system — species per environment, LOD tiers, GPU wind
     if (treeCount > 0) {
-      const trunkGeo = new THREE.CylinderGeometry(0.25, 0.4, 2.4, 5);
-      const folGeo = env === 'arctic' || env === 'forest' || env === 'jungle'
-        ? new THREE.ConeGeometry(1.6, 4.2, 6)
-        : new THREE.ConeGeometry(1.3, 3.2, 5);
-      const trunkMat = mats.standard('wood', '#5a4230', { roughness: 0.95 });
-      const folMat = mats.flat(
-        env === 'arctic' ? '#dfe9f0' : spec.theme.palette.primary,
-        { roughness: 0.9 },
-      );
-      const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treeCount);
-      const fols = new THREE.InstancedMesh(folGeo, folMat, treeCount);
-      trunks.castShadow = fols.castShadow = true;
-      const m4 = new THREE.Matrix4(); const q = new THREE.Quaternion();
-      let placed = 0;
-      for (let i = 0; i < treeCount; i++) {
-        const p = tryPlace(0.8);
-        if (!p) continue;
-        const s = rng.range(0.8, 1.9);
-        q.setFromEuler(new THREE.Euler(0, rng.range(0, Math.PI * 2), 0));
-        m4.compose(new THREE.Vector3(p.x, p.y + 1.2 * s, p.z), q, new THREE.Vector3(s, s, s));
-        trunks.setMatrixAt(placed, m4);
-        m4.compose(new THREE.Vector3(p.x, p.y + (2.4 + 2.1) * s, p.z), q, new THREE.Vector3(s, s, s));
-        fols.setMatrixAt(placed, m4);
-        placed++;
-        this.colliders.push({ x: p.x, z: p.z, r: 0.55 * s });
-        if (placed < 80) physics.cylinder(0.4 * s, 0.45 * s, 2.4 * s, [p.x, p.y + 1.2 * s, p.z], { group: GROUP.WORLD });
-      }
-      trunks.count = fols.count = placed;
-      trunks.instanceMatrix.needsUpdate = fols.instanceMatrix.needsUpdate = true;
-      scene.add(trunks, fols);
+      this.vegetation = new Vegetation(spec, terrain, mats, scene, {
+        exclusion: opts.exclusion,
+        maxSlope,
+        colliders: this.colliders,
+        physics,
+        count: treeCount,
+      });
+      opts.engine?.onUpdate((dt) => {
+        if (this.vegetation) {
+          this.vegetation.update(dt, opts.engine!.camera.getWorldPosition(_camTmp));
+        }
+      });
     }
 
     // rocks

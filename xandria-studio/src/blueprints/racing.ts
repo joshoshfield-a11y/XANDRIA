@@ -33,7 +33,7 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
 
   // scatter away from the track
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
-  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion });
+  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion, engine });
 
   // player vehicle at start line, facing along track
   const car = new VehicleController(engine, track.startPos.clone().add(new THREE.Vector3(0, 1, 0)), track.startHeading, spec.theme.palette.primary);

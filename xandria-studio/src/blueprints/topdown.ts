@@ -25,6 +25,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   scene.add(structures.group);
   new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: [{ x: 0, z: 0, r: arenaR + 6 }],
+    engine,
   });
 
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);

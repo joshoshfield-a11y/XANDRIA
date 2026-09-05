@@ -1,12 +1,15 @@
 /** Sky dome (gradient shader), sun/moon, hemisphere + directional light with shadows, fog, stars. */
 import * as THREE from 'three';
 import type { GameSpec } from '@spec';
+import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
 
 export interface SkyRig {
   group: THREE.Group;
   sun: THREE.DirectionalLight;
   hemi: THREE.HemisphereLight;
   ambient: THREE.AmbientLight;
+  /** recommended tone-mapping exposure (physical sky is HDR-bright) */
+  exposure: number;
   update(dt: number, target: THREE.Vector3): void;
   dispose(): void;
 }
@@ -21,7 +24,18 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   if (night) { top.multiplyScalar(0.25); bottom.multiplyScalar(0.35); }
   if (dusk) { bottom.lerp(new THREE.Color('#ff9a5c'), 0.45); top.multiplyScalar(0.7); }
 
-  const skyMat = new THREE.ShaderMaterial({
+  // Dome: physical Preetham atmosphere by day/dusk, stylized gradient+stars at night
+  let dome: THREE.Mesh;
+  let skyMat: THREE.ShaderMaterial | null = null;
+  let atmo: AtmosphereRig | null = null;
+  let sunDirPhys: THREE.Vector3 | null = null;
+  if (!night) {
+    atmo = createAtmosphere(spec);
+    dome = atmo.dome;
+    sunDirPhys = atmo.sunDir;
+    group.add(dome);
+  } else {
+    skyMat = new THREE.ShaderMaterial({
     uniforms: { top: { value: top }, bottom: { value: bottom }, sunDir: { value: new THREE.Vector3(0.3, 0.5, 0.2).normalize() }, sunColor: { value: new THREE.Color(night ? '#c8d8ff' : '#fff2c0') }, time: { value: 0 }, stars: { value: night ? 1 : 0 } },
     vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
     fragmentShader: `
@@ -38,9 +52,10 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
       }`,
     side: THREE.BackSide, depthWrite: false, fog: false,
   });
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(900, 24, 16), skyMat);
-  dome.frustumCulled = false;
-  group.add(dome);
+    dome = new THREE.Mesh(new THREE.SphereGeometry(900, 24, 16), skyMat);
+    dome.frustumCulled = false;
+    group.add(dome);
+  }
 
   // Clouds: a few flat translucent discs drifting
   const cloudGroup = new THREE.Group();
@@ -61,7 +76,7 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   // Lighting
   const sunColor = night ? new THREE.Color('#7f8fc0') : dusk ? new THREE.Color('#ffb070') : new THREE.Color('#fff4e0');
   const sun = new THREE.DirectionalLight(sunColor, night ? 0.5 : dusk ? 1.6 : 2.2);
-  const sunDir = new THREE.Vector3(0.45, dusk ? 0.35 : 0.75, 0.35).normalize();
+  const sunDir = sunDirPhys ? sunDirPhys.clone() : new THREE.Vector3(0.45, dusk ? 0.35 : 0.75, 0.35).normalize();
   sun.position.copy(sunDir).multiplyScalar(140);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -69,7 +84,7 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   const sh = 90;
   sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh; sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;
   sun.shadow.bias = -0.0008; sun.shadow.normalBias = 0.02;
-  skyMat.uniforms.sunDir.value.copy(sunDir);
+  if (skyMat) skyMat.uniforms.sunDir.value.copy(sunDir);
   group.add(sun); group.add(sun.target);
 
   const hemi = new THREE.HemisphereLight(top.clone().lerp(new THREE.Color('#ffffff'), 0.3), new THREE.Color(palette.ground).multiplyScalar(0.6), night ? 0.35 : 0.9);
@@ -87,9 +102,10 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   let t = 0;
   return {
     group, sun, hemi, ambient,
+    exposure: night ? 1.05 : dusk ? 0.72 : 0.6,
     update(dt, target) {
       t += dt;
-      skyMat.uniforms.time.value = t;
+      if (skyMat) skyMat.uniforms.time.value = t;
       dome.position.copy(target);
       cloudGroup.position.x = target.x + ((t * 4) % 200) - 100;
       cloudGroup.position.z = target.z;
@@ -98,6 +114,6 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
       sun.target.position.copy(target);
       sun.target.updateMatrixWorld();
     },
-    dispose() { scene.remove(group); dome.geometry.dispose(); skyMat.dispose(); },
+    dispose() { scene.remove(group); dome.geometry.dispose(); if (skyMat) skyMat.dispose(); if (atmo) atmo.dispose(); },
   };
 }

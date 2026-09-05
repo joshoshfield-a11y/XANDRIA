@@ -83,6 +83,7 @@ export class Engine {
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
 
     this.sky = createSky(spec, this.scene);
+    this.renderer.toneMappingExposure = this.sky.exposure;
     if (!opts.noTerrain) {
       this.terrain = new Terrain(spec, this.physics, this.mats, this.scene, {
         flatCenters: opts.flatCenters,
