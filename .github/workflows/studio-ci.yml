@@ -24,10 +24,21 @@ jobs:
         with:
           node-version: 22
 
+      - name: Upgrade npm (macOS runner npm crash workaround)
+        run: npm install -g npm@11
+
       - name: Install
         run: |
           npm install --no-audit --no-fund || npm install --no-audit --no-fund
-          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')" 
+          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')"
+
+      - name: Rollup win32 binary (npm/cli#4828 workaround)
+        if: runner.os == 'Windows'
+        run: npm install --no-save --no-audit --no-fund @rollup/rollup-win32-x64-msvc
+
+      - name: Rollup darwin binary (npm/cli#4828 workaround)
+        if: runner.os == 'macOS'
+        run: npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-arm64 || npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-x64
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -78,10 +89,21 @@ jobs:
         with:
           node-version: 22
 
+      - name: Upgrade npm (macOS runner npm crash workaround)
+        run: npm install -g npm@11
+
       - name: Install
         run: |
           npm install --no-audit --no-fund || npm install --no-audit --no-fund
-          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')" 
+          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')"
+
+      - name: Rollup win32 binary (npm/cli#4828 workaround)
+        if: runner.os == 'Windows'
+        run: npm install --no-save --no-audit --no-fund @rollup/rollup-win32-x64-msvc
+
+      - name: Rollup darwin binary (npm/cli#4828 workaround)
+        if: runner.os == 'macOS'
+        run: npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-arm64 || npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-x64
 
       - name: Build web bundles
         run: npm run build
