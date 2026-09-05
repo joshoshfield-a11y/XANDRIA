@@ -1,7 +1,7 @@
 {
   "name": "xandria-studio",
   "version": "1.0.0",
-  "description": "XANDRIA Studio — deterministic intent-to-game engine. Type a prompt, get a playable PS2-era 3D game.",
+  "description": "XANDRIA Studio \u2014 deterministic intent-to-game engine. Type a prompt, get a playable PS2-era 3D game.",
   "author": "joshoshfield-a11y",
   "license": "MIT",
   "type": "module",
@@ -67,5 +67,9 @@
       "target": "AppImage",
       "category": "Game"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshoshfield-a11y/XANDRIA.git"
   }
 }
