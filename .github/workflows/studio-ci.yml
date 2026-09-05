@@ -105,6 +105,10 @@ jobs:
         if: runner.os == 'macOS'
         run: npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-arm64 || npm install --no-save --no-audit --no-fund @rollup/rollup-darwin-x64
 
+      - name: dmg-license module (macOS optional-dep workaround)
+        if: runner.os == 'macOS'
+        run: npm install --no-save --no-audit --no-fund dmg-license
+
       - name: Build web bundles
         run: npm run build
 
