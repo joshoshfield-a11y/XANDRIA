@@ -27,7 +27,7 @@ jobs:
           cache-dependency-path: xandria-studio/package-lock.json
 
       - name: Install
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund  # npm ci + cache trips npm/cli#4828 (missing optional platform deps)
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -81,7 +81,7 @@ jobs:
           cache-dependency-path: xandria-studio/package-lock.json
 
       - name: Install
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund  # npm ci + cache trips npm/cli#4828 (missing optional platform deps)
 
       - name: Build web bundles
         run: npm run build
