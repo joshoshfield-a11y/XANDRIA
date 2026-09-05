@@ -22,12 +22,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: xandria-studio/package-lock.json
+          node-version: 22
 
       - name: Install
-        run: npm install --no-audit --no-fund  # npm ci + cache trips npm/cli#4828 (missing optional platform deps)
+        run: |
+          npm install --no-audit --no-fund || npm install --no-audit --no-fund
+          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')" 
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -76,12 +76,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: xandria-studio/package-lock.json
+          node-version: 22
 
       - name: Install
-        run: npm install --no-audit --no-fund  # npm ci + cache trips npm/cli#4828 (missing optional platform deps)
+        run: |
+          npm install --no-audit --no-fund || npm install --no-audit --no-fund
+          node -e "require.resolve('typescript'); require.resolve('vite'); require.resolve('rollup')" 
 
       - name: Build web bundles
         run: npm run build
