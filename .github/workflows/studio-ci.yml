@@ -107,7 +107,9 @@ jobs:
 
       - name: dmg-license module (macOS optional-dep workaround)
         if: runner.os == 'macOS'
-        run: npm install --no-save --no-audit --no-fund --registry=https://registry.npmjs.org dmg-license
+        run: |
+          npm cache clean --force
+          npm install --no-save --no-audit --no-fund --registry=https://registry.npmjs.org dmg-license
 
       - name: Build web bundles
         run: npm run build
