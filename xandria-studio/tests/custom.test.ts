@@ -6,7 +6,7 @@ import { speciesFromMix } from '../src/engine/world/Vegetation';
 
 function withCustom(custom: unknown): GameSpec {
   const spec = JSON.parse(JSON.stringify(generateSpec('test game in the forest'))) as GameSpec;
-  (spec as Record<string, unknown>).custom = custom;
+  (spec as unknown as Record<string, unknown>).custom = custom;
   return spec;
 }
 
