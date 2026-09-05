@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>XANDRIA</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #06080e; }
+      #app { position: fixed; inset: 0; }
+      canvas { display: block; }
+      #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+              color: #7af7ff; font-family: system-ui, sans-serif; letter-spacing: .3em; font-size: 13px;
+              pointer-events: none; animation: pulse 1.2s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .35; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="boot">XANDRIA</div>
+    <script type="module" src="/src/runtime/main.ts"></script>
+    <script>
+      addEventListener('DOMContentLoaded', () => setTimeout(() => document.getElementById('boot')?.remove(), 3000));
+    </script>
+  </body>
+</html>

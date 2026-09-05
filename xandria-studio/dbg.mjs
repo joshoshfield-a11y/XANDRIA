@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ executablePath: '/usr/bin/chromium', args: ['--use-angle=swiftshader','--enable-unsafe-swiftshader','--no-sandbox'] });
+const p = await b.newPage();
+await p.goto('http://localhost:4180/player.html?test=1&intent=sword%20adventure', { waitUntil: 'load' });
+await p.waitForFunction(() => window.__XANDRIA__?.engine?.state === 'playing', null, { timeout: 30000 }).catch((e)=>console.log('wait fail', e.message));
+await p.waitForTimeout(2000);
+const errs = await p.evaluate(() => window.__XANDRIA_ERRORS);
+const genre = await p.evaluate(() => window.__XANDRIA__?.spec?.meta?.genre);
+const state = await p.evaluate(() => window.__XANDRIA__?.engine?.state);
+console.log('genre:', genre, 'state:', state);
+console.log('ERRORS:', JSON.stringify(errs, null, 2));
+await b.close();

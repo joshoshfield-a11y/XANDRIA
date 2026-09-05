@@ -1,134 +1,105 @@
-# 🜂 XANDRIA
-
-> **Unified Engine v4.0** — [View Complete Architecture Spec](XANDRIA_ARCHITECTURE_v4.0.md)
-
-## Quick Links
-
-| Resource | Description |
-|----------|-------------|
-| [Architecture v4.0](XANDRIA_ARCHITECTURE_v4.0.md) | Complete 72-operator lattice, 13-layer stack, 530-file map |
-| [Unified Layer](unified/) | Consolidation bridge — v3.0 engine → v7.0 demo |
-| [v7.0 Prime Demo](additions-and-logic/xandria-engine-v7.0-prime/) | Deployed React + Three.js + physics demo |
-| [Core Engine](XANDRIAv3.0/) | 72-operator lattice, XUAXUN synthesis, stochastic evolution |
-
----
-
 # XANDRIA
 
-**Type any intent. Watch a 3D world with real physics appear in seconds.**
+**Type a sentence. Get a playable game. Keep it as an app.**
 
-XANDRIA is an AI-native engine that transforms natural language into fully interactive 3D physics simulations — complete with gravity, collision, friction, and a built-in version control system for every world you manifest.
+XANDRIA is a deterministic game-generation engine. You describe a game —
+*"a spooky racing game in a frozen wasteland"*, *"neon cyberpunk arena shooter"* —
+and it produces a validated, winnable, losable game with procedural 3D graphics,
+generative music, and a complete game loop. Export it as a single HTML file that
+runs offline, or install the Studio as a desktop app.
 
-[![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Powered by Gemini](https://img.shields.io/badge/AI-Gemini%203%20Pro-blue)](https://aistudio.google.com)
-[![Three.js](https://img.shields.io/badge/3D-Three.js%200.182-black)](https://threejs.org)
-[![CI](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml/badge.svg)](https://github.com/joshoshfield-a11y/XANDRIA/actions/workflows/ci.yml)
+No model roulette: an LLM can add flavor, but playability is guaranteed by
+schema validation and hand-tuned genre blueprints.
 
----
+## What it generates
 
-## Quick Start
+Five genre blueprints, all playable out of the box:
 
-### 1. Get a free Gemini API key
-→ [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — 1,500 free requests/day
+| Genre | Camera | Mechanics |
+|---|---|---|
+| Third-person action | orbit | melee combos, dashes, enemy waves, boss objectives |
+| FPS arena | first-person (pointer lock) | blaster/rifle/shotgun, drones, turrets, pickups |
+| Racing | chase | laps, checkpoints, boost pads, drift, rubber-band AI racers |
+| Platformer | side view | double-jump, glide, coin arcs, moving hazards, goal flag |
+| Top-down shooter | top-down | twin-stick combat, cover, elimination/survival objectives |
 
-### 2. Clone and configure
+Worlds are themed across 13 environments (desert, tundra, neon city, volcanic,
+dreamscape, …) with day/night, weather, and seeded terrain — every game is
+reproducible from its spec.
+
+## Quick start
+
 ```bash
-git clone https://github.com/joshoshfield-a11y/XANDRIA.git
-cd XANDRIA/additions-and-logic/xandria-engine-v7.0-prime
-cp .env.example .env
-# Open .env and set: GEMINI_API_KEY=your_key_here
+cd xandria-studio
+npm install
+
+# Open the Studio (prompt → preview → export)
+npm run dev
+
+# Or generate a game straight from the CLI
+npm run export -- --intent "a hard platformer in a crystal dreamscape" -o my-game.html
 ```
 
-### 3. Run
+Open `my-game.html` in any browser — it works from disk, fully offline.
+
+## Desktop app (Windows / macOS / Linux)
+
 ```bash
-npm install && npm run dev
-# → http://localhost:3000
+cd xandria-studio
+npm install
+npm run dist        # electron-builder → installers in release/
 ```
 
-### 4. Manifest
-Type any intent. Hit **MANIFEST**. A live 3D physics scene appears in ~5 seconds.
+- **Windows**: NSIS installer + portable `.exe`
+- **macOS**: `.dmg`
+- **Linux**: AppImage
 
-Try: `"solar system with asteroid belt"` · `"zero-g neon room"` · `"crumbling tower with debris"`
+Tagged releases on GitHub build all three automatically
+(see `.github/workflows/studio-ci.yml`).
 
----
-
-## How It Works
-
-```
-Intent (plain English)
-    ↓
-Gemini 3 Pro → structured JSON scene config + React/Three.js source files
-    ↓
-Three.js + Cannon-ES → live interactive 3D physics in browser
-    ↓
-Chronos VCS → commit / branch / merge / restore every manifestation
-```
-
----
-
-## Features
-
-| Feature | What it does |
-|---|---|
-| **Intent Manifester** | Natural language → 3D app in ~5 seconds |
-| **Physics Engine** | Cannon-ES rigid bodies: gravity, friction, restitution per entity |
-| **Chronos VCS** | Commit/branch/merge timeline in localStorage |
-| **Artifact Export** | Download any manifestation as a `.zip` React project |
-| **Asset Store** | Inject 3D model references into generation context |
-| **Operator Lattice** | 72-node animated synthesis visualizer |
-
----
-
-## Stack
-
-React 19 · TypeScript · Vite 6 · Three.js 0.182 · Cannon-ES 0.20 · Gemini 3 Pro · JSZip
-
----
-
-## Repo Structure
+## How it works
 
 ```
-XANDRIA/
-├── additions-and-logic/
-│   └── xandria-engine-v7.0-prime/   ← START HERE
-│       ├── App.tsx
-│       ├── services/geminiService.ts
-│       ├── components/
-│       └── .env.example
-├── XANDRIAv3.0/                     ← v3.0 engine (in development)
-├── OPERATORS.md                     ← 216-operator reference
-└── ARCHITECTURE.md
+intent ──► deterministic generator ──► GameSpec (validated) ──► genre blueprint ──► game
 ```
 
----
+- **GameSpec** (`src/spec/schema.ts`) is the contract: theme, world, player,
+  enemies, objective, rules, audio. `validateSpec` enforces genre coherence, so
+  a broken game is *unrepresentable*.
+- **Blueprints** (`src/blueprints/`) assemble the engine (three.js rendering,
+  cannon-es physics, WebAudio synth) into complete game loops.
+- The **LLM adapter** (`src/generator/llm.ts`) is optional and constrained to
+  flavor: names, descriptions, palette accents. Its output is re-validated;
+  anything invalid is silently discarded.
+
+Full details: **[xandria-studio/ARCHITECTURE.md](xandria-studio/ARCHITECTURE.md)**.
+How this engine realizes the legacy 72/216-operator lattice:
+**[xandria-studio/docs/OPERATOR-MAP.md](xandria-studio/docs/OPERATOR-MAP.md)**.
+
+## Testing
+
+```bash
+cd xandria-studio
+npm test            # vitest: schema, generator determinism, RNG
+npm run test:e2e    # Playwright: every genre boots, plays, zero errors;
+                    # exported HTML boots with network disabled
+```
+
+The e2e suite literally plays the games (fixed timestep + simulation substeps)
+and fails on any console error.
+
+## Repository layout
+
+```
+xandria-studio/     The engine, Studio app, CLI, tests — all active development
+legacy/             Everything that came before: the v7.0-prime React/Three/Gemini
+                    demo, the XANDRIAv3.0 72-operator lattice, OPERATORS.md and
+                    the original docs, preserved untouched for reference
+```
+
+The legacy operator lattice lives on as XANDRIA Studio's design vocabulary —
+see the operator mapping above.
 
 ## License
+
 MIT
-
----
-
-## 🔷 ARCF Governance
-
-XANDRIA integrates the [Alexandria Reality-Contact Framework](https://github.com/joshoshfield-a11y/alexandria-os) for empirical validation of all claims, metrics, and automated agents.
-
-### Metric Cards
-
-Every major subsystem maintains a YAML metric record with counter-metrics, gaming paths, off-dashboard audit plans, and expiry rules:
-
-| Metric | File | Status |
-|--------|------|--------|
-| Correlation Matrix Accuracy | [`metrics/correlation-matrix.yaml`](metrics/correlation-matrix.yaml) | Semantic: 4, Implementation: 5, Operational: 2 |
-| ATE Precision | [`metrics/ate-precision.yaml`](metrics/ate-precision.yaml) | Semantic: 5, Implementation: 4, Operational: 2 |
-| GMECP Pass Rate | [`metrics/gmecp-pass-rate.yaml`](metrics/gmecp-pass-rate.yaml) | Semantic: 4, Implementation: 4, Operational: 1 |
-| Aegis Safety Filter | [`metrics/aegis-safety.yaml`](metrics/aegis-safety.yaml) | Semantic: 4, Implementation: 3, Operational: 1 |
-| Cross-Module Consistency | [`metrics/consistency-score.yaml`](metrics/consistency-score.yaml) | Semantic: 3, Implementation: 4, Operational: 2 |
-
-### Agent Constitution
-
-The generation pipeline agent is registered with mandate, non-goals, authority bounds, and kill-switch:
-
-- [`agents/generation-pipeline.yaml`](agents/generation-pipeline.yaml)
-
-### Pre-Mortem Required
-
-Before any T2-T4 decision (reversible pilot through consequential automation), run the pre-mortem gate defined in `alexandria-os/runtime/pre-mortem-gate.yaml`.
