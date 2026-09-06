@@ -102,4 +102,9 @@ see the operator mapping above.
 
 ## License
 
-MIT
+XANDRIA is licensed under the **XANDRIA Commercial License v1.0**.
+
+- **Personal / non-commercial use**: Free with attribution. See [`LICENSE`](LICENSE) for full terms.
+- **Commercial use**: Requires a paid license. Contact [joshoshfield-a11y](https://github.com/joshoshfield-a11y) for licensing inquiries.
+
+By using this software, you acknowledge that you have read, understood, and agree to be bound by the terms of the `LICENSE` file.
