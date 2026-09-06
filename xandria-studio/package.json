@@ -3,7 +3,7 @@
   "version": "1.2.0",
   "description": "XANDRIA Studio \u2014 deterministic intent-to-game engine. Type a prompt, get a playable PS2-era 3D game.",
   "author": "joshoshfield-a11y",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -71,5 +71,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/joshoshfield-a11y/XANDRIA.git"
-  }
+  },
+  "private": true
 }
