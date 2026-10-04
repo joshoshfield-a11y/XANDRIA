@@ -90,9 +90,11 @@ export class Input {
     on(document, 'pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === this.el;
     });
-    // touch: simple virtual stick on left half, look on right half
+    // touch: simple virtual stick on left half, look on right half.
+    // Skipped when a dedicated touch UI owns touch (Input.touchManaged).
     let touchStart: { id: number; x: number; y: number; side: 'l' | 'r' }[] = [];
     on(el, 'touchstart', (e: TouchEvent) => {
+      if (this.touchManaged) return;
       for (const t of Array.from(e.changedTouches)) {
         const side = t.clientX < window.innerWidth / 2 ? 'l' : 'r';
         touchStart.push({ id: t.identifier, x: t.clientX, y: t.clientY, side });
@@ -100,6 +102,7 @@ export class Input {
       }
     });
     on(el, 'touchmove', (e: TouchEvent) => {
+      if (this.touchManaged) return;
       e.preventDefault();
       for (const t of Array.from(e.changedTouches)) {
         const s = touchStart.find((k) => k.id === t.identifier);
@@ -114,6 +117,7 @@ export class Input {
       }
     });
     on(el, 'touchend', (e: TouchEvent) => {
+      if (this.touchManaged) return;
       for (const t of Array.from(e.changedTouches)) {
         const s = touchStart.find((k) => k.id === t.identifier);
         if (s?.side === 'l') this.touchAxes = null;
@@ -190,6 +194,27 @@ export class Input {
     this.injectedAxes = axes ?? null;
   }
   tap(a: Action) { this.just.add(a); }
+
+  /** Touch UI: hold an action until releaseAction. Mirrors a held key. */
+  pressAction(a: Action) {
+    if (!this.enabled) return;
+    if (!this.down.has(a)) this.just.add(a);
+    this.down.add(a);
+  }
+  /** Touch UI: release an action held via pressAction. */
+  releaseAction(a: Action) {
+    this.down.delete(a);
+    this.released.add(a);
+  }
+  /** Touch UI: analog move stick (screen-space: lx right+, ly down+), or null on release. */
+  setMoveStick(v: { lx: number; ly: number } | null) { this.touchAxes = v; }
+  /** Touch UI: normalized pointer position (for aim raycasts, e.g. top-down twin-stick). */
+  setPointerPos(x: number, y: number) { this.pointer.x = x; this.pointer.y = y; }
+  /**
+   * When true, the built-in canvas touch handlers are skipped — a dedicated
+   * touch UI (TouchControls) owns touch input instead. Desktop behavior unchanged.
+   */
+  touchManaged = false;
 
   /** Clear all held/edge input (used by in-place restart). */
   reset() {

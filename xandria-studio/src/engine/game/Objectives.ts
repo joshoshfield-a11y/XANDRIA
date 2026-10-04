@@ -2,14 +2,24 @@
  * Objectives — win/lose logic per spec.objective. Blueprints report events;
  * this decides victory/defeat and drives the HUD tracker.
  *
- * Stage mode: when spec.objective.stages is present (quest chain), stages are
- * walked in order, each with its own progress counter and timeLimit.
- * onStageComplete(index, stage) fires per stage; the final stage calls engine.win().
- * Legacy single-objective behavior is unchanged when stages is absent.
+ * Stage mode: when spec.objective.stages is present (quest chain), stages form
+ * a small directed graph. A stage with `choices` pauses the game and asks the
+ * player to pick the next stage; a stage with `next` jumps to the named stage;
+ * otherwise the next stage in array order runs. A stage with no successors is
+ * terminal and wins the run (using its `winText` when set).
+ * Legacy single-objective behavior is unchanged when stages is absent, and a
+ * plain linear stages array (no ids/next/choices) walks in order as before.
  */
 import type { Engine } from '../Engine';
 import type { ObjectiveSpec, ObjectiveStage, ObjectiveType } from '@spec';
 import type { RunStats } from './HUD';
+
+export type StageCompleteHandler = (
+  index: number,
+  stage: ObjectiveStage,
+  /** The stage that will run next, or null when the campaign ends here. */
+  next: ObjectiveStage | null,
+) => void;
 
 export class Objectives {
   progress = 0;
@@ -22,15 +32,18 @@ export class Objectives {
   private spec: ObjectiveSpec;
   private stages: ObjectiveStage[] | null = null;
   private stageIndex = 0;
-  private readonly onStageComplete:
-    | ((index: number, stage: ObjectiveStage) => void)
-    | undefined;
+  /** chapters actually cleared this run (branch-aware; == stageIndex when linear) */
+  private cleared = 0;
+  /** true while the branch-choice modal is open */
+  private awaitingChoice = false;
+  private readonly idToIndex = new Map<string, number>();
+  private readonly onStageComplete: StageCompleteHandler | undefined;
   private readonly getLevel: () => number;
 
   constructor(
     engine: Engine,
     spec: ObjectiveSpec,
-    onStageComplete?: (index: number, stage: ObjectiveStage) => void,
+    onStageComplete?: StageCompleteHandler,
     getLevel?: () => number,
   ) {
     this.engine = engine;
@@ -39,6 +52,11 @@ export class Objectives {
     this.getLevel = getLevel ?? (() => 1);
     const raw = spec.stages;
     this.stages = Array.isArray(raw) && raw.length > 0 ? raw : null;
+    if (this.stages) {
+      this.stages.forEach((s, i) => {
+        if (s.id) this.idToIndex.set(s.id, i);
+      });
+    }
     this.timeLeft = this.cur().timeLimit;
     this.updateHud();
   }
@@ -51,9 +69,13 @@ export class Objectives {
   get currentStageIndex(): number {
     return this.stageIndex;
   }
-  /** Stages fully cleared so far. */
+  /** Id of the currently active stage (undefined in legacy mode). */
+  get currentStageId(): string | undefined {
+    return this.stages?.[this.stageIndex]?.id;
+  }
+  /** Chapters fully cleared so far. */
   get stagesCleared(): number {
-    return this.stages ? this.stageIndex : 0;
+    return this.stages ? this.cleared : 0;
   }
   get inStageMode(): boolean {
     return this.stages !== null;
@@ -66,8 +88,14 @@ export class Objectives {
 
   private updateHud() {
     const o = this.cur();
-    const stageTag =
-      this.stages != null ? ` [${this.stageIndex + 1}/${this.stages.length}]` : '';
+    let stageTag = '';
+    if (this.stages != null) {
+      const branched = this.stages.some(
+        (s) => (s.next?.length ?? 0) > 0 || (s.choices?.length ?? 0) > 0,
+      );
+      // branched chains have no fixed total — show chapters cleared instead
+      stageTag = branched ? ` · Ch.${this.cleared + 1}` : ` [${this.stageIndex + 1}/${this.stages.length}]`;
+    }
     switch (o.type) {
       case 'collect':
         this.engine.hud.setProgress(`${this.progress} / ${o.count} collected${stageTag}`);
@@ -113,38 +141,89 @@ export class Objectives {
 
   /** A stage (or the legacy objective) just hit its completion condition. */
   private completeStep() {
-    if (this.stages && this.stageIndex < this.stages.length - 1) {
-      const finished = this.stages[this.stageIndex];
-      const finishedIndex = this.stageIndex;
-      this.stageIndex++;
-      this.progress = 0;
-      this.timeLeft = this.cur().timeLimit;
-      this.updateHud();
-      this.onStageComplete?.(finishedIndex, finished);
-      this.engine.hooks.emit('onStageComplete', { index: finishedIndex, stage: finished });
-      // engine-owned juice: chapter sting + music intensity climbs per chapter
-      this.engine.audio?.play('chapter');
-      this.engine.audio?.setIntensity(Math.min(1, 0.45 + 0.2 * this.stageIndex));
+    if (this.done || this.awaitingChoice) return;
+    if (!this.stages) {
+      this.winRun(undefined);
       return;
     }
+    const finished = this.stages[this.stageIndex];
+    const finishedIndex = this.stageIndex;
+    this.cleared++;
+    if (finished.choices && finished.choices.length > 0) {
+      // Branch point: pause and let the player pick the next stage.
+      this.awaitingChoice = true;
+      const choices = finished.choices;
+      const labels = choices.map((c) => c.label);
+      void this.engine.hud
+        .showChoice('CHOOSE YOUR PATH', finished.description, labels)
+        .then((picked) => {
+          this.awaitingChoice = false;
+          if (this.done) return;
+          const targetId = choices[picked]?.next;
+          const idx = typeof targetId === 'string' ? this.idToIndex.get(targetId) : undefined;
+          if (idx === undefined) {
+            // Defensive: validated specs always resolve. End the run, don't stall.
+            this.winRun(finished);
+            return;
+          }
+          this.advanceTo(idx, finishedIndex, finished);
+        });
+      return;
+    }
+    const nextIdx = this.nextIndexAfter(finished, finishedIndex);
+    if (nextIdx === null) {
+      this.winRun(finished);
+      return;
+    }
+    this.advanceTo(nextIdx, finishedIndex, finished);
+  }
+
+  /**
+   * Graph successor: explicit `next` by id (an explicit empty array ends the
+   * campaign here), else the next stage in array order, else null (terminal).
+   */
+  private nextIndexAfter(stage: ObjectiveStage, index: number): number | null {
+    if (stage.next) {
+      return stage.next.length > 0 ? (this.idToIndex.get(stage.next[0]) ?? null) : null;
+    }
+    return index + 1 < this.stages!.length ? index + 1 : null;
+  }
+
+  private advanceTo(nextIdx: number, finishedIndex: number, finished: ObjectiveStage) {
+    this.stageIndex = nextIdx;
+    this.progress = 0;
+    this.timeLeft = this.cur().timeLimit;
+    this.updateHud();
+    const next = this.stages![nextIdx];
+    this.onStageComplete?.(finishedIndex, finished, next);
+    this.engine.hooks.emit('onStageComplete', { index: finishedIndex, stage: finished });
+    // engine-owned juice: chapter sting + music intensity climbs per chapter
+    this.engine.audio?.play('chapter');
+    this.engine.audio?.setIntensity(Math.min(1, 0.45 + 0.2 * this.cleared));
+  }
+
+  private winRun(finished: ObjectiveStage | undefined) {
     this.done = true;
     const stats: Partial<RunStats> = {
       kills: this.kills,
-      stagesCleared: this.stages ? this.stages.length : 0,
+      stagesCleared: this.stages ? this.cleared : 0,
       level: this.getLevel(),
     };
-    this.engine.win(stats);
+    // keep the legacy single-arg call shape when there's no branch text
+    if (finished?.winText) this.engine.win(stats, finished.winText);
+    else this.engine.win(stats);
   }
 
   update(dt: number) {
-    if (this.done) return;
+    if (this.done || this.awaitingChoice) return;
     const o = this.cur();
     if (o.type === 'survive') {
       this.timeLeft -= dt;
       this.updateHud();
       if (this.timeLeft <= 0) {
-        this.done = true;
-        this.engine.win({ kills: this.kills, stagesCleared: this.stagesCleared, level: this.getLevel() });
+        // surviving completes the stage — flow through the quest graph
+        // (choices / next / terminal) like every other stage type
+        this.completeStep();
       }
     } else if (o.timeLimit > 0) {
       this.timeLeft -= dt;

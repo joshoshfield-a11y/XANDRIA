@@ -14,6 +14,8 @@ import {
   cloneSpec, getAtPath,
   validateEditable,
   getStages, inStageMode, addStage, removeStage, moveStage, setStageField,
+  ensureStageIds, stageIdOptions, setStageNext,
+  addChoice, removeChoice, setChoiceField,
   enemyKindEnabled, setEnemyKindEnabled,
   applyEnemyMultipliers, snapshotEnemies, type EnemyMultipliers,
   PICKUP_KEYS, setPickupEnabled, ensureProgression,
@@ -104,6 +106,9 @@ const css = `
 .xed-cardhead .xed-sp { flex:1; }
 .xed-iconbtn { padding:5px 9px; font-size:12px; border-radius:8px; }
 .xed-stageerr { font-size:11.5px; color:#ff9db4; }
+.xed-chrow { display:flex; gap:8px; align-items:center; }
+.xed-chrow input { flex:1; min-width:0; }
+.xed-chrow select { flex:1; min-width:0; }
 .xed-swatches { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
 .xed-sw { display:flex; flex-direction:column; align-items:center; gap:4px; padding:6px 4px; border-radius:8px; font-size:9.5px; color:#8fa5c8; }
 .xed-sw .xed-dots { display:flex; gap:3px; }
@@ -249,6 +254,22 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     return s;
   }
 
+  /** Chapter-successor selector: blank = default (next chapter in array order). */
+  function stageNextSelect(s: GameSpec, index: number): HTMLSelectElement {
+    const sel = document.createElement('select');
+    const cur = s.objective.stages?.[index]?.next?.[0] ?? '';
+    const addOpt = (value: string, label: string) => {
+      const opt = document.createElement('option');
+      opt.value = value; opt.textContent = label; opt.selected = value === cur;
+      sel.appendChild(opt);
+    };
+    addOpt('', 'default — next chapter in order');
+    for (const o of stageIdOptions(s, index)) addOpt(o.id, `→ ${o.label}`);
+    if (cur && ![...sel.options].some((o) => o.value === cur)) addOpt(cur, `⚠ ${cur} (missing)`);
+    sel.addEventListener('change', () => commit((sp) => setStageNext(sp, index, sel.value || undefined), true));
+    return sel;
+  }
+
   function colorField(value: string, set: (s: GameSpec, v: string) => void): HTMLElement {
     const wrap = h(`<div class="xed-colorrow"></div>`);
     const i = document.createElement('input');
@@ -332,6 +353,42 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
         body.appendChild(field('COUNT', numberField(st.count, (sp, v) => setStageField(sp, i, 'count', v))));
         body.appendChild(field('TIME LIMIT (s, 0 = none)', numberField(st.timeLimit, (sp, v) => setStageField(sp, i, 'timeLimit', v))));
         body.appendChild(field('DESCRIPTION', textField(st.description, (sp, v) => setStageField(sp, i, 'description', v))));
+        body.appendChild(field('STAGE ID', textField(st.id ?? '', (sp, v) => setStageField(sp, i, 'id', v)),
+          'Used by branch targets. Keep unique.'));
+        body.appendChild(field('NEXT — explicit successor', stageNextSelect(s, i),
+          'Blank = next chapter in order. The campaign ends in victory on a chapter with no successor.'));
+        body.appendChild(field('VICTORY TEXT — if the run ends here', textField(st.winText ?? '', (sp, v) => setStageField(sp, i, 'winText', v)),
+          'Falls back to the campaign victory text when empty.'));
+        // branch choices
+        const nch = st.choices?.length ?? 0;
+        body.appendChild(h(`<div class="xed-ns">BRANCH CHOICES${nch ? ` — ${nch}` : ' — none (linear)'}</div>`));
+        (st.choices ?? []).forEach((c, ci) => {
+          const row = h(`<div class="xed-chrow"></div>`);
+          const lab = textField(c.label, (sp, v) => setChoiceField(sp, i, ci, 'label', v));
+          lab.placeholder = 'Choice label';
+          lab.title = 'Button label shown to the player';
+          const sel = document.createElement('select');
+          sel.title = 'Chapter this choice leads to';
+          const cur = c.next;
+          const targets = stageIdOptions(s, i);
+          if (!targets.some((o) => o.id === cur)) {
+            const bad = document.createElement('option');
+            bad.value = cur; bad.textContent = cur ? `⚠ ${cur} (missing)` : '— pick a chapter —';
+            sel.appendChild(bad);
+          }
+          for (const o of targets) {
+            const opt = document.createElement('option');
+            opt.value = o.id; opt.textContent = `→ ${o.label}`; opt.selected = o.id === cur;
+            sel.appendChild(opt);
+          }
+          sel.addEventListener('change', () => commit((sp) => setChoiceField(sp, i, ci, 'next', sel.value), true));
+          row.append(lab, sel, iconBtn('✕', 'Delete choice', () => commit((sp) => removeChoice(sp, i, ci), true)));
+          body.appendChild(row);
+        });
+        const addCh = h(`<button>+ ADD CHOICE</button>`) as HTMLButtonElement;
+        addCh.addEventListener('click', () => commit((sp) => addChoice(sp, i), true));
+        body.appendChild(addCh);
+        body.appendChild(h(`<div class="xed-hint">When a chapter with choices is completed, the game pauses and the player picks a path (click or 1–9).</div>`));
         for (const e of stageErrors(i)) body.appendChild(h(`<div class="xed-stageerr">⚠ ${e}</div>`));
         host.appendChild(c);
       });

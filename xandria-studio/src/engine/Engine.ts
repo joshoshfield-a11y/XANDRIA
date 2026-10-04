@@ -20,6 +20,19 @@ import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
+import { TouchControls, isTouchDevice } from './game/TouchControls';
+import {
+  applyLoadout,
+  dailySeed,
+  loadProfile,
+  purchaseModifier,
+  recordRun,
+  saveProfile,
+  setLoadout,
+  todayLocalDate,
+  MODIFIERS,
+  type ProfileData,
+} from './game/Profile';
 
 export type EngineState = 'loading' | 'ready' | 'title' | 'playing' | 'paused' | 'won' | 'lost';
 
@@ -39,6 +52,7 @@ export class Engine {
   readonly physics: Physics;
   readonly mats: MaterialLibrary;
   readonly input: Input;
+  readonly touch: TouchControls;
   readonly audio: AudioEngine;
   readonly particles: Particles;
   readonly hud: HUD;
@@ -74,6 +88,10 @@ export class Engine {
   private physicsBodiesBaseline = 0;
   private physicsConstraintsBaseline = 0;
   private shakeVec = new THREE.Vector3();
+  /** the spec's original seed — daily runs temporarily override spec.meta.seed */
+  private baseSeed: number;
+  /** YYYY-MM-DD while a daily-challenge run is active; null otherwise */
+  private dailyDate: string | null = null;
 
   constructor(container: HTMLElement, spec: GameSpec, opts: EngineOptions = {}) {
     this.container = container;
@@ -108,6 +126,8 @@ export class Engine {
     this.hooks = new Modding(this);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
+    this.touch = new TouchControls(container, this.input, spec.meta.genre);
+    this.hud.setTouchMode(this.touch.active);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
 
     this.sky = createSky(spec, this.scene);
@@ -143,6 +163,17 @@ export class Engine {
     this.physicsConstraintsBaseline = this.physics.constraintBaseline();
 
     this.state = 'ready';
+
+    // cross-run progression: the seed this spec shipped with (daily runs
+    // override it temporarily; toTitle()/startRun() restore it)
+    this.baseSeed = spec.meta.seed;
+
+    // record finished runs into the persistent profile (skipped in testMode
+    // so automated runs never pollute player stats)
+    if (!this.testMode) {
+      this.hooks.tap('onWin', ({ stats }) => this.recordRunResult(true, stats));
+      this.hooks.tap('onLose', ({ stats }) => this.recordRunResult(false, stats));
+    }
   }
 
   onUpdate(fn: (dt: number) => void) { this.updateHooks.push(fn); return () => { this.updateHooks = this.updateHooks.filter((f) => f !== fn); }; }
@@ -221,19 +252,92 @@ export class Engine {
     this.state = 'title';
     const nar = this.spec.narrative;
     const racing = this.spec.meta.genre === 'racing';
+    const touch = isTouchDevice();
+    const controls = touch
+      ? racing
+        ? ['LEFT STICK — steer (gas is automatic)', 'BRAKE / BOOST buttons', '⏸ button — pause']
+        : ['LEFT STICK — move',
+           this.spec.meta.genre === 'fps-arena' ? 'DRAG RIGHT SIDE — look' : 'RIGHT STICK — aim',
+           'Buttons — attack / jump / dash', '⏸ button — pause']
+      : racing
+        ? ['WASD / ARROWS — drive', 'SPACE — boost', 'R — reset car', 'ESC / P — pause']
+        : ['WASD / ARROWS — move', 'MOUSE — attack / aim', 'SPACE — jump / boost', 'SHIFT — sprint / dash', 'E — interact', 'ESC / P — pause'];
+    const profile = loadProfile();
+    const g = this.spec.meta.genre;
+    const played = profile.runsPlayed[g] ?? 0;
+    const won = profile.runsWon[g] ?? 0;
+    const best = profile.bestScore[g] ?? 0;
+    const profileLine = played > 0
+      ? `${played} run${played === 1 ? '' : 's'} · ${won} won · best ${best.toLocaleString()}`
+      : 'first run — good luck';
+    const today = todayLocalDate();
+    const dailyBest = profile.dailyBest[today] ?? null;
+    const equipped = new Set(profile.loadout);
     this.hud.showTitle({
       name: this.spec.meta.name,
       premise: nar?.premise ?? this.spec.objective.description,
-      controls: racing
-        ? ['WASD / ARROWS — drive', 'SPACE — boost', 'R — reset car', 'ESC / P — pause']
-        : ['WASD / ARROWS — move', 'MOUSE — attack / aim', 'SPACE — jump / boost', 'SHIFT — sprint / dash', 'E — interact', 'ESC / P — pause'],
+      controls,
       onStart: () => this.startRun(),
+      profileLine,
+      merit: profile.merit,
+      modifiers: MODIFIERS.map((m) => ({
+        id: m.id,
+        name: m.name,
+        desc: m.desc,
+        cost: m.cost,
+        owned: profile.owned.includes(m.id),
+        equipped: equipped.has(m.id),
+      })),
+      onToggleModifier: (id) => this.toggleModifier(id),
+      onBuyModifier: (id) => this.buyModifier(id),
+      dailyLabel: `DAILY ${today}`,
+      dailyBest,
+      onDaily: () => this.startDailyRun(),
     });
+  }
+
+  /** Equip/unequip a purchased modifier, then re-render the title. */
+  private toggleModifier(id: string): void {
+    const p = loadProfile();
+    const equipped = new Set(p.loadout);
+    if (equipped.has(id)) equipped.delete(id);
+    else if (p.owned.includes(id)) equipped.add(id);
+    setLoadout(p, [...equipped]);
+    saveProfile(p);
+    this.showTitle();
+  }
+
+  /** Buy a modifier with merit, then re-render the title. */
+  private buyModifier(id: string): void {
+    const p = loadProfile();
+    if (purchaseModifier(p, id)) {
+      // auto-equip on purchase
+      setLoadout(p, [...p.loadout, id]);
+      saveProfile(p);
+    }
+    this.showTitle();
   }
 
   /** Begin the run from the title screen (the click is a user gesture: audio unlocks). */
   startRun() {
     if (this.state !== 'title') return;
+    this.dailyDate = null;
+    this.spec.meta.seed = this.baseSeed;
+    this.beginPlay();
+  }
+
+  /**
+   * Daily challenge: the seed is derived deterministically from the calendar
+   * date, so everyone gets the same run today. Local best tracked per day.
+   */
+  startDailyRun() {
+    if (this.state !== 'title') return;
+    this.dailyDate = todayLocalDate();
+    this.spec.meta.seed = dailySeed(this.dailyDate);
+    this.beginPlay();
+  }
+
+  private beginPlay() {
     this.hud.clearOverlays();
     this.audio.unlock();
     this.audio.play('click');
@@ -243,11 +347,33 @@ export class Engine {
 
   /** Back to the title screen, with a fresh run waiting underneath. */
   toTitle() {
+    // leave any daily run behind: the title background is always the base game
+    this.dailyDate = null;
+    this.spec.meta.seed = this.baseSeed;
     if (this.runBuilder) this.resetRun();
     else this.hud.clearOverlays();
     this.audio.setIntensity(0.5);
     this.audio.setEngine(0, false);
     this.showTitle();
+  }
+
+  /** Aggregate a finished run into the persistent profile. Best-effort. */
+  private recordRunResult(won: boolean, stats: Partial<RunStats>): void {
+    try {
+      const p = loadProfile();
+      recordRun(p, {
+        genre: this.spec.meta.genre,
+        won,
+        score: Math.round(this.score),
+        level: stats.level ?? 1,
+        kills: stats.kills ?? 0,
+        timeSeconds: this.elapsed,
+        daily: this.dailyDate ?? undefined,
+      });
+      saveProfile(p);
+    } catch {
+      /* profile is best-effort — a storage failure must never break the game */
+    }
   }
 
   step(dt: number) {
@@ -271,6 +397,7 @@ export class Engine {
     }
     if (this.state === 'title' && this.input.justPressed('confirm')) this.startRun();
     if (this.input.justPressed('pause')) this.togglePause();
+    this.touch.setVisible(this.state === 'playing');
     this.juice.update(dt, this.camera);
     this.sky.update(dt, this.camera.getWorldPosition(new THREE.Vector3()));
     // screenshake: offset around the render only, never accumulates into the camera
@@ -308,7 +435,7 @@ export class Engine {
     else if (this.state === 'paused' && this.pauseReason === 'menu') { this.resume(); this.hud.hidePause(); }
   }
 
-  win(stats: Partial<RunStats> = {}) {
+  win(stats: Partial<RunStats> = {}, winText?: string) {
     if (this.state !== 'playing') return;
     this.state = 'won';
     this.audio.setEngine(0, false);
@@ -321,7 +448,7 @@ export class Engine {
       level: 1,
       stagesCleared: 0,
       ...stats,
-    });
+    }, winText);
   }
 
   lose(reason = '', stats: Partial<RunStats> = {}) {
@@ -394,6 +521,9 @@ export class Engine {
     this.frame = 0;
     this.pauseReason = null;
     this.last = performance.now();
+    // cross-run progression: apply the equipped modifier loadout to this
+    // run's config (never to the seed — determinism is preserved)
+    applyLoadout(this.spec, loadProfile());
     // rebuild the run from the same spec+seed
     const blueprint = this.runBuilder!(this);
     if (typeof window !== 'undefined') {
@@ -413,6 +543,7 @@ export class Engine {
     cancelAnimationFrame(this.rafId);
     this.resizeObs.disconnect();
     this.input.dispose();
+    this.touch.dispose();
     this.audio.dispose();
     this.assetBridge.dispose();
     this.postfx.dispose();

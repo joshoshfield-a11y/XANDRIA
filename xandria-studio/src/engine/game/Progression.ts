@@ -152,9 +152,10 @@ export class Progression {
     return this.counts.get(id) ?? 0;
   }
 
-  /** Multiplicative damage bonus from 'damage' upgrades. */
+  /** Multiplicative damage bonus from 'damage' upgrades and the profile loadout. */
   damageMult(): number {
-    return Math.pow(1.25, this.upgradeCount('damage'));
+    const profile = this.engine.spec.custom?.profileDamageMult ?? 1;
+    return Math.pow(1.25, this.upgradeCount('damage')) * profile;
   }
   /** Multiplicative move-speed bonus from 'speed' upgrades. */
   speedMult(): number {

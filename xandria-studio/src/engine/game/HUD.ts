@@ -67,6 +67,18 @@ const CSS = `
 .xhud .title-screen .premise { max-width:520px; font-size:15px; line-height:1.65; opacity:.92; margin:0 24px 18px; text-align:center; }
 .xhud .title-screen .controls { display:flex; flex-wrap:wrap; gap:6px 18px; justify-content:center; max-width:520px; font-size:12px; opacity:.65; margin-bottom:26px; }
 .xhud .title-screen .start-btn { font-size:18px; padding:14px 44px; animation:pulse 1.6s ease-in-out infinite; }
+.xhud .title-screen .profile-line { font-size:12px; letter-spacing:.08em; opacity:.7; margin:-8px 0 14px; }
+.xhud .title-screen .merit-line { font-size:13px; letter-spacing:.08em; color:#ffd23f; margin-bottom:10px; }
+.xhud .title-screen .mods { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; max-width:560px; margin-bottom:14px; }
+.xhud .title-screen .mod { pointer-events:auto; border:1px solid rgba(140,180,220,.35); border-radius:8px; padding:8px 10px; font-size:11px; text-align:center; min-width:110px; max-width:130px; background:rgba(20,28,44,.7); cursor:pointer; }
+.xhud .title-screen .mod .mn { font-weight:700; letter-spacing:.05em; margin-bottom:3px; }
+.xhud .title-screen .mod .md { opacity:.75; line-height:1.4; margin-bottom:5px; }
+.xhud .title-screen .mod .ma { font-size:10px; letter-spacing:.08em; color:#ffd23f; }
+.xhud .title-screen .mod.equipped { border-color:#ffd23f; background:rgba(60,48,16,.6); }
+.xhud .title-screen .mod.locked { opacity:.55; cursor:pointer; }
+.xhud .title-screen .daily-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:18px; }
+.xhud .title-screen .daily-btn { font-size:14px; padding:10px 26px; }
+.xhud .title-screen .daily-best { font-size:12px; opacity:.7; }
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
 .xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
 .xhud .settings-row { display:flex; align-items:center; gap:14px; font-size:13px; letter-spacing:.1em; }
@@ -75,6 +87,22 @@ const CSS = `
 .xhud .settings-row select { flex:1; background:#1a2536; color:#e8ecf1; border:1px solid rgba(140,180,220,.4); border-radius:8px; padding:8px 10px; font-size:13px; }
 .xhud .settings-row input[type=checkbox] { width:20px; height:20px; accent-color:#ffd23f; }
 @keyframes cardin { from { opacity:0; transform:translate(-50%,-10px); } }
+/* touch mode: keep HUD clear of the joystick (bottom-left) and buttons (bottom-right) */
+.xhud.touch .bars { left:12px; bottom:200px; width:190px; }
+.xhud.touch .hint { bottom:210px; }
+.xhud.touch .objective { top:max(12px, env(safe-area-inset-top)); left:max(12px, env(safe-area-inset-left)); }
+.xhud.touch .score { top:max(12px, env(safe-area-inset-top)); right:max(12px, env(safe-area-inset-right)); }
+/* small screens: compact panels */
+@media (max-width:760px) {
+  .xhud .bars { width:180px; padding:8px 10px; }
+  .xhud .objective { max-width:230px; padding:8px 10px; }
+  .xhud .objective .title { font-size:12px; }
+  .xhud .score .val { font-size:17px; }
+  .xhud .boss { width:min(300px, 70vw); top:48px; }
+  .xhud .overlay h1 { font-size:32px; }
+  .xhud .toast { font-size:16px; top:14%; }
+  .xhud .card { top:10%; }
+}
 `;
 
 export class HUD {
@@ -189,6 +217,14 @@ export class HUD {
     this.eng = e;
   }
 
+  /**
+   * Touch mode: shifts HUD panels clear of the touch overlay (joystick bottom-left,
+   * buttons bottom-right) and applies small-screen compaction.
+   */
+  setTouchMode(on: boolean) {
+    this.root.classList.toggle('touch', on);
+  }
+
   private get narrative(): NarrativeSpec | undefined {
     return this.spec.narrative;
   }
@@ -266,6 +302,57 @@ export class HUD {
     });
   }
 
+  /**
+   * Branch-choice modal — PAUSES the game until the player picks one of the
+   * options. Click a button or press 1-9. Resolves with the chosen option index.
+   */
+  showChoice(title: string, body: string, options: string[]): Promise<number> {
+    const eng = this.eng;
+    const wasPlaying = eng?.state === 'playing';
+    if (wasPlaying) eng!.pause();
+    return new Promise<number>((resolve) => {
+      let done = false;
+      const el = document.createElement('div');
+      el.className = 'overlay';
+      const h = document.createElement('h1');
+      h.textContent = title;
+      h.style.color = '#ffd23f';
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = body;
+      const hint = document.createElement('div');
+      hint.className = 'sub';
+      hint.textContent = options.length > 1 ? 'Click, or press 1–' + Math.min(9, options.length) : '';
+      const opts = document.createElement('div');
+      opts.className = 'lvlopts';
+      const pick = (i: number) => {
+        if (done) return;
+        done = true;
+        document.removeEventListener('keydown', onKey);
+        el.remove();
+        if (wasPlaying) eng!.resume();
+        resolve(i);
+      };
+      const onKey = (e: KeyboardEvent) => {
+        const n = parseInt(e.key, 10);
+        if (Number.isInteger(n) && n >= 1 && n <= Math.min(9, options.length)) pick(n - 1);
+      };
+      options.forEach((label, i) => {
+        const b = document.createElement('button');
+        b.className = 'lvlopt';
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        nm.textContent = (i < 9 ? `${i + 1}. ` : '') + label;
+        b.append(nm);
+        b.addEventListener('click', () => pick(i));
+        opts.appendChild(b);
+      });
+      el.append(h, sub, hint, opts);
+      this.root.appendChild(el);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
   damageFlash() {
     this.vignetteT = 0.35;
     // every blueprint routes player damage through here — free screenshake
@@ -292,8 +379,29 @@ export class HUD {
   /**
    * Title screen — game name, narrative premise, controls, click-to-start.
    * onStart fires once; the engine removes the overlay and starts the run.
+   *
+   * Cross-run progression (all optional): profileLine summarizes the player's
+   * history, merit/modifiers render the loadout UI (buy/equip via the
+   * callbacks, which re-render the title), and the daily row offers the
+   * daily-challenge run with its local best.
    */
-  showTitle(opts: { name: string; premise: string; controls: string[]; onStart: () => void }) {
+  showTitle(opts: {
+    name: string;
+    premise: string;
+    controls: string[];
+    onStart: () => void;
+    profileLine?: string;
+    merit?: number;
+    modifiers?: Array<{
+      id: string; name: string; desc: string; cost: number;
+      owned: boolean; equipped: boolean;
+    }>;
+    onToggleModifier?: (id: string) => void;
+    onBuyModifier?: (id: string) => void;
+    dailyLabel?: string;
+    dailyBest?: number | null;
+    onDaily?: () => void;
+  }) {
     this.clearOverlays();
     const ov = document.createElement('div');
     ov.className = 'overlay title-screen';
@@ -305,6 +413,45 @@ export class HUD {
     const p = document.createElement('p');
     p.className = 'premise';
     p.textContent = opts.premise;
+    ov.append(tag, h, p);
+
+    if (opts.profileLine) {
+      const pl = document.createElement('div');
+      pl.className = 'profile-line';
+      pl.textContent = opts.profileLine;
+      ov.appendChild(pl);
+    }
+
+    if (opts.modifiers && opts.modifiers.length) {
+      const ml = document.createElement('div');
+      ml.className = 'merit-line';
+      ml.textContent = `◆ ${opts.merit ?? 0} merit`;
+      ov.appendChild(ml);
+      const mods = document.createElement('div');
+      mods.className = 'mods';
+      for (const m of opts.modifiers) {
+        const d = document.createElement('div');
+        d.className = 'mod' + (m.equipped ? ' equipped' : m.owned ? '' : ' locked');
+        const nm = document.createElement('div');
+        nm.className = 'mn';
+        nm.textContent = m.name;
+        const ds = document.createElement('div');
+        ds.className = 'md';
+        ds.textContent = m.desc;
+        const ac = document.createElement('div');
+        ac.className = 'ma';
+        ac.textContent = m.equipped ? 'EQUIPPED' : m.owned ? 'EQUIP' : `BUY ◆${m.cost}`;
+        d.append(nm, ds, ac);
+        d.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (m.equipped || m.owned) opts.onToggleModifier?.(m.id);
+          else opts.onBuyModifier?.(m.id);
+        });
+        mods.appendChild(d);
+      }
+      ov.appendChild(mods);
+    }
+
     const cl = document.createElement('div');
     cl.className = 'controls';
     for (const c of opts.controls) {
@@ -312,6 +459,8 @@ export class HUD {
       d.textContent = c;
       cl.appendChild(d);
     }
+    ov.appendChild(cl);
+
     const b = document.createElement('button');
     b.className = 'start-btn';
     b.textContent = 'CLICK TO START';
@@ -322,8 +471,32 @@ export class HUD {
       opts.onStart();
     };
     b.addEventListener('click', (e) => { e.stopPropagation(); go(); });
+
+    if (opts.onDaily && opts.dailyLabel) {
+      const row = document.createElement('div');
+      row.className = 'daily-row';
+      const db = document.createElement('button');
+      db.className = 'daily-btn';
+      db.textContent = opts.dailyLabel;
+      db.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (started) return;
+        started = true;
+        opts.onDaily!();
+      });
+      row.appendChild(db);
+      if (opts.dailyBest != null && opts.dailyBest > 0) {
+        const best = document.createElement('div');
+        best.className = 'daily-best';
+        best.textContent = `today's best: ${opts.dailyBest.toLocaleString()}`;
+        row.appendChild(best);
+      }
+      ov.append(b, row);
+    } else {
+      ov.appendChild(b);
+    }
+
     ov.addEventListener('click', go);
-    ov.append(tag, h, p, cl, b);
     this.root.appendChild(ov);
     this.overlay = ov;
   }
@@ -423,7 +596,7 @@ export class HUD {
     this.overlay = ov;
   }
 
-  showEnd(won: boolean, stats: RunStats) {
+  showEnd(won: boolean, stats: RunStats, winText?: string) {
     this.clearOverlays();
     this.overlay = document.createElement('div');
     this.overlay.className = 'overlay';
@@ -431,8 +604,9 @@ export class HUD {
       s = Math.floor(stats.time % 60);
     const nar = this.narrative;
     // textContent (not innerHTML): narrative text comes from spec/LLM input
+    // Per-branch winText (quest graph terminal stage) beats the campaign default.
     const subText = won
-      ? nar?.winText || this.spec.objective.description
+      ? winText || nar?.winText || this.spec.objective.description
       : stats.reason || nar?.loseText || 'You fell.';
     const stageBit = stats.stagesCleared > 0 ? ` · STAGES ${stats.stagesCleared}` : '';
     const h = document.createElement('h1');

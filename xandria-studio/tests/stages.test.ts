@@ -134,11 +134,11 @@ describe('narrative + progression validation', () => {
 
 describe('quest chain generation', () => {
   const CASES: [string, string, string[]][] = [
-    ['neon cyberpunk fps arena', 'fps-arena', ['eliminate', 'boss']],
-    ['epic sword adventure through ancient ruins', 'third-person-action', ['collect', 'eliminate', 'reach']],
-    ['dreamy platformer in the clouds', 'platformer', ['collect', 'reach']],
-    ['top-down twin stick horde survival', 'top-down-shooter', ['survive', 'eliminate', 'boss']],
-    ['kart grand prix on tropical islands', 'racing', ['race']],
+    ['neon cyberpunk fps arena', 'fps-arena', ['eliminate', 'boss', 'eliminate', 'boss']],
+    ['epic sword adventure through ancient ruins', 'third-person-action', ['collect', 'eliminate', 'reach', 'eliminate']],
+    ['dreamy platformer in the clouds', 'platformer', ['collect', 'survive', 'survive', 'reach']],
+    ['top-down twin stick horde survival', 'top-down-shooter', ['survive', 'eliminate', 'boss', 'eliminate', 'boss']],
+    ['kart grand prix on tropical islands', 'racing', ['race', 'race', 'race']],
   ];
 
   it.each(CASES)('"%s" → %s quest chain %j (valid + winnable)', (intent, genre, types) => {
@@ -160,11 +160,11 @@ describe('quest chain generation', () => {
     }
   });
 
-  it('stage descriptions use "Chapter I/II/III — <verb>" format', () => {
+  it('stage descriptions use "Chapter I/II/III/IV — <verb>" format (branch endings may use "Final")', () => {
     for (const [intent] of CASES) {
       const spec = generateSpec(intent);
       spec.objective.stages!.forEach((s, i) => {
-        expect(s.description).toMatch(/^Chapter (I|II|III) — .+/);
+        expect(s.description).toMatch(/^(Chapter (I|II|III|IV)|Final) — .+/);
       });
       expect(spec.objective.stages![0].description.startsWith('Chapter I —')).toBe(true);
     }

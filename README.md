@@ -54,6 +54,27 @@ keeps your changes.
   `onLose`, `onTick`), register custom enemy kinds and upgrades — no engine
   forks required. Full reference in `xandria-studio/docs/API.md`.
 
+### Touch controls
+
+Every genre is playable on touch devices — virtual joysticks and action
+buttons appear automatically (drag-to-look for FPS, twin-stick for top-down,
+d-pad for platformer, auto-gas for racing). Desktop mouse/keyboard play is
+unchanged.
+
+### Branching quests
+
+Campaigns are now quest graphs, not rails: stages can offer choices ("spare
+the warden" vs "destroy the core") leading to alternate stages and endings,
+with per-branch victory text. Linear campaigns still work unchanged, and the
+Studio editor can wire up branches visually.
+
+### Cross-run progression
+
+A persistent profile tracks your runs, wins, and bests across sessions.
+Earn merit from finished runs and spend it on permanent modifiers (+health,
++damage, +speed, extra life). A daily challenge seed gives everyone the same
+run each day — local bests tracked, no account needed.
+
 ## Quick start
 
 ```bash

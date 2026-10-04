@@ -18,6 +18,7 @@ import {
   validateSpec,
   type GameSpec,
   type ObjectiveStage,
+  type StageChoice,
   type ObjectiveType,
   type EnemyKind,
   type EnemySpec,
@@ -134,12 +135,14 @@ export function addStage(spec: GameSpec): ObjectiveStage {
     // seed the chain from the legacy objective so nothing is lost
     const o = spec.objective;
     spec.objective.stages = [{
+      id: 'stage-0',
       type: o.type, count: o.count, timeLimit: o.timeLimit,
       description: o.description || defaultStageDescription(o.type),
     }];
   }
   const stage = defaultStageFor(spec);
   spec.objective.stages.push(stage);
+  ensureStageIds(spec);
   return stage;
 }
 
@@ -160,7 +163,7 @@ export function moveStage(spec: GameSpec, index: number, dir: -1 | 1): void {
 
 export function setStageField(
   spec: GameSpec, index: number,
-  field: 'type' | 'count' | 'timeLimit' | 'description', value: string | number,
+  field: 'type' | 'count' | 'timeLimit' | 'description' | 'id' | 'winText', value: string | number,
 ): void {
   const s = spec.objective.stages?.[index];
   if (!s) return;
@@ -172,7 +175,83 @@ export function setStageField(
     s.timeLimit = Math.max(0, Math.round(value));
   } else if (field === 'description' && typeof value === 'string') {
     s.description = value;
+  } else if (field === 'id' && typeof value === 'string') {
+    const id = value.trim().replace(/\s+/g, '-').toLowerCase();
+    if (id) s.id = id;
+  } else if (field === 'winText' && typeof value === 'string') {
+    s.winText = value;
   }
+}
+
+// ---------------------------------------------------------------------------
+// story: quest graph (branching)
+// ---------------------------------------------------------------------------
+
+/** Assign deterministic positional ids to any stage missing one. */
+export function ensureStageIds(spec: GameSpec): void {
+  const stages = spec.objective.stages;
+  if (!Array.isArray(stages)) return;
+  stages.forEach((s, i) => {
+    if (typeof s.id !== 'string' || !s.id) s.id = `stage-${i}`;
+  });
+}
+
+/** Id/label pairs for "next" selectors (excludes the stage at `except`). */
+export function stageIdOptions(spec: GameSpec, except = -1): { id: string; label: string }[] {
+  const stages = spec.objective.stages;
+  if (!Array.isArray(stages)) return [];
+  return stages
+    .map((s, i) => ({ id: s.id ?? `stage-${i}`, label: `${s.id ?? `stage-${i}`} — ${s.description.slice(0, 40)}` }))
+    .filter((_, i) => i !== except);
+}
+
+/**
+ * Set a stage's explicit successor. `undefined`/'' clears it (default: next
+ * in array order). Stored as a single-entry `next` array.
+ */
+export function setStageNext(spec: GameSpec, index: number, nextId: string | undefined): void {
+  const s = spec.objective.stages?.[index];
+  if (!s) return;
+  ensureStageIds(spec);
+  if (!nextId) delete s.next;
+  else s.next = [nextId];
+}
+
+/** Replace a stage's choice list (undefined/empty clears branching). */
+export function setStageChoices(spec: GameSpec, index: number, choices: StageChoice[] | undefined): void {
+  const s = spec.objective.stages?.[index];
+  if (!s) return;
+  ensureStageIds(spec);
+  if (!choices || choices.length === 0) delete s.choices;
+  else s.choices = choices;
+}
+
+/** Append a choice pointing at the first other stage (or a dangling '' the user must fix). */
+export function addChoice(spec: GameSpec, index: number): void {
+  const stages = spec.objective.stages;
+  const s = stages?.[index];
+  if (!s || !stages) return;
+  ensureStageIds(spec);
+  const other = stages.find((_, i) => i !== index);
+  const target = other?.id ?? '';
+  s.choices = [...(s.choices ?? []), { label: 'New path', next: target }];
+}
+
+export function removeChoice(spec: GameSpec, index: number, choiceIndex: number): void {
+  const s = spec.objective.stages?.[index];
+  if (!s || !Array.isArray(s.choices)) return;
+  s.choices.splice(choiceIndex, 1);
+  if (s.choices.length === 0) delete s.choices;
+}
+
+export function setChoiceField(
+  spec: GameSpec, index: number, choiceIndex: number,
+  field: 'label' | 'next', value: string,
+): void {
+  const c = spec.objective.stages?.[index]?.choices?.[choiceIndex];
+  if (!c) return;
+  if (field === 'label') c.label = value;
+  else if (field === 'next') c.next = value;
 }
 
 // ---------------------------------------------------------------------------

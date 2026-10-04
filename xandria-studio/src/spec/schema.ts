@@ -142,10 +142,37 @@ export interface ObjectiveSpec {
 }
 
 export interface ObjectiveStage {
+  /** Unique within the chain. Optional for backward compatibility —
+   *  normalizeSpec assigns `stage-{index}` when absent. Required on every
+   *  stage when any stage in the chain uses `next`/`choices` refs. */
+  id?: string;
   type: ObjectiveType;  // 'collect'|'eliminate'|'reach'|'survive'|'race'|'boss'
   count: number;        // target number (laps for race, seconds for survive via timeLimit)
   timeLimit: number;    // 0 = none
   description: string;  // e.g. "Chapter II — Defeat the wardens"
+  /**
+   * Explicit successors, by stage id. Default: the next stage in array order.
+   * When several ids are given without `choices`, the first wins (warning).
+   * An explicit empty array (or absent `next` on the last stage) ends the
+   * campaign in victory.
+   */
+  next?: string[];
+  /**
+   * Player-facing branch: when non-empty, completing this stage pauses the
+   * game and asks the player to pick a path; each choice's `next` names the
+   * stage id to continue at. Takes precedence over `next` when both exist.
+   */
+  choices?: StageChoice[];
+  /** Victory text when the campaign ends on this stage. Falls back to narrative.winText. */
+  winText?: string;
+}
+
+/** One player-facing branch option on a stage. */
+export interface StageChoice {
+  /** Button label shown to the player, e.g. "Spare the warden". */
+  label: string;
+  /** Id of the stage this choice leads to. */
+  next: string;
 }
 
 export interface NarrativeSpec {
@@ -247,6 +274,12 @@ export interface CustomSpec {
   assets?: AssetPacks | Record<string, AssetOverride>;
   /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
   legacyOperators?: number[];
+  /**
+   * Cross-run progression: damage multiplier from the equipped profile
+   * loadout ('power' modifier). Set by Profile.applyLoadout(), read by
+   * Progression.damageMult(). Config-only — never touches the seed.
+   */
+  profileDamageMult?: number;
 }
 
 export interface GameSpec {
@@ -355,13 +388,86 @@ function checkWinnable(
     err(`${path}.type`, 'boss objective requires at least one brute-class enemy');
 }
 
+/**
+ * Quest-graph policy. All `next`/`choices[].next` refs must name a known
+ * stage id, and every stage must be able to reach a terminal stage
+ * (one with no successors) — otherwise the campaign can stall forever
+ * in a cycle or dead end. Cycles themselves are allowed: a stage that
+ * loops back is fine as long as some path still reaches an ending
+ * (e.g. "try again" looping to itself with an "move on" exit choice).
+ */
+function validateStageGraph(
+  stages: unknown[],
+  idToIndex: Map<string, number>,
+  err: (p: string, m: string) => void,
+): void {
+  const usesRefs = stages.some(
+    (s) => isObj(s) && ((Array.isArray(s.next) && s.next.length > 0) || (Array.isArray(s.choices) && s.choices.length > 0)),
+  );
+  if (!usesRefs) return; // pure linear chain: array order, always winnable
+
+  const resolve = (id: unknown): number | undefined =>
+    typeof id === 'string' && id ? idToIndex.get(id) : undefined;
+
+  // 1) every ref must resolve
+  stages.forEach((s, i) => {
+    if (!isObj(s)) return;
+    const p = `objective.stages[${i}]`;
+    if (Array.isArray(s.next))
+      for (const n of s.next)
+        if (typeof n === 'string' && n && resolve(n) === undefined)
+          err(`${p}.next`, `unknown stage id "${n}"`);
+    if (Array.isArray(s.choices))
+      s.choices.forEach((c: unknown, ci: number) => {
+        if (isObj(c) && typeof c.next === 'string' && c.next && resolve(c.next) === undefined)
+          err(`${p}.choices[${ci}].next`, `unknown stage id "${c.next}"`);
+      });
+  });
+
+  // 2) every stage must reach a terminal stage (no successors)
+  const succ = (i: number): number[] => {
+    const s = stages[i];
+    if (!isObj(s)) return [];
+    if (Array.isArray(s.choices) && s.choices.length > 0)
+      return s.choices
+        .map((c: unknown) => (isObj(c) ? resolve(c.next) : undefined))
+        .filter((x): x is number => x !== undefined);
+    if (Array.isArray(s.next))
+      return s.next
+        .map((n: unknown) => resolve(n))
+        .filter((x): x is number => x !== undefined);
+    return i + 1 < stages.length ? [i + 1] : [];
+  };
+  const reachesEnd = (from: number): boolean => {
+    const seen = new Set<number>();
+    const stack = [from];
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      if (seen.has(i)) continue;
+      seen.add(i);
+      const s = succ(i);
+      if (s.length === 0) return true;
+      stack.push(...s);
+    }
+    return false;
+  };
+  stages.forEach((s, i) => {
+    if (!isObj(s)) return;
+    if (!reachesEnd(i)) {
+      const id = typeof s.id === 'string' && s.id ? ` "${s.id}"` : '';
+      err(`objective.stages[${i}]`, `stage${id} cannot reach any ending (cycle or dead end)`);
+    }
+  });
+}
+
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators', 'profileDamageMult'];
 
 /** Strict structural validation. Returns every problem found. */
 export function validateSpec(spec: unknown): ValidationResult {
   const errors: string[] = [];
+  const warnings: string[] = [];
   const err = (p: string, m: string) => errors.push(`${p}: ${m}`);
 
   if (!isObj(spec)) return { ok: false, errors: ['spec: not an object'], warnings: [] };
@@ -466,15 +572,42 @@ export function validateSpec(spec: unknown): ValidationResult {
     const stages = spec.objective.stages;
     if (!Array.isArray(stages) || stages.length === 0) {
       err('objective.stages', 'must be a non-empty array when present');
-    } else stages.forEach((s, i) => {
-      const p = `objective.stages[${i}]`;
-      if (!isObj(s)) return err(p, 'must be an object');
-      if (!inEnum(s.type, OBJECTIVES)) err(`${p}.type`, `must be one of ${OBJECTIVES.join('|')}`);
-      if (!num(s.count, 0, 10000)) err(`${p}.count`, 'must be 0..10000');
-      if (!num(s.timeLimit, 0, 86400)) err(`${p}.timeLimit`, 'must be 0..86400');
-      if (typeof s.description !== 'string') err(`${p}.description`, 'must be a string');
-      checkWinnable(s as unknown as ObjectiveStage, p, wctx, err);
-    });
+    } else {
+      const idToIndex = new Map<string, number>();
+      stages.forEach((s, i) => {
+        const p = `objective.stages[${i}]`;
+        if (!isObj(s)) return err(p, 'must be an object');
+        if (!inEnum(s.type, OBJECTIVES)) err(`${p}.type`, `must be one of ${OBJECTIVES.join('|')}`);
+        if (!num(s.count, 0, 10000)) err(`${p}.count`, 'must be 0..10000');
+        if (!num(s.timeLimit, 0, 86400)) err(`${p}.timeLimit`, 'must be 0..86400');
+        if (typeof s.description !== 'string') err(`${p}.description`, 'must be a string');
+        if (s.id !== undefined) {
+          if (typeof s.id !== 'string' || !s.id) err(`${p}.id`, 'must be a non-empty string');
+          else if (idToIndex.has(s.id)) err(`${p}.id`, `duplicate stage id "${s.id}"`);
+          else idToIndex.set(s.id, i);
+        }
+        if (s.next !== undefined) {
+          if (!Array.isArray(s.next) || s.next.some((n) => typeof n !== 'string' || !n))
+            err(`${p}.next`, 'must be an array of stage ids');
+          else if (s.next.length > 1 && !(Array.isArray(s.choices) && s.choices.length > 0))
+            warnings.push(`${p}.next: multiple successors without choices — the first wins`);
+        }
+        if (s.choices !== undefined) {
+          if (!Array.isArray(s.choices) || s.choices.length === 0)
+            err(`${p}.choices`, 'must be a non-empty array when present');
+          else s.choices.forEach((c, ci) => {
+            const cp = `${p}.choices[${ci}]`;
+            if (!isObj(c)) return err(cp, 'must be an object');
+            if (typeof c.label !== 'string' || !c.label) err(`${cp}.label`, 'must be a non-empty string');
+            if (typeof c.next !== 'string' || !c.next) err(`${cp}.next`, 'must be a stage id');
+          });
+        }
+        if (s.winText !== undefined && typeof s.winText !== 'string')
+          err(`${p}.winText`, 'must be a string');
+        checkWinnable(s as unknown as ObjectiveStage, p, wctx, err);
+      });
+      validateStageGraph(stages, idToIndex, err);
+    }
   }
   if (isObj(spec.meta) && spec.meta.genre === 'platformer' && isObj(spec.player) && typeof spec.player.jump === 'number' && spec.player.jump <= 0)
     err('player.jump', 'platformer requires player.jump > 0');
@@ -579,6 +712,8 @@ export function validateSpec(spec: unknown): ValidationResult {
         }
       }
       if (c.quality !== undefined && !inEnum(c.quality, QUALITY_MODES)) err('custom.quality', `must be one of ${QUALITY_MODES.join('|')}`);
+      if (c.profileDamageMult !== undefined && !(typeof c.profileDamageMult === 'number' && isFinite(c.profileDamageMult) && c.profileDamageMult > 0))
+        err('custom.profileDamageMult', 'must be a positive number');
       if (c.legacyOperators !== undefined) {
         if (!Array.isArray(c.legacyOperators) || !c.legacyOperators.every((id) => Number.isInteger(id) && (id as number) >= 1 && (id as number) <= 72))
           err('custom.legacyOperators', 'must be an array of operator ids 1..72');
@@ -628,7 +763,7 @@ export function validateSpec(spec: unknown): ValidationResult {
   }
 
   // unknown keys are ignored, never errors — but reported so typos don't vanish silently
-  const warnings: string[] = [];
+  // unknown keys are warnings, not errors
   for (const k of Object.keys(spec)) {
     if (!TOP_LEVEL_KEYS.includes(k)) warnings.push(`unknown top-level key "${k}" ignored`);
   }
@@ -660,6 +795,14 @@ export function normalizeSpec(partial: unknown): GameSpec {
     return dst;
   };
   const merged = merge(base, partial) as GameSpec;
+  // quest graph: every stage needs a stable id for next/choices refs.
+  // Assign deterministic positional ids only where the author left none.
+  const stages = (merged as GameSpec).objective?.stages;
+  if (Array.isArray(stages)) {
+    stages.forEach((s, i) => {
+      if (s && typeof (s as ObjectiveStage).id !== 'string') (s as ObjectiveStage).id = `stage-${i}`;
+    });
+  }
   const v = validateSpec(merged);
   if (!v.ok) throw new Error('Invalid GameSpec:\n' + v.errors.join('\n'));
   return merged;

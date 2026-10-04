@@ -288,33 +288,104 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   // collect counts must fit inside pickups.coins (set below)
   const collectCount = genre === 'platformer' ? 30 : Math.round(10 * diffK) + 4;
 
+  // --- quest graph: every stage gets a stable id, and each campaign gets one
+  // branch point (deterministic from the seed). Branch stages reuse only
+  // objective types already proven for the genre, so they stay winnable.
   let stages: ObjectiveStage[];
   if (genre === 'fps-arena') {
     stages = [
-      { type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.6)), timeLimit: 0, description: chapter(0, pickVerb('eliminate')) },
-      { type: 'boss', count: bruteFoes, timeLimit: 0, description: chapter(1, pickVerb('boss')) },
+      { id: 'skirmish', type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.6)), timeLimit: 0, description: chapter(0, pickVerb('eliminate')) },
+      {
+        id: 'warden', type: 'boss', count: bruteFoes, timeLimit: 0,
+        description: `${chapter(1, pickVerb('boss'))} — the warden kneels, core exposed. Spare it, or end it?`,
+        choices: [
+          { label: 'Spare the warden', next: 'mercy' },
+          { label: 'Destroy the core', next: 'ruin' },
+        ],
+      },
+      {
+        id: 'mercy', type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.3)), timeLimit: 0, next: [],
+        description: `Chapter III — Drive off the warden's loyalists`,
+        winText: `You stay your hand, and the warden's loyalists scatter. ${name} is yours — by mercy, not slaughter.`,
+      },
+      {
+        id: 'ruin', type: 'boss', count: 1, timeLimit: 0, next: [],
+        description: 'Chapter III — Shatter the exposed core',
+        winText: `The core bursts apart. No more warden, no more arena — ${name} is yours.`,
+      },
     ];
   } else if (genre === 'third-person-action') {
     stages = [
-      { type: 'collect', count: collectCount, timeLimit: 0, description: chapter(0, pickVerb('collect')) },
-      { type: 'eliminate', count: nonBruteFoes, timeLimit: 0, description: chapter(1, pickVerb('eliminate')) },
-      { type: 'reach', count: 0, timeLimit: 0, description: chapter(2, 'Reach the beacon') },
+      { id: 'shards', type: 'collect', count: collectCount, timeLimit: 0, description: chapter(0, pickVerb('collect')) },
+      {
+        id: 'break', type: 'eliminate', count: nonBruteFoes, timeLimit: 0,
+        description: `${chapter(1, pickVerb('eliminate'))} — the last of them flee. Let them go, or hunt them down?`,
+        choices: [
+          { label: 'Take the high road', next: 'beacon' },
+          { label: 'Hunt the stragglers', next: 'hunt' },
+        ],
+      },
+      {
+        id: 'beacon', type: 'reach', count: 0, timeLimit: 0, next: [],
+        description: chapter(2, 'Reach the beacon'),
+        winText: `You let them run. The beacon flares — ${name} is crossed.`,
+      },
+      {
+        id: 'hunt', type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.3)), timeLimit: 0, next: [],
+        description: 'Chapter III — Hunt the stragglers',
+        winText: `No stragglers left. The beacon flares over a quiet field — ${name} is crossed.`,
+      },
     ];
   } else if (genre === 'platformer') {
     stages = [
-      { type: 'collect', count: collectCount, timeLimit: 0, description: chapter(0, pickVerb('collect')) },
-      { type: 'reach', count: 0, timeLimit: 0, description: chapter(1, 'Reach the flag') },
+      {
+        id: 'shards', type: 'collect', count: collectCount, timeLimit: 0,
+        description: `${chapter(0, pickVerb('collect'))} — the path splits: sky or cave?`,
+        choices: [
+          { label: 'Take the sky route', next: 'sky' },
+          { label: 'Take the cave route', next: 'cave' },
+        ],
+      },
+      { id: 'sky', type: 'survive', count: 0, timeLimit: 30, description: 'Chapter II — Weather the sky storm', next: ['flag'] },
+      { id: 'cave', type: 'survive', count: 0, timeLimit: 30, description: 'Chapter II — Endure the cave dark', next: ['flag'] },
+      { id: 'flag', type: 'reach', count: 0, timeLimit: 0, description: 'Chapter III — Reach the flag' },
     ];
   } else if (genre === 'top-down-shooter') {
     stages = [
-      { type: 'survive', count: 0, timeLimit: 45, description: chapter(0, pickVerb('survive')) },
-      { type: 'eliminate', count: nonBruteFoes, timeLimit: 0, description: chapter(1, pickVerb('eliminate')) },
-      { type: 'boss', count: bruteFoes, timeLimit: 0, description: chapter(2, pickVerb('boss')) },
+      { id: 'hold', type: 'survive', count: 0, timeLimit: 45, description: chapter(0, pickVerb('survive')) },
+      { id: 'assault', type: 'eliminate', count: nonBruteFoes, timeLimit: 0, description: chapter(1, pickVerb('eliminate')) },
+      {
+        id: 'brute', type: 'boss', count: bruteFoes, timeLimit: 0,
+        description: `${chapter(2, pickVerb('boss'))} — the brute kneels, helm cracked. Spare it, or finish it?`,
+        choices: [
+          { label: 'Spare the brute', next: 'mercy' },
+          { label: 'Finish it', next: 'ruin' },
+        ],
+      },
+      {
+        id: 'mercy', type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.3)), timeLimit: 0, next: [],
+        description: 'Chapter IV — Scatter the remaining pack',
+        winText: `You lower your weapon. The pack scatters into the dark — ${name} holds, and shows mercy.`,
+      },
+      {
+        id: 'ruin', type: 'boss', count: 1, timeLimit: 0, next: [],
+        description: 'Chapter IV — Crush the brute',
+        winText: `The brute falls. Silence over the field — ${name} holds because you held it.`,
+      },
     ];
   } else {
-    // racing: single race stage (laps kept), but with narrative
+    // racing: Grand Prix, then the player's call — record attempt or victory lap
     stages = [
-      { type: 'race', count: objectiveCount, timeLimit: 0, description: chapter(0, `Complete ${objectiveCount} laps`) },
+      {
+        id: 'gp', type: 'race', count: objectiveCount, timeLimit: 0,
+        description: `${chapter(0, `Complete ${objectiveCount} laps`)} — checkered flag ahead. Push for a record, or cruise home?`,
+        choices: [
+          { label: 'Push for a record lap', next: 'record' },
+          { label: 'Cruise to the trophy', next: 'trophy' },
+        ],
+      },
+      { id: 'record', type: 'race', count: 1, timeLimit: 120, next: [], description: 'Final — Set the track record', winText: `Track record! ${name} takes the Grand Prix in style.` },
+      { id: 'trophy', type: 'race', count: 1, timeLimit: 0, next: [], description: 'Final — Victory lap', winText: `Checkered flag. ${name} takes the Grand Prix.` },
     ];
   }
 

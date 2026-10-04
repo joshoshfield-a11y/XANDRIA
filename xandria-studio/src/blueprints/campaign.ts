@@ -29,12 +29,18 @@ export function showIntroCard(engine: Engine, spec: GameSpec): void {
   }
 }
 
-export type StageHandler = (finishedIndex: number, finished: ObjectiveStage) => void;
+export type StageHandler = (
+  finishedIndex: number,
+  finished: ObjectiveStage,
+  /** The stage that runs next, or null when the campaign ends here. */
+  next: ObjectiveStage | null,
+) => void;
 
 /**
  * Build an Objectives sequencer wired to chapter cards.
  * On each stage completion: banner "Chapter <roman>" + refresh the HUD
- * objective line to the new stage's description.
+ * objective line to the new stage's description. Chapter numbers count
+ * chapters cleared (branch-aware), not array position.
  */
 export function makeCampaignObjectives(
   engine: Engine,
@@ -43,13 +49,14 @@ export function makeCampaignObjectives(
   getLevel?: () => number,
 ): Objectives {
   const hud = engine.hud;
-  const objectives = new Objectives(engine, spec.objective, (finishedIndex, finished) => {
-    const next = spec.objective.stages?.[finishedIndex + 1];
-    const label = `Chapter ${roman(finishedIndex + 2)}`;
+  let chapterNo = 1;
+  const objectives = new Objectives(engine, spec.objective, (finishedIndex, finished, next) => {
+    chapterNo++;
+    const label = `Chapter ${roman(chapterNo)}`;
     const body = next?.description ?? finished.description;
     hud.showCard(label, body);
     hud.setObjective(spec.meta.name.toUpperCase(), body);
-    extra?.(finishedIndex, finished);
+    extra?.(finishedIndex, finished, next);
   }, getLevel);
   const first = spec.objective.stages?.[0];
   hud.setObjective(spec.meta.name.toUpperCase(), first?.description ?? spec.objective.description);
