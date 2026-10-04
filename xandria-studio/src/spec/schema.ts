@@ -136,6 +136,26 @@ export interface ObjectiveSpec {
   count: number;       // collect N / eliminate N / laps / seconds survived
   timeLimit: number;   // seconds, 0 = none
   description: string;
+  /** Quest chain: ordered chapters the stage sequencer plays through.
+   *  Absent = legacy single-objective game. */
+  stages?: ObjectiveStage[];
+}
+
+export interface ObjectiveStage {
+  type: ObjectiveType;  // 'collect'|'eliminate'|'reach'|'survive'|'race'|'boss'
+  count: number;        // target number (laps for race, seconds for survive via timeLimit)
+  timeLimit: number;    // 0 = none
+  description: string;  // e.g. "Chapter II — Defeat the wardens"
+}
+
+export interface NarrativeSpec {
+  premise: string;  // 1-2 sentences for the intro card, derived from the intent
+  winText: string;
+  loseText: string;
+}
+
+export interface ProgressionSpec {
+  enabled: boolean; xpPerKill: number; xpPerPickup: number;
 }
 
 export interface PickupSpec {
@@ -225,6 +245,8 @@ export interface GameSpec {
   pickups: PickupSpec;
   rules: RulesSpec;
   audio: AudioSpec;
+  narrative?: NarrativeSpec;
+  progression?: ProgressionSpec;
   custom?: CustomSpec;
 }
 
@@ -289,8 +311,38 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+interface WinnabilityCtx {
+  totalEnemies: number;
+  coins: number;
+  hasBrute: boolean;
+}
+
+/**
+ * Shared winnability rules, applied to the legacy objective AND to every
+ * quest stage. `path` is the error prefix, e.g. 'objective' or
+ * 'objective.stages[2]'.
+ */
+function checkWinnable(
+  o: { type: unknown; count: unknown; timeLimit: unknown },
+  path: string,
+  ctx: WinnabilityCtx,
+  err: (p: string, m: string) => void,
+): void {
+  if (!inEnum(o.type, OBJECTIVES)) return;
+  if (o.type === 'eliminate' && typeof o.count === 'number' && o.count > ctx.totalEnemies)
+    err(`${path}.count`, `eliminate count ${o.count} exceeds total spawned enemies ${ctx.totalEnemies}`);
+  if (o.type === 'collect' && typeof o.count === 'number' && o.count > ctx.coins)
+    err(`${path}.count`, `collect count ${o.count} exceeds pickups.coins ${ctx.coins}`);
+  if (o.type === 'race' && typeof o.count === 'number' && o.count < 1)
+    err(`${path}.count`, 'race requires at least 1 lap');
+  if (o.type === 'survive' && typeof o.timeLimit === 'number' && o.timeLimit <= 0)
+    err(`${path}.timeLimit`, 'survive requires timeLimit > 0');
+  if (o.type === 'boss' && !ctx.hasBrute)
+    err(`${path}.type`, 'boss objective requires at least one brute-class enemy');
+}
+
 // top-level GameSpec keys; anything else is reported as a warning, not an error
-const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'custom'];
+const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
 const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators'];
 
 /** Strict structural validation. Returns every problem found. */
@@ -384,22 +436,31 @@ export function validateSpec(spec: unknown): ValidationResult {
     if (typeof spec.objective.description !== 'string') err('objective.description', 'must be a string');
   }
 
-  // winnability — every objective must be completable with what's in the spec
-  if (isObj(spec.objective) && inEnum(spec.objective.type, OBJECTIVES)) {
-    const o = spec.objective as unknown as ObjectiveSpec;
-    const totalEnemies = Array.isArray(spec.enemies)
+  // winnability — every objective must be completable with what's in the spec.
+  // The same rules apply to the legacy objective and to each quest stage.
+  const wctx: WinnabilityCtx = {
+    totalEnemies: Array.isArray(spec.enemies)
       ? spec.enemies.reduce((n: number, e: unknown) => n + (isObj(e) && typeof e.count === 'number' ? e.count : 0), 0)
-      : 0;
-    if (o.type === 'eliminate' && typeof o.count === 'number' && o.count > totalEnemies)
-      err('objective.count', `eliminate count ${o.count} exceeds total spawned enemies ${totalEnemies}`);
-    if (o.type === 'collect' && typeof o.count === 'number' && isObj(spec.pickups) && typeof spec.pickups.coins === 'number' && o.count > spec.pickups.coins)
-      err('objective.count', `collect count ${o.count} exceeds pickups.coins ${spec.pickups.coins}`);
-    if (o.type === 'race' && typeof o.count === 'number' && o.count < 1)
-      err('objective.count', 'race requires at least 1 lap');
-    if (o.type === 'survive' && typeof o.timeLimit === 'number' && o.timeLimit <= 0)
-      err('objective.timeLimit', 'survive requires timeLimit > 0');
-    if (o.type === 'boss' && Array.isArray(spec.enemies) && !spec.enemies.some((e: unknown) => isObj(e) && e.kind === 'brute'))
-      err('objective.type', 'boss objective requires at least one brute-class enemy');
+      : 0,
+    coins: isObj(spec.pickups) && typeof spec.pickups.coins === 'number' ? spec.pickups.coins : 0,
+    hasBrute: Array.isArray(spec.enemies) && spec.enemies.some((e: unknown) => isObj(e) && e.kind === 'brute'),
+  };
+  if (isObj(spec.objective) && inEnum(spec.objective.type, OBJECTIVES)) {
+    checkWinnable(spec.objective as unknown as ObjectiveSpec, 'objective', wctx, err);
+  }
+  if (isObj(spec.objective) && spec.objective.stages !== undefined) {
+    const stages = spec.objective.stages;
+    if (!Array.isArray(stages) || stages.length === 0) {
+      err('objective.stages', 'must be a non-empty array when present');
+    } else stages.forEach((s, i) => {
+      const p = `objective.stages[${i}]`;
+      if (!isObj(s)) return err(p, 'must be an object');
+      if (!inEnum(s.type, OBJECTIVES)) err(`${p}.type`, `must be one of ${OBJECTIVES.join('|')}`);
+      if (!num(s.count, 0, 10000)) err(`${p}.count`, 'must be 0..10000');
+      if (!num(s.timeLimit, 0, 86400)) err(`${p}.timeLimit`, 'must be 0..86400');
+      if (typeof s.description !== 'string') err(`${p}.description`, 'must be a string');
+      checkWinnable(s as unknown as ObjectiveStage, p, wctx, err);
+    });
   }
   if (isObj(spec.meta) && spec.meta.genre === 'platformer' && isObj(spec.player) && typeof spec.player.jump === 'number' && spec.player.jump <= 0)
     err('player.jump', 'platformer requires player.jump > 0');
@@ -427,6 +488,27 @@ export function validateSpec(spec: unknown): ValidationResult {
     if (!inEnum(spec.audio.mode, SCALE_MODES)) err('audio.mode', `must be one of ${SCALE_MODES.join('|')}`);
     if (!num(spec.audio.sfxVolume, 0, 1)) err('audio.sfxVolume', 'must be 0..1');
     if (!num(spec.audio.musicVolume, 0, 1)) err('audio.musicVolume', 'must be 0..1');
+  }
+
+  // narrative (optional; intro card + win/lose text for the campaign layer)
+  const nar = (spec as Record<string, unknown>).narrative;
+  if (nar !== undefined) {
+    if (!isObj(nar)) err('narrative', 'must be an object');
+    else for (const k of ['premise', 'winText', 'loseText'] as const) {
+      if (typeof nar[k] !== 'string' || !nar[k].trim()) err(`narrative.${k}`, 'must be a non-empty string');
+    }
+  }
+
+  // progression (optional; XP/level config for the campaign layer)
+  const prg = (spec as Record<string, unknown>).progression;
+  if (prg !== undefined) {
+    if (!isObj(prg)) err('progression', 'must be an object');
+    else {
+      if (typeof prg.enabled !== 'boolean') err('progression.enabled', 'must be boolean');
+      const pos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+      if (!pos(prg.xpPerKill)) err('progression.xpPerKill', 'must be a positive number');
+      if (!pos(prg.xpPerPickup)) err('progression.xpPerPickup', 'must be a positive number');
+    }
   }
 
   // custom freeform layer (optional; every present field range-checked)

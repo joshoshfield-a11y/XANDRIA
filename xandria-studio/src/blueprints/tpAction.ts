@@ -10,6 +10,15 @@ import { EnemyManager } from '../engine/game/EnemyAI';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
+import { Progression } from '../engine/game/Progression';
+import {
+  showIntroCard,
+  makeCampaignObjectives,
+  makeLevelUpFlow,
+  grantKillXp,
+  grantPickupXp,
+  bossPhaseBanner,
+} from './campaign';
 import { Scatter } from '../engine/world/Scatter';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
@@ -18,6 +27,11 @@ import { PlayerAvatar } from './common';
 export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud } = engine;
   const rng = engine.rng.fork(101);
+
+  // campaign layer: intro card + XP progression (non-blocking at boot)
+  showIntroCard(engine, spec);
+  const prog = new Progression(engine);
+  let notifyLevelUp: () => void = () => {};
 
   // --- world dressing
   const structures = new Structures(engine.physics, engine.mats);
@@ -42,22 +56,26 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       engine.score += 100;
       hud.setScore(engine.score);
       objectives.addProgress(1);
+      grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.3)) pickups.spawn(rng.chance(0.6) ? 'health' : 'coin', e.position.clone().add(new THREE.Vector3(0, 0.6, 0)));
     },
+    onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   });
 
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
+  notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
+  // Campaign: projectile damage scales with the damage upgrade multiplier.
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage, point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -83,6 +101,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
     if (p.kind === 'ammo') { avatar.addAmmo(24); engine.audio.play('pickup'); }
     if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 6; engine.audio.play('powerup'); hud.toast('SPEED SURGE'); }
+    grantPickupXp(prog, notifyLevelUp);
     hud.setScore(engine.score);
   };
   const half = terrain.size / 2 - 12;
@@ -103,8 +122,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     scene.add(goal);
   }
 
-  const objectives = new Objectives(engine, spec.objective);
-  hud.setObjective(spec.meta.name.toUpperCase(), spec.objective.description);
+  const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setHint('WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
   if (spec.player.weapon !== 'none') hud.setCrosshair(false);
 
@@ -122,10 +140,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     avatar.ctrl.camYaw = camRig.yaw;
     avatar.update(dt, t);
 
-    // attack input
+    // attack input (melee damage scales with the damage upgrade multiplier)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
       if (spec.player.weapon === 'sword' || spec.player.weapon === 'none') {
-        avatar.melee(avatar.ctrl.yaw);
+        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult());
       } else {
         // shoot toward camera forward
         const dir = new THREE.Vector3();
@@ -141,7 +159,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
 
     enemies.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
-    pickups.update(dt, avatar.ctrl.position);
+    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult());
     objectives.update(dt);
 
     // scatter soft collision for player

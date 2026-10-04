@@ -10,6 +10,12 @@ import { VehicleController } from '../engine/game/VehicleController';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { Objectives } from '../engine/game/Objectives';
+import { Progression } from '../engine/game/Progression';
+import {
+  showIntroCard,
+  makeCampaignObjectives,
+  roman,
+} from './campaign';
 import { makeCar } from '../engine/gfx/Characters';
 import { Rng } from '../engine/core/Rng';
 import { toV3 } from '../engine/core/Physics';
@@ -26,6 +32,17 @@ interface AiCar {
 export function buildRacing(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(303);
+
+  // campaign layer: intro card + XP progression (non-blocking at boot).
+  // Racing has no avatar/kills: XP comes from laps + checkpoints, and the
+  // 'speed' upgrade auto-applies as faster boost-pad charging.
+  showIntroCard(engine, spec);
+  const prog = new Progression(engine);
+  const racingLevelUp = () => {
+    // 'speed' ignores the avatar param (counts the stack only)
+    prog.applyUpgrade('speed', undefined as unknown as Parameters<Progression['applyUpgrade']>[1]);
+    hud.showCard('LEVEL UP', `Engine tuned — boost pads charge ${Math.round((prog.speedMult() - 1) * 100)}% faster`);
+  };
 
   const structures = new Structures(engine.physics, engine.mats);
   const track = structures.track(spec, terrain, spec.meta.seed);
@@ -73,10 +90,14 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     scene.add(gate);
   }
 
-  // race state
-  const lapsNeeded = Math.max(1, spec.objective.count || 3);
-  const objectives = new Objectives(engine, { ...spec.objective, type: 'race', count: lapsNeeded, description: `${lapsNeeded} laps — first to the line wins` });
-  hud.setObjective(spec.meta.name.toUpperCase(), `${lapsNeeded} LAPS — beat the pack`);
+  // race state — laps from the quest stage when present, else legacy count.
+  // Staged specs flow through untouched; legacy specs get the defensive race override.
+  const raceStage = spec.objective.stages?.find((s) => s.type === 'race');
+  const lapsNeeded = Math.max(1, raceStage?.count ?? spec.objective.count ?? 3);
+  const objSpec = spec.objective.stages
+    ? spec.objective
+    : { ...spec.objective, type: 'race' as const, count: lapsNeeded };
+  const objectives = makeCampaignObjectives(engine, { ...spec, objective: objSpec }, undefined, () => prog.level);
   hud.setHint('W/S throttle · A/D steer · Space boost · Ctrl drift · R reset');
   hud.showBoostBar(true);
 
@@ -87,6 +108,9 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   let raceTime = 0;
   let bestLap = Infinity;
   let lapStart = 0;
+  // checkpoint XP: award once per gate per lap, in forward-crossing order
+  const CP_T = [0.25, 0.5, 0.75];
+  let nextCp = 0;
   const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z));
 
   const samples = track.curve.getSpacedPoints(300);
@@ -112,6 +136,13 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
 
     // lap detection: param wraps past 0.98 → 0.02 near start
     playerT = nearestT(car.position);
+    // checkpoint gates: forward crossing awards XP (once per gate per lap)
+    while (nextCp < CP_T.length && lastT < CP_T[nextCp] && playerT >= CP_T[nextCp]) {
+      hud.toast('CHECKPOINT');
+      engine.audio.play('checkpoint');
+      if (prog.onPickup()) racingLevelUp();
+      nextCp++;
+    }
     if (lastT > 0.92 && playerT < 0.08) {
       const lapTime = raceTime - lapStart;
       if (lapTime > 10) { // debounce bad wraps
@@ -119,16 +150,18 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
         engine.audio.play('checkpoint');
         hud.toast(playerLap >= lapsNeeded ? 'FINISH!' : `LAP ${playerLap + 1} — ${lapTime.toFixed(1)}s`);
         objectives.addProgress(1);
+        if (prog.onKill()) racingLevelUp(); // a lap is worth a kill's XP
         playerLap++;
         lapStart = raceTime;
+        nextCp = 0;
       }
     }
     lastT = playerT;
 
-    // boost pads
+    // boost pads (charge rate scales with the speed upgrade multiplier)
     for (const pad of pads) {
       if (car.position.distanceToSquared(pad) < 9) {
-        car.boost = Math.min(1, car.boost + dt * 1.4);
+        car.boost = Math.min(1, car.boost + dt * 1.4 * prog.speedMult());
         if (engine.frame % 12 === 0) engine.particles.magic(car.position, '#3fd8ff', 4);
       }
     }

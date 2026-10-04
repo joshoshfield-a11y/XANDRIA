@@ -10,6 +10,15 @@ import { EnemyManager } from '../engine/game/EnemyAI';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
+import { Progression } from '../engine/game/Progression';
+import {
+  showIntroCard,
+  makeCampaignObjectives,
+  makeLevelUpFlow,
+  grantKillXp,
+  grantPickupXp,
+  bossPhaseBanner,
+} from './campaign';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { PlayerAvatar } from './common';
@@ -18,6 +27,11 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(404);
   const arenaR = Math.min(40, terrain.size / 2 - 10);
+
+  // campaign layer: intro card + XP progression (non-blocking at boot)
+  showIntroCard(engine, spec);
+  const prog = new Progression(engine);
+  let notifyLevelUp: () => void = () => {};
 
   const structures = new Structures(engine.physics, engine.mats);
   structures.arenaWalls(new THREE.Vector3(0, terrain.heightAt(0, 0), 0), arenaR, 4);
@@ -41,20 +55,24 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
       engine.score += 100;
       hud.setScore(engine.score);
       objectives.addProgress(1);
+      grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.2)) pickups.spawn(rng.chance(0.5) ? 'health' : 'ammo', e.position.clone());
     },
+    onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   });
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
+  // Campaign: projectile damage scales with the damage upgrade multiplier.
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage, point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -65,10 +83,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
     if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
     if (p.kind === 'coin') { engine.score += 50; engine.audio.play('coin'); hud.setScore(engine.score); }
+    grantPickupXp(prog, notifyLevelUp);
   };
 
-  const objectives = new Objectives(engine, spec.objective);
-  hud.setObjective(spec.meta.name.toUpperCase(), spec.objective.description);
+  const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setHint('WASD move · mouse aim · LMB fire · Esc pause');
 
   const camRig = makeCameraRig('top-down', engine.camera, input, (x, z) => terrain.heightAt(x, z));
@@ -126,7 +144,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
 
     enemies.update(dt, pp, t);
     projectiles.update(dt);
-    pickups.update(dt, pp);
+    pickups.update(dt, pp, 2.6 * prog.magnetMult());
     objectives.update(dt);
     topUp();
 

@@ -9,6 +9,14 @@ import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
+import { Progression } from '../engine/game/Progression';
+import {
+  showIntroCard,
+  makeCampaignObjectives,
+  makeLevelUpFlow,
+  grantKillXp,
+  grantPickupXp,
+} from './campaign';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
@@ -17,6 +25,11 @@ import { Rng } from '../engine/core/Rng';
 export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const { scene, hud, terrain } = engine;
   const rng = new Rng(spec.meta.seed ^ 0x4a7f);
+
+  // campaign layer: intro card + XP progression (non-blocking at boot)
+  showIntroCard(engine, spec);
+  const prog = new Progression(engine);
+  let notifyLevelUp: () => void = () => {};
 
   // world = mostly visual; course floats above a hazard
   const startY = Math.max(3, terrain.heightAt(-terrain.size / 2 + 14, 0) + 3);
@@ -62,9 +75,12 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   let avatar: PlayerAvatar;
   const enemies = new EnemyManager(engine, null, {
     onPlayerHit: (dmg, from) => avatar.damage(dmg, from),
-    onDeath: (e) => { engine.score += 100; hud.setScore(engine.score); },
+    // platformer has no player weapons; walkers are stompable hazards —
+    // if one dies (hazard/fall), it still feeds the XP economy
+    onDeath: (e) => { engine.score += 100; hud.setScore(engine.score); grantKillXp(prog, notifyLevelUp); },
   });
   avatar = new PlayerAvatar(engine, spec, start.clone().add(new THREE.Vector3(0, 2, 0)), enemies, projectiles);
+  notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
   // walkers patrol the bigger platforms
   const patrolPlatforms = platforms.filter((p, i) => i > 2 && i < platforms.length - 2 && p.size.x > 3.4);
@@ -85,6 +101,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
       if (spec.objective.type === 'collect') objectives.addProgress(1);
     }
     if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
+    grantPickupXp(prog, notifyLevelUp);
   };
   for (let i = 0; i < platforms.length - 1; i++) {
     const a = platforms[i].pos, b = platforms[i + 1].pos;
@@ -100,10 +117,14 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const mid = platforms[Math.floor(platforms.length / 2)];
   pickups.spawn('health', mid.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
 
-  const objectives = new Objectives(engine, spec.objective.type === 'collect'
-    ? { ...spec.objective, count: Math.min(spec.objective.count || 20, pickups.remaining('coin')) }
-    : spec.objective);
-  hud.setObjective(spec.meta.name.toUpperCase(), spec.objective.type === 'collect' ? 'Collect the coins, reach the flag' : 'Reach the flag');
+  // clamp collect targets (legacy or staged) to coins actually placed on the course
+  const clampCollect = (count: number) => Math.min(count || 20, pickups.remaining('coin'));
+  const objSpec = spec.objective.stages
+    ? { ...spec.objective, stages: spec.objective.stages.map((s) => s.type === 'collect' ? { ...s, count: clampCollect(s.count) } : s) }
+    : spec.objective.type === 'collect'
+      ? { ...spec.objective, count: clampCollect(spec.objective.count) }
+      : spec.objective;
+  const objectives = makeCampaignObjectives(engine, { ...spec, objective: objSpec }, undefined, () => prog.level);
   hud.setHint('A/D move · Space jump (x2) · Shift dash · reach the flag');
 
   const camRig = makeCameraRig('side', engine.camera, engine.input);
@@ -114,7 +135,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     avatar.ctrl.camYaw = -Math.PI / 2;
     avatar.update(dt, t);
     enemies.update(dt, avatar.ctrl.position, t);
-    pickups.update(dt, avatar.ctrl.position);
+    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult());
     objectives.update(dt);
 
     const pp = avatar.ctrl.position;

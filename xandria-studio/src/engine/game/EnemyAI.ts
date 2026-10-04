@@ -18,6 +18,8 @@ import { Rng } from '../core/Rng';
 export interface EnemyEvents {
   onPlayerHit?: (damage: number, from: THREE.Vector3) => void;
   onDeath?: (e: Enemy) => void;
+  /** boss phase transitions (1 at ≤66% HP, 2 at ≤33% HP) */
+  onPhase?: (e: Enemy, phase: number) => void;
 }
 
 const ENEMY_COLORS: Record<string, { shirt: string; pants: string; accent: string }> = {
@@ -40,6 +42,14 @@ export class Enemy {
   private rng: Rng;
   private speedMult = 1;
   private aggroMult = 1;
+  /**
+   * Boss flag — set when this enemy is a brute in a boss objective
+   * (objective.type === 'boss', or any quest stage with type 'boss').
+   * Blueprints may also set it explicitly. Drives phase transitions.
+   */
+  isBoss: boolean;
+  /** boss phase: 0 = full, 1 = enraged (≤66%), 2 = desperate (≤33%) */
+  private phase = 0;
 
   constructor(
     private engine: Engine,
@@ -57,6 +67,7 @@ export class Enemy {
     this.home = spawn.clone();
     this.rng = new Rng(seed);
     this.hoverPhase = this.rng.range(0, Math.PI * 2);
+    this.isBoss = spec.kind === 'brute' && Enemy.isBossObjective(engine);
 
     if (spec.kind === 'walker' || spec.kind === 'brute') {
       const bulk = (spec.kind === 'brute' ? 1.7 : 1) * sz;
@@ -91,6 +102,13 @@ export class Enemy {
     }
     const glowRoot = this.rig?.group ?? this.turret?.group;
     if (mods?.glow && glowRoot) this.applyGlow(mods.glow, glowRoot);
+  }
+
+  /** True when the objective (or any quest stage) is a boss fight. */
+  private static isBossObjective(engine: Engine): boolean {
+    const obj = engine.spec.objective;
+    if (obj.type === 'boss') return true;
+    return !!obj.stages?.some((s) => s.type === 'boss');
   }
 
   private applyGlow(color: string, root: THREE.Object3D) {
@@ -139,7 +157,31 @@ export class Enemy {
       const dir = this.position.sub(from).setY(0).normalize();
       this.body.applyImpulse(new CANNON.Vec3(dir.x * amount * 0.6, amount * 0.25, dir.z * amount * 0.6));
     }
-    if (this.health <= 0) this.die();
+    if (this.health <= 0) { this.die(); return; }
+    this.checkBossPhase();
+  }
+
+  /**
+   * Boss phase transitions at ≤66% (phase 1, enraged) and ≤33% HP
+   * (phase 2, desperate). Each phase multiplies speed and aggression and
+   * fires onPhase so the blueprint can show a banner ("The Warden enrages!").
+   * No-op for non-boss enemies. Deterministic — no RNG involved.
+   */
+  private checkBossPhase() {
+    if (!this.isBoss || !this.alive) return;
+    const frac = this.health / this.maxHealth;
+    const want = frac <= 1 / 3 ? 2 : frac <= 2 / 3 ? 1 : 0;
+    if (want > this.phase) {
+      this.phase = want;
+      this.speedMult *= 1.25;
+      this.aggroMult *= 1.3;
+      this.events.onPhase?.(this, this.phase);
+    }
+  }
+
+  /** current boss phase (0 = full strength) */
+  get bossPhase(): number {
+    return this.phase;
   }
 
   private die() {

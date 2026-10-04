@@ -10,6 +10,15 @@ import { EnemyManager } from '../engine/game/EnemyAI';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
+import { Progression } from '../engine/game/Progression';
+import {
+  showIntroCard,
+  makeCampaignObjectives,
+  makeLevelUpFlow,
+  grantKillXp,
+  grantPickupXp,
+  bossPhaseBanner,
+} from './campaign';
 import { Structures } from '../engine/world/Structures';
 import { PlayerAvatar } from './common';
 
@@ -17,6 +26,11 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(202);
   const arenaR = Math.min(46, terrain.size / 2 - 12);
+
+  // campaign layer: intro card + XP progression (non-blocking at boot)
+  showIntroCard(engine, spec);
+  const prog = new Progression(engine);
+  let notifyLevelUp: () => void = () => {};
 
   // arena: perimeter + cover
   const structures = new Structures(engine.physics, engine.mats);
@@ -48,21 +62,25 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       engine.score += 100;
       hud.setScore(engine.score);
       objectives.addProgress(1);
+      grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.25)) pickups.spawn(rng.chance(0.5) ? 'ammo' : 'health', e.position.clone().add(new THREE.Vector3(0, 0.5, 0)));
     },
+    onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   });
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
   // Player projectiles damage the enemy owning the hit body; enemy projectiles damage the player.
+  // Campaign: projectile damage scales with the damage upgrade multiplier.
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage, point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -74,6 +92,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
     if (p.kind === 'coin') { engine.score += 50; engine.audio.play('coin'); }
     if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 5; engine.audio.play('powerup'); }
+    grantPickupXp(prog, notifyLevelUp);
     hud.setScore(engine.score);
   };
   pickups.scatterTerrain(
@@ -81,8 +100,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     (x, z) => terrain.heightAt(x, z), arenaR - 4, spec.meta.seed,
   );
 
-  const objectives = new Objectives(engine, spec.objective);
-  hud.setObjective(spec.meta.name.toUpperCase(), spec.objective.description);
+  const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setCrosshair(true);
   hud.setHint('WASD move · mouse aim · LMB fire · Space jump · Esc pause');
 
@@ -143,7 +161,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
 
     enemies.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
-    pickups.update(dt, avatar.ctrl.position);
+    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult());
     objectives.update(dt);
 
     if (enemies.aliveCount() === 0 && spawned < totalNeeded) spawnWave();

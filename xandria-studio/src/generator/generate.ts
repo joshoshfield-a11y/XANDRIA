@@ -5,7 +5,8 @@
 import {
   normalizeSpec,
   type GameSpec, type Genre, type Environment, type Mood, type Weather, type TimeOfDay,
-  type TerrainType, type Weapon, type EnemyKind, type ObjectiveType, type Palette,
+  type TerrainType, type Weapon, type EnemyKind, type ObjectiveType, type ObjectiveStage,
+  type NarrativeSpec, type Palette,
 } from '@spec';
 import { hashString } from '../engine/core/Rng';
 import { applyOperators } from './operators';
@@ -71,6 +72,88 @@ const MOOD_KEYS: [Mood, string[]][] = [
 const NAME_ADJ = ['Crimson', 'Hollow', 'Silent', 'Burning', 'Frozen', 'Neon', 'Ancient', 'Forgotten', 'Iron', 'Shadow', 'Golden', 'Broken', 'Emerald', 'Storm', 'Obsidian', 'Radiant'];
 const NAME_NOUN = ['Frontier', 'Expanse', 'Citadel', 'Wastes', 'Reach', 'Valley', 'Bastion', 'Realm', 'Gauntlet', 'Sanctum', 'Outskirts', 'Crucible', 'Drift', 'Verge', 'Ascent', 'Hollow'];
 
+/* ---------- quest chains + narrative (campaign layer) ---------- */
+const ROMAN = ['I', 'II', 'III', 'IV', 'V'];
+const chapter = (i: number, verb: string) => `Chapter ${ROMAN[i]} — ${verb}`;
+
+const STAGE_VERBS: Record<ObjectiveType, string[]> = {
+  collect: ['Gather the shards', 'Claim the shards'],
+  eliminate: ['Thin the patrols', 'Break their ranks', 'Clear the field'],
+  reach: ['Reach the beacon', 'Push to the beacon'],
+  survive: ['Hold the line', 'Weather the storm'],
+  race: ['Take the Grand Prix'],
+  boss: ['Slay the Warden', 'Bring down the champion'],
+};
+
+const ENV_DISPLAY: Record<Environment, string> = {
+  forest: 'the forest', jungle: 'the jungle', desert: 'the desert', wasteland: 'the wasteland',
+  arctic: 'the frozen north', volcanic: 'the volcanic wastes', city: 'the city',
+  'neon-city': 'the neon city', 'space-station': 'the station', ruins: 'the ancient ruins',
+  dreamscape: 'the dreamscape', islands: 'the islands', arena: 'the arena',
+};
+
+const MOOD_TONE: Record<Mood, string> = {
+  aggressive: 'blood-mad', dark: 'shadow-sworn', tense: 'restless', mysterious: 'strange',
+  chill: 'uneasy', retro: 'chrome', heroic: 'iron-jawed', epic: 'storm-born',
+};
+
+const FOE_NAMES: Record<string, string> = {
+  walker: 'raiders', drone: 'machines', turret: 'sentries', flyer: 'wings', brute: 'brutes',
+};
+
+/** plural foe noun from the dominant enemy kind in the spec */
+function foeWord(specs: { kind: string; count: number }[]): string {
+  let best = 'walker', bestN = -1;
+  for (const s of specs) {
+    if (s.kind === 'racer') continue;
+    if (s.count > bestN) { bestN = s.count; best = s.kind; }
+  }
+  return FOE_NAMES[best] ?? 'raiders';
+}
+
+/** Deterministic intro-card + win/lose text from intent keywords (via env/mood), genre, and name. */
+function buildNarrative(
+  genre: Genre, mood: Mood, name: string, env: Environment,
+  specs: { kind: string; count: number }[], laps: number,
+): NarrativeSpec {
+  const E = ENV_DISPLAY[env];
+  const Ecap = E[0].toUpperCase() + E.slice(1);
+  const foe = foeWord(specs);
+  const tone = MOOD_TONE[mood];
+  switch (genre) {
+    case 'fps-arena':
+      return {
+        premise: `${Ecap} has fallen to the ${tone} ${foe}. ${name} answers the call: thin their ranks in the arena, then bring down their warden.`,
+        winText: `The arena falls silent. The warden is down — ${name} is yours.`,
+        loseText: `The arena keeps its champions. The warden still stands.`,
+      };
+    case 'third-person-action':
+      return {
+        premise: `Something ${tone} stirs in ${E}. Cross ${name}: gather the shards, break the ${foe}, and reach the beacon on the far side.`,
+        winText: `The beacon flares. ${name} is crossed and the ${foe} are scattered.`,
+        loseText: `The ${foe} reclaim ${E}. The beacon goes dark.`,
+      };
+    case 'platformer':
+      return {
+        premise: `${Ecap} lies in pieces across the sky. Gather the shards and reach the flag to make ${name} whole again.`,
+        winText: `The flag is raised. ${name} is whole again.`,
+        loseText: `The shards scatter to the wind. Try the crossing again.`,
+      };
+    case 'top-down-shooter':
+      return {
+        premise: `The ${tone} ${foe} come in waves over ${E}. Hold the line, break their assault, and face the brute that leads them.`,
+        winText: `The last brute falls. ${Ecap} holds — because you held it.`,
+        loseText: `The line breaks. The ${foe} overrun ${E}.`,
+      };
+    case 'racing':
+      return {
+        premise: `The ${name} Grand Prix: ${laps} laps around ${E}. No second chances.`,
+        winText: `Checkered flag. ${name} takes the Grand Prix.`,
+        loseText: `The pack pulls away. The Grand Prix slips through your fingers.`,
+      };
+  }
+}
+
 export interface GenerateOptions {
   genre?: Genre;
   environment?: Environment;
@@ -130,7 +213,7 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     : genre === 'racing' ? 'none' : 'sword';
 
   // --- enemies
-  const enemySpecs = [];
+  const enemySpecs: { kind: EnemyKind; count: number; health: number; speed: number; damage: number; weapon: Weapon | 'melee' | 'none' }[] = [];
   if (genre !== 'racing') {
     const wantsDrones = has(text, 'drone', 'drones', 'robot', 'robots', 'mech');
     const wantsTurrets = has(text, 'turret', 'turrets', 'defense');
@@ -192,6 +275,57 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     ? Math.round(has(text, 'long') ? 300 : 150)
     : has(text, 'timed', 'time limit', 'speedrun') ? 240 : 0;
 
+  // --- quest stages: 2–3 chapter chains per genre (all winnable by construction)
+  const foeCount = (kinds: string[]) =>
+    enemySpecs.filter((e) => kinds.includes(e.kind)).reduce((n, e) => n + e.count, 0);
+  const nonBruteFoes = foeCount(['walker', 'drone', 'turret', 'flyer']);
+  // fps-arena and top-down chains end in a boss fight — guarantee the brute exists
+  if ((genre === 'fps-arena' || genre === 'top-down-shooter') && foeCount(['brute']) === 0) {
+    enemySpecs.push({ kind: 'brute' as EnemyKind, count: 1, health: Math.round(300 * diffK), speed: 3.5, damage: Math.round(22 * diffK), weapon: 'melee' as const });
+  }
+  const bruteFoes = foeCount(['brute']);
+  const pickVerb = (t: ObjectiveType) => STAGE_VERBS[t][Math.floor(rng() * STAGE_VERBS[t].length)];
+  // collect counts must fit inside pickups.coins (set below)
+  const collectCount = genre === 'platformer' ? 30 : Math.round(10 * diffK) + 4;
+
+  let stages: ObjectiveStage[];
+  if (genre === 'fps-arena') {
+    stages = [
+      { type: 'eliminate', count: Math.max(1, Math.floor(nonBruteFoes * 0.6)), timeLimit: 0, description: chapter(0, pickVerb('eliminate')) },
+      { type: 'boss', count: bruteFoes, timeLimit: 0, description: chapter(1, pickVerb('boss')) },
+    ];
+  } else if (genre === 'third-person-action') {
+    stages = [
+      { type: 'collect', count: collectCount, timeLimit: 0, description: chapter(0, pickVerb('collect')) },
+      { type: 'eliminate', count: nonBruteFoes, timeLimit: 0, description: chapter(1, pickVerb('eliminate')) },
+      { type: 'reach', count: 0, timeLimit: 0, description: chapter(2, 'Reach the beacon') },
+    ];
+  } else if (genre === 'platformer') {
+    stages = [
+      { type: 'collect', count: collectCount, timeLimit: 0, description: chapter(0, pickVerb('collect')) },
+      { type: 'reach', count: 0, timeLimit: 0, description: chapter(1, 'Reach the flag') },
+    ];
+  } else if (genre === 'top-down-shooter') {
+    stages = [
+      { type: 'survive', count: 0, timeLimit: 45, description: chapter(0, pickVerb('survive')) },
+      { type: 'eliminate', count: nonBruteFoes, timeLimit: 0, description: chapter(1, pickVerb('eliminate')) },
+      { type: 'boss', count: bruteFoes, timeLimit: 0, description: chapter(2, pickVerb('boss')) },
+    ];
+  } else {
+    // racing: single race stage (laps kept), but with narrative
+    stages = [
+      { type: 'race', count: objectiveCount, timeLimit: 0, description: chapter(0, `Complete ${objectiveCount} laps`) },
+    ];
+  }
+
+  // coins must cover the collect stage (legacy single-collect path already does)
+  const coins = Math.max(
+    objectiveType === 'collect' ? objectiveCount : genre === 'platformer' ? 60 : 12,
+    genre === 'third-person-action' || genre === 'platformer' ? collectCount : 0,
+  );
+
+  const narrative = buildNarrative(genre, mood, name, environment, enemySpecs, objectiveCount);
+
   // --- world
   const terrain: TerrainType = has(text, 'mountain', 'mountains', 'alpine') ? 'mountains'
     : has(text, 'canyon', 'gorge') ? 'canyon'
@@ -241,14 +375,16 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
       camera: genre === 'fps-arena' ? 'first-person' : genre === 'platformer' ? 'side' : genre === 'top-down-shooter' ? 'top-down' : genre === 'racing' ? 'chase' : 'third-person',
     },
     enemies: enemySpecs,
-    objective: { type: objectiveType, count: objectiveCount, timeLimit, description: objectiveDesc },
+    objective: { type: objectiveType, count: objectiveCount, timeLimit, description: objectiveDesc, stages },
     pickups: {
-      coins: objectiveType === 'collect' ? objectiveCount : genre === 'platformer' ? 60 : 12,
+      coins,
       health: Math.round(4 * (difficulty === 'hard' ? 0.6 : 1)),
       ammo: weapon === 'none' || weapon === 'sword' ? 0 : 8,
       powerups: 2,
     },
     rules: { lives: difficulty === 'hard' ? 2 : 3, difficulty },
+    narrative,
+    progression: { enabled: true, xpPerKill: 20, xpPerPickup: 5 },
     audio: {
       music: true,
       mood,

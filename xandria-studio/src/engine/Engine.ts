@@ -15,7 +15,7 @@ import { createSky, type SkyRig } from './gfx/Sky';
 import { Particles } from './gfx/Particles';
 import { PostFX } from './gfx/PostFX';
 import { Terrain } from './world/Terrain';
-import { HUD } from './game/HUD';
+import { HUD, type RunStats } from './game/HUD';
 import { AssetBridge } from './gfx/AssetBridge';
 
 export type EngineState = 'loading' | 'ready' | 'playing' | 'paused' | 'won' | 'lost';
@@ -86,6 +86,7 @@ export class Engine {
     this.audio = new AudioEngine(spec);
     this.particles = new Particles(this.scene, spec.meta.seed ^ 0x9a77);
     this.hud = new HUD(container, spec);
+    this.hud.attachEngine(this);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
 
     this.sky = createSky(spec, this.scene);
@@ -167,23 +168,54 @@ export class Engine {
     this.input.endFrame();
   }
 
-  togglePause() {
-    if (this.state === 'playing') { this.state = 'paused'; this.hud.showPause(); }
-    else if (this.state === 'paused') { this.state = 'playing'; this.hud.hidePause(); this.last = performance.now(); }
+  /** Pause the sim without any overlay (for modal flows like level-up). */
+  pause() {
+    if (this.state === 'playing') {
+      this.state = 'paused';
+      this.last = performance.now();
+    }
   }
 
-  win() {
+  /** Resume the sim after pause(). */
+  resume() {
+    if (this.state === 'paused') {
+      this.state = 'playing';
+      this.last = performance.now();
+    }
+  }
+
+  togglePause() {
+    if (this.state === 'playing') { this.pause(); this.hud.showPause(); }
+    else if (this.state === 'paused') { this.resume(); this.hud.hidePause(); }
+  }
+
+  win(stats: Partial<RunStats> = {}) {
     if (this.state !== 'playing') return;
     this.state = 'won';
     this.audio.play('win');
-    this.hud.showEnd(true, this.score, this.elapsed);
+    this.hud.showEnd(true, {
+      score: this.score,
+      time: this.elapsed,
+      kills: 0,
+      level: 1,
+      stagesCleared: 0,
+      ...stats,
+    });
   }
 
-  lose(reason = '') {
+  lose(reason = '', stats: Partial<RunStats> = {}) {
     if (this.state !== 'playing') return;
     this.state = 'lost';
     this.audio.play('lose');
-    this.hud.showEnd(false, this.score, this.elapsed, reason);
+    this.hud.showEnd(false, {
+      score: this.score,
+      time: this.elapsed,
+      kills: 0,
+      level: 1,
+      stagesCleared: 0,
+      reason,
+      ...stats,
+    });
   }
 
   restart() {

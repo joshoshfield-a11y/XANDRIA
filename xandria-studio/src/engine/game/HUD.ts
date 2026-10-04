@@ -2,7 +2,21 @@
  * DOM HUD overlay: health/boost bars, objective tracker, score, timer, crosshair,
  * damage vignette, pause + end screens. Zero three.js cost; crisp at any resolution.
  */
-import type { GameSpec } from '@spec';
+import type { GameSpec, NarrativeSpec } from '@spec';
+import type { Engine } from '../Engine';
+import type { UpgradeDef } from './Progression';
+
+/** End-of-run stats shown on the victory/defeat screen. */
+export interface RunStats {
+  score: number;
+  /** run length in seconds */
+  time: number;
+  kills: number;
+  level: number;
+  stagesCleared: number;
+  /** defeat reason (ignored on victory) */
+  reason?: string;
+}
 
 const CSS = `
 .xhud { position:absolute; inset:0; pointer-events:none; font-family:'Segoe UI',system-ui,sans-serif; color:#e8ecf1; user-select:none; z-index:10; }
@@ -38,6 +52,16 @@ const CSS = `
 .xhud .boss { position:absolute; left:50%; top:56px; transform:translateX(-50%); width:340px; text-align:center; }
 .xhud .boss .bar { height:10px; }
 .xhud .boss .name { font-size:12px; letter-spacing:.2em; opacity:.85; margin-bottom:4px; }
+.xhud .card { position:absolute; left:50%; top:13%; transform:translateX(-50%); max-width:440px; width:calc(100% - 48px); padding:18px 24px 20px; background:rgba(10,14,20,.9); border:1px solid rgba(255,210,63,.4); border-radius:12px; backdrop-filter:blur(6px); pointer-events:auto; text-align:center; animation:cardin .25s ease; cursor:pointer; }
+.xhud .card h2 { font-size:19px; letter-spacing:.14em; margin:0 0 8px; color:#ffd23f; }
+.xhud .card p { font-size:13.5px; opacity:.92; line-height:1.6; margin:0 0 14px; }
+.xhud .card .btn { display:inline-block; font-size:13px; font-weight:700; letter-spacing:.1em; padding:9px 26px; border-radius:8px; border:1px solid rgba(140,180,220,.4); background:linear-gradient(180deg,#2b3f57,#1a2536); color:#e8ecf1; cursor:pointer; }
+.xhud .lvlopts { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; justify-content:center; }
+.xhud .lvlopt { flex:1 1 150px; max-width:210px; padding:14px 12px; border-radius:10px; border:1px solid rgba(140,180,220,.35); background:linear-gradient(180deg,#223048,#141c2c); color:#e8ecf1; cursor:pointer; text-align:center; }
+.xhud .lvlopt:hover { border-color:#ffd23f; background:linear-gradient(180deg,#2e4258,#1a2438); }
+.xhud .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:#ffd23f; margin-bottom:6px; }
+.xhud .lvlopt .ds { font-size:12px; opacity:.8; line-height:1.45; }
+@keyframes cardin { from { opacity:0; transform:translate(-50%,-10px); } }
 `;
 
 export class HUD {
@@ -145,6 +169,89 @@ export class HUD {
     this.bossFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
   }
 
+  /** Engine reference for modal flows (level-up pause). Set by Engine. */
+  private eng: Engine | null = null;
+  attachEngine(e: Engine) {
+    this.eng = e;
+  }
+
+  private get narrative(): NarrativeSpec | undefined {
+    return this.spec.narrative;
+  }
+
+  /**
+   * Story card — centered overlay, NON-blocking (the game keeps running).
+   * Auto-dismisses after 3.5s or on click. Awaiting it is optional.
+   */
+  showCard(title: string, body: string, buttonText = 'CONTINUE'): Promise<void> {
+    // dismiss any previous card first
+    this.root.querySelector('.card')?.remove();
+    return new Promise((resolve) => {
+      const el = document.createElement('div');
+      el.className = 'card';
+      const h = document.createElement('h2');
+      h.textContent = title;
+      const p = document.createElement('p');
+      p.textContent = body;
+      const b = document.createElement('span');
+      b.className = 'btn';
+      b.textContent = buttonText;
+      el.append(h, p, b);
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        el.remove();
+        resolve();
+      };
+      el.addEventListener('click', finish);
+      this.root.appendChild(el);
+      const timer = setTimeout(finish, 3500);
+    });
+  }
+
+  /**
+   * Level-up modal — PAUSES the game until the player picks one of the
+   * 3 upgrade choices. Resolves with the chosen upgrade id.
+   */
+  showLevelUp(choices: UpgradeDef[]): Promise<string> {
+    const eng = this.eng;
+    const wasPlaying = eng?.state === 'playing';
+    if (wasPlaying) eng!.pause();
+    return new Promise<string>((resolve) => {
+      const el = document.createElement('div');
+      el.className = 'overlay';
+      const h = document.createElement('h1');
+      h.textContent = 'LEVEL UP';
+      h.style.color = '#ffd23f';
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = 'Choose an upgrade';
+      const opts = document.createElement('div');
+      opts.className = 'lvlopts';
+      for (const c of choices) {
+        const b = document.createElement('button');
+        b.className = 'lvlopt';
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        nm.textContent = c.name;
+        const ds = document.createElement('div');
+        ds.className = 'ds';
+        ds.textContent = c.desc;
+        b.append(nm, ds);
+        b.addEventListener('click', () => {
+          el.remove();
+          if (wasPlaying) eng!.resume();
+          resolve(c.id);
+        });
+        opts.appendChild(b);
+      }
+      el.append(h, sub, opts);
+      this.root.appendChild(el);
+    });
+  }
+
   damageFlash() { this.vignetteT = 0.35; }
   toast(text: string, seconds = 2.2) {
     this.toastEl.textContent = text;
@@ -169,18 +276,36 @@ export class HUD {
   }
   hidePause() { this.clearOverlay(); }
 
-  showEnd(won: boolean, score: number, time: number, reason = '') {
+  showEnd(won: boolean, stats: RunStats) {
     this.clearOverlay();
     this.overlay = document.createElement('div');
     this.overlay.className = 'overlay';
-    const m = Math.floor(time / 60), s = Math.floor(time % 60);
-    this.overlay.innerHTML = `
-      <h1 style="color:${won ? '#7dffa8' : '#ff6a7a'}">${won ? 'VICTORY' : 'DEFEATED'}</h1>
-      <div class="sub">${won ? this.spec.objective.description : reason || 'You fell.'}</div>
-      <div class="stats">SCORE ${Math.round(score)} · TIME ${m}:${String(s).padStart(2, '0')}</div>
-      <div><button data-a="restart">${won ? 'PLAY AGAIN' : 'RETRY'}</button></div>`;
+    const m = Math.floor(stats.time / 60),
+      s = Math.floor(stats.time % 60);
+    const nar = this.narrative;
+    // textContent (not innerHTML): narrative text comes from spec/LLM input
+    const subText = won
+      ? nar?.winText || this.spec.objective.description
+      : stats.reason || nar?.loseText || 'You fell.';
+    const stageBit = stats.stagesCleared > 0 ? ` · STAGES ${stats.stagesCleared}` : '';
+    const h = document.createElement('h1');
+    h.textContent = won ? 'VICTORY' : 'DEFEATED';
+    h.style.color = won ? '#7dffa8' : '#ff6a7a';
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = subText;
+    const statsEl = document.createElement('div');
+    statsEl.className = 'stats';
+    statsEl.textContent =
+      `SCORE ${Math.round(stats.score)} · TIME ${m}:${String(s).padStart(2, '0')}` +
+      ` · KILLS ${stats.kills} · LEVEL ${stats.level}${stageBit}`;
+    const btnWrap = document.createElement('div');
+    const btn = document.createElement('button');
+    btn.textContent = won ? 'PLAY AGAIN' : 'RETRY';
+    btn.addEventListener('click', () => (window.__XANDRIA__ as any)?.engine.restart());
+    btnWrap.appendChild(btn);
+    this.overlay.append(h, sub, statsEl, btnWrap);
     this.root.appendChild(this.overlay);
-    this.overlay.querySelector('[data-a="restart"]')?.addEventListener('click', () => (window.__XANDRIA__ as any)?.engine.restart());
   }
 
   private clearOverlay() { this.overlay?.remove(); this.overlay = null; }
