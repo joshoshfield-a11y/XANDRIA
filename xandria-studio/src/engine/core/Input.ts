@@ -191,6 +191,19 @@ export class Input {
   }
   tap(a: Action) { this.just.add(a); }
 
+  /** Clear all held/edge input (used by in-place restart). */
+  reset() {
+    this.down.clear();
+    this.just.clear();
+    this.released.clear();
+    this.injected.clear();
+    this.injectedAxes = null;
+    this.look.x = 0;
+    this.look.y = 0;
+    this.wheel = 0;
+    this.pointerDown = false;
+  }
+
   /** Call once per frame AFTER the game has consumed input. */
   endFrame() {
     this.just.clear();

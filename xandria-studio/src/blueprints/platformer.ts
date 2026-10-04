@@ -17,6 +17,16 @@ import {
   grantKillXp,
   grantPickupXp,
 } from './campaign';
+import { VariantDirector } from './enemies';
+import {
+  EffectState,
+  EffectHud,
+  spawnEffectPickup,
+  applyPickupEffect,
+  effectOf,
+  wrapShieldDamage,
+} from './fx';
+import { ChapterDresser, ParallaxLayers } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
@@ -30,11 +40,18 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   showIntroCard(engine, spec);
   const prog = new Progression(engine);
   let notifyLevelUp: () => void = () => {};
+  // content depth: enemy variants, timed pickup effects, chapter dressing
+  const fx = new EffectState();
+  const fxHud = new EffectHud();
+  const dresser = new ChapterDresser(engine);
 
   // world = mostly visual; course floats above a hazard
   const startY = Math.max(3, terrain.heightAt(-terrain.size / 2 + 14, 0) + 3);
   const start = new THREE.Vector3(-terrain.size / 2 + 14, startY, 0);
   const dir = new THREE.Vector3(1, 0, 0.08);
+
+  // background parallax layers (distant ridges drifting with the camera)
+  const parallax = new ParallaxLayers(engine, rng.fork(4242), spec, startY);
 
   const structures = new Structures(engine.physics, engine.mats);
   const difficulty = spec.rules.difficulty;
@@ -76,31 +93,59 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const enemies = new EnemyManager(engine, null, {
     onPlayerHit: (dmg, from) => avatar.damage(dmg, from),
     // platformer has no player weapons; walkers are stompable hazards —
-    // if one dies (hazard/fall), it still feeds the XP economy
-    onDeath: (e) => { engine.score += 100; hud.setScore(engine.score); grantKillXp(prog, notifyLevelUp); },
+    // if one dies (stomp/hazard/fall), it still feeds the XP economy
+    onDeath: (e) => {
+      variants.onEnemyDeath(e);
+      engine.score += Math.round(100 * fx.scoreMult());
+      hud.setScore(engine.score);
+      grantKillXp(prog, notifyLevelUp);
+    },
   });
+  // enemy variants: spikeballs (never stomp) + skyrays (sine patrol)
+  const variants = new VariantDirector(engine, enemies, null, 31337);
   avatar = new PlayerAvatar(engine, spec, start.clone().add(new THREE.Vector3(0, 2, 0)), enemies, projectiles);
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
+  wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
-  // walkers patrol the bigger platforms
+  // walkers patrol the bigger platforms — some are spikeballs (stomping hurts!)
   const patrolPlatforms = platforms.filter((p, i) => i > 2 && i < platforms.length - 2 && p.size.x > 3.4);
   const walkers = spec.enemies.filter((e) => e.kind === 'walker');
   const nEnemies = Math.min(patrolPlatforms.length, walkers.reduce((n, e) => n + e.count, 0) || 4);
   for (let i = 0; i < nEnemies; i++) {
     const p = patrolPlatforms[Math.floor((i / nEnemies) * patrolPlatforms.length)];
+    const variant = rng.chance(0.35) ? 'spikeball' : null;
+    const before = enemies.enemies.length;
     enemies.spawnAll([{ kind: 'walker', count: 1, health: 25, speed: 2.5, damage: 10, weapon: 'melee' }], () => p.pos.clone().add(new THREE.Vector3(0, 1, 0)));
+    const e = enemies.enemies[before];
+    if (e) { variants.register(e, variant); variants.decorate(e, variant); }
+  }
+
+  // skyrays: sine-patrolling flyers over the later platforms
+  const rayPlatforms = platforms.filter((p, i) => i > Math.floor(platforms.length * 0.4) && i < platforms.length - 1);
+  const nRays = Math.min(3, Math.max(1, Math.floor(rayPlatforms.length / 4)));
+  for (let i = 0; i < nRays; i++) {
+    const p = rayPlatforms[Math.floor(((i + 0.5) / nRays) * rayPlatforms.length)];
+    const before = enemies.enemies.length;
+    enemies.spawnAll([{ kind: 'flyer', count: 1, health: 30, speed: 4, damage: 8, weapon: 'blaster' }], () => p.pos.clone().add(new THREE.Vector3(0, 0.1, 0)));
+    const e = enemies.enemies[before];
+    if (e) { variants.register(e, 'skyray'); variants.decorate(e, 'skyray'); }
   }
 
   // coins along jump arcs between platforms
   const pickups = new Pickups(engine);
   pickups.onCollect = (p) => {
-    if (p.kind === 'coin') {
-      engine.score += 50;
-      engine.audio.play('coin');
-      hud.setScore(engine.score);
-      if (spec.objective.type === 'collect') objectives.addProgress(1);
+    const eff = effectOf(p);
+    if (eff) {
+      applyPickupEffect(engine, fx, avatar, spec, eff);
+    } else {
+      if (p.kind === 'coin') {
+        engine.score += Math.round(50 * fx.scoreMult());
+        engine.audio.play('coin');
+        hud.setScore(engine.score);
+        if (spec.objective.type === 'collect') objectives.addProgress(1);
+      }
+      if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
     }
-    if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
     grantPickupXp(prog, notifyLevelUp);
   };
   for (let i = 0; i < platforms.length - 1; i++) {
@@ -116,6 +161,11 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // health mid-course
   const mid = platforms[Math.floor(platforms.length / 2)];
   pickups.spawn('health', mid.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
+  // timed effect pickups on later platforms: magnet + shield
+  const q1 = platforms[Math.floor(platforms.length * 0.3)];
+  const q3 = platforms[Math.floor(platforms.length * 0.7)];
+  spawnEffectPickup(pickups, engine, 'magnet', q1.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
+  spawnEffectPickup(pickups, engine, 'shield', q3.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
 
   // clamp collect targets (legacy or staged) to coins actually placed on the course
   const clampCollect = (count: number) => Math.min(count || 20, pickups.remaining('coin'));
@@ -125,7 +175,15 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
       ? { ...spec.objective, count: clampCollect(spec.objective.count) }
       : spec.objective;
   const objectives = makeCampaignObjectives(engine, { ...spec, objective: objSpec }, undefined, () => prog.level);
-  hud.setHint('A/D move · Space jump (x2) · Shift dash · reach the flag');
+  hud.setHint('A/D move · Space jump (x2) · Shift dash · reach the flag · stomp foes (not the spiky ones!)');
+
+  // chapter-0 floating dressing (crystals drift near the course)
+  const courseCx = start.x + 60;
+  dresser.dress(spec, 0, rng.fork(5000), {
+    cx: courseCx, cz: 0, half: 70,
+    yAt: () => startY,
+  }, { floating: true });
+  let lastStage = 0;
 
   const camRig = makeCameraRig('side', engine.camera, engine.input);
 
@@ -135,10 +193,44 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     avatar.ctrl.camYaw = -Math.PI / 2;
     avatar.update(dt, t);
     enemies.update(dt, avatar.ctrl.position, t);
-    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult());
+    variants.update(dt, avatar.ctrl.position, t);
+    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());
     objectives.update(dt);
+    fx.tick(dt, spec);
+    fxHud.update(fx, t);
+    parallax.update(engine.camera.position.x);
+
+    // chapter transitions: fresh dressing + difficulty ramp
+    const stageIdx = objectives.currentStageIndex;
+    if (stageIdx !== lastStage) {
+      lastStage = stageIdx;
+      dresser.dress(spec, stageIdx, rng.fork(5000 + stageIdx), {
+        cx: courseCx, cz: 0, half: 70,
+        yAt: () => startY,
+      }, { floating: true });
+      variants.applyStageScaling(stageIdx);
+    }
 
     const pp = avatar.ctrl.position;
+
+    // stomp: falling onto a foe kills it — unless it's a spikeball, which hurts
+    if (avatar.ctrl.velocity.y < -3 && engine.state === 'playing') {
+      for (const e of enemies.enemies) {
+        if (!e.alive) continue;
+        const ep = e.position;
+        if (Math.hypot(pp.x - ep.x, pp.z - ep.z) < 1.3 && pp.y > ep.y + 0.9 && pp.y < ep.y + 2.8) {
+          if (variants.getVariant(e) === 'spikeball') {
+            avatar.damage(18, ep);
+            engine.audio.play('hurt');
+          } else {
+            e.damage(9999, pp);
+            engine.audio.play('hit');
+          }
+          avatar.ctrl.body.velocity.y = 9; // bounce
+          break;
+        }
+      }
+    }
     if (pp.y < hazardY + 2) {
       avatar.damage(34);
       // bounce back to last platform

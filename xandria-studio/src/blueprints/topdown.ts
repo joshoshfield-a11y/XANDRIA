@@ -19,6 +19,22 @@ import {
   grantPickupXp,
   bossPhaseBanner,
 } from './campaign';
+import {
+  VariantDirector,
+  planSpawns,
+  isBossStageActive,
+  ARENA_VARIANTS,
+} from './enemies';
+import {
+  EffectState,
+  EffectHud,
+  scatterEffects,
+  spawnEffectPickup,
+  applyPickupEffect,
+  effectOf,
+  wrapShieldDamage,
+} from './fx';
+import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { PlayerAvatar } from './common';
@@ -32,6 +48,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   showIntroCard(engine, spec);
   const prog = new Progression(engine);
   let notifyLevelUp: () => void = () => {};
+  // content depth: enemy variants, timed pickup effects, chapter dressing
+  const fx = new EffectState();
+  const fxHud = new EffectHud();
+  const dresser = new ChapterDresser(engine);
 
   const structures = new Structures(engine.physics, engine.mats);
   structures.arenaWalls(new THREE.Vector3(0, terrain.heightAt(0, 0), 0), arenaR, 4);
@@ -52,7 +72,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const enemies = new EnemyManager(engine, projectiles, {
     onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
     onDeath: (e) => {
-      engine.score += 100;
+      variants.onEnemyDeath(e); // splitter minis + visual cleanup first
+      engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
       objectives.addProgress(1);
       grantKillXp(prog, notifyLevelUp);
@@ -60,12 +81,19 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.2)) pickups.spawn(rng.chance(0.5) ? 'health' : 'ammo', e.position.clone());
+      else if (rng.chance(0.1)) {
+        const kinds = ['shield', 'rapid', 'mult', 'magnet'] as const;
+        spawnEffectPickup(pickups, engine, kinds[rng.int(0, 3)], e.position.clone().add(new THREE.Vector3(0, 0.8, 0)));
+      }
     },
     onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   });
+  // enemy variants: chargers, snipers, splitters layered over the base kinds
+  const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
+  wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
   // Campaign: projectile damage scales with the damage upgrade multiplier.
@@ -80,11 +108,19 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
 
   const pickups = new Pickups(engine);
   pickups.onCollect = (p) => {
-    if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
-    if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
-    if (p.kind === 'coin') { engine.score += 50; engine.audio.play('coin'); hud.setScore(engine.score); }
+    const eff = effectOf(p);
+    if (eff) {
+      applyPickupEffect(engine, fx, avatar, spec, eff);
+    } else {
+      if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
+      if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
+      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); hud.setScore(engine.score); }
+    }
     grantPickupXp(prog, notifyLevelUp);
   };
+  // timed effect pickups scattered away from the spawn clearing
+  scatterEffects(pickups, engine, rng.fork(912), (x, z) => terrain.heightAt(x, z), arenaR - 8,
+    ['shield', 'rapid', 'mult', 'magnet'], [{ x: 0, z: 0, r: 8 }]);
 
   const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setHint('WASD move · mouse aim · LMB fire · Esc pause');
@@ -106,18 +142,27 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     return pos;
   };
   const topUp = () => {
-    const cap = 9;
+    // difficulty ramp: later chapters raise the alive cap + field scaled variants
+    const stage = objectives.currentStageIndex;
+    const cap = 9 + stage;
     const alive = enemies.aliveCount();
     const want = Math.min(cap - alive, totalNeeded - spawned);
     if (want <= 0) return;
     const kinds = spec.enemies.length ? spec.enemies : [{ kind: 'walker' as const, count: 1, health: 30, speed: 5, damage: 8, weapon: 'melee' as const }];
     for (let i = 0; i < want; i++) {
-      const es = { ...kinds[spawned % kinds.length], count: 1 };
-      enemies.spawnAll([es], () => spawnEdge(es.kind));
+      const planned = planSpawns([{ ...kinds[spawned % kinds.length], count: 1 }], rng, stage, ARENA_VARIANTS)[0];
+      const before = enemies.enemies.length;
+      enemies.spawnAll([planned.spec], () => spawnEdge(planned.spec.kind));
+      const e = enemies.enemies[before];
+      if (e) { variants.register(e, planned.variant); variants.decorate(e, planned.variant); }
       spawned++;
     }
   };
   topUp();
+
+  // chapter-0 arena dressing
+  dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half: arenaR - 8, yAt: (x, z) => terrain.heightAt(x, z) });
+  let lastStage = 0;
 
   engine.onUpdate((dt) => {
     const t = engine.time;
@@ -143,19 +188,27 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     }
 
     enemies.update(dt, pp, t);
+    variants.update(dt, pp, t);
     projectiles.update(dt);
-    pickups.update(dt, pp, 2.6 * prog.magnetMult());
+    pickups.update(dt, pp, 2.6 * prog.magnetMult() * fx.magnetMult());
     objectives.update(dt);
     topUp();
+    fx.tick(dt, spec);
+    fxHud.update(fx, t);
 
-    // FIX 5: combat intensity decays to baseline; boss bar tracks the toughest living enemy
+    // chapter transitions: fresh dressing, difficulty ramp, boss intro
+    const stageIdx = objectives.currentStageIndex;
+    if (stageIdx !== lastStage) {
+      lastStage = stageIdx;
+      dresser.dress(spec, stageIdx, rng.fork(5000 + stageIdx), { cx: 0, cz: 0, half: arenaR - 8, yAt: (x, z) => terrain.heightAt(x, z) });
+      variants.applyStageScaling(stageIdx);
+      variants.notifyStage(stageIdx, isBossStageActive(spec, objectives));
+    }
+
+    // FIX 5: combat intensity decays to baseline; boss bar during boss fights
     combatT = Math.max(0, combatT - dt * 0.25);
     engine.audio.setIntensity(0.35 + combatT * 0.6);
-    if (spec.objective.type === 'boss') {
-      const boss = enemies.enemies.filter((e) => e.alive).sort((a, b) => b.maxHealth - a.maxHealth)[0];
-      if (boss) hud.setBoss(`BOSS — ${boss.spec.kind.toUpperCase()}`, boss.health / boss.maxHealth);
-      else hud.setBoss(null, 0);
-    }
+    variants.updateBossBar(spec.objective.type === 'boss' || isBossStageActive(spec, objectives));
 
     if (pp.y < -40) { avatar.damage(1000); camRig.shake(0.8); }
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);

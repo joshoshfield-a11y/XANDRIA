@@ -17,8 +17,10 @@ import { PostFX } from './gfx/PostFX';
 import { Terrain } from './world/Terrain';
 import { HUD, type RunStats } from './game/HUD';
 import { AssetBridge } from './gfx/AssetBridge';
+import { Settings } from './game/Settings';
+import { Juice } from './game/Juice';
 
-export type EngineState = 'loading' | 'ready' | 'playing' | 'paused' | 'won' | 'lost';
+export type EngineState = 'loading' | 'ready' | 'title' | 'playing' | 'paused' | 'won' | 'lost';
 
 export interface EngineOptions {
   testMode?: boolean;
@@ -41,6 +43,8 @@ export class Engine {
   readonly hud: HUD;
   readonly rng: Rng;
   readonly postfx: PostFX;
+  readonly settings: Settings;
+  readonly juice: Juice;
   sky!: SkyRig;
   terrain!: Terrain;
   assetBridge: AssetBridge;
@@ -58,19 +62,29 @@ export class Engine {
   private rafId = 0;
   private started = false;
   private resizeObs: ResizeObserver;
+  /** blueprint rebuild fn, registered by the runtime bootstrap (enables in-place restart) */
+  private runBuilder: ((e: Engine) => unknown) | null = null;
+  /** hooks that survive restart() (runtime bootstrap); blueprint hooks are torn down */
+  private persistentHooks = new Set<(dt: number) => void>();
+  private pauseReason: 'menu' | 'modal' | null = null;
+  private sceneBaseline = 0;
+  private physicsBodiesBaseline = 0;
+  private physicsConstraintsBaseline = 0;
+  private shakeVec = new THREE.Vector3();
 
   constructor(container: HTMLElement, spec: GameSpec, opts: EngineOptions = {}) {
     this.container = container;
     this.spec = spec;
     this.testMode = opts.testMode ?? new URLSearchParams(location.search).has('test');
     this.rng = new Rng(spec.meta.seed);
+    this.settings = new Settings();
 
     this.renderer = new THREE.WebGLRenderer({ antialias: !(spec.theme.retroFilter && (spec.custom?.quality ?? 'retro') === 'retro'), powerPreference: 'high-performance' });
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    const quality = spec.custom?.quality ?? 'retro';
+    const quality = this.effectiveQuality();
     const pr = quality === 'high' ? Math.min(devicePixelRatio, 2)
       : quality === 'standard' ? Math.min(devicePixelRatio, 1.5)
       : spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
@@ -84,7 +98,10 @@ export class Engine {
     this.mats = new MaterialLibrary(spec);
     this.input = new Input(this.renderer.domElement);
     this.audio = new AudioEngine(spec);
+    this.audio.setVolume(this.settings.data.volume);
+    this.audio.setMuted(this.settings.data.muted);
     this.particles = new Particles(this.scene, spec.meta.seed ^ 0x9a77);
+    this.juice = new Juice(container, this.particles);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
@@ -115,10 +132,56 @@ export class Engine {
       });
     }
 
+    // restart baselines: everything the blueprint adds beyond this point is
+    // torn down by resetRun() (scene objects, physics bodies, hooks)
+    this.sceneBaseline = this.scene.children.length;
+    this.physicsBodiesBaseline = this.physics.bodyBaseline();
+    this.physicsConstraintsBaseline = this.physics.constraintBaseline();
+
     this.state = 'ready';
   }
 
   onUpdate(fn: (dt: number) => void) { this.updateHooks.push(fn); return () => { this.updateHooks = this.updateHooks.filter((f) => f !== fn); }; }
+
+  /**
+   * Like onUpdate, but the hook survives restart() — for runtime-bootstrap
+   * hooks (body dataset, weather follow). Blueprint hooks use onUpdate and
+   * are torn down on restart.
+   */
+  onUpdatePersistent(fn: (dt: number) => void) {
+    this.persistentHooks.add(fn);
+    return this.onUpdate(fn);
+  }
+
+  /**
+   * Register the blueprint build function so restart()/toTitle() can rebuild
+   * the run in place from the same spec+seed. Called once by the runtime
+   * bootstrap.
+   */
+  setRunBuilder(fn: (e: Engine) => unknown) {
+    this.runBuilder = fn;
+  }
+
+  /** Effective render quality: settings override, else the spec hint. */
+  effectiveQuality(): 'retro' | 'standard' | 'high' {
+    const q = this.settings.data.quality;
+    if (q !== 'auto') return q;
+    const sq = this.spec.custom?.quality;
+    return sq === 'high' || sq === 'standard' ? sq : 'retro';
+  }
+
+  /** Apply settings to audio + renderer (called on boot and from the pause menu). */
+  applySettings() {
+    this.audio.setVolume(this.settings.data.volume);
+    this.audio.setMuted(this.settings.data.muted);
+    const quality = this.effectiveQuality();
+    const pr = quality === 'high' ? Math.min(devicePixelRatio, 2)
+      : quality === 'standard' ? Math.min(devicePixelRatio, 1.5)
+      : this.spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
+      : Math.min(devicePixelRatio, 2);
+    this.renderer.setPixelRatio(pr);
+    this.resize();
+  }
 
   resize() {
     const w = this.container.clientWidth || innerWidth;
@@ -132,7 +195,6 @@ export class Engine {
   start() {
     if (this.started) return;
     this.started = true;
-    this.state = 'playing';
     this.last = performance.now();
     const tick = () => {
       this.rafId = requestAnimationFrame(tick);
@@ -142,12 +204,52 @@ export class Engine {
       this.step(dt);
     };
     this.rafId = requestAnimationFrame(tick);
+    // automated runs skip the title screen (?test=1 sets testMode; ?autostart=1 is the explicit alias)
+    const autostart = new URLSearchParams(location.search).has('autostart');
+    if (this.testMode || autostart) {
+      this.state = 'playing';
+    } else {
+      this.showTitle();
+    }
+  }
+
+  private showTitle() {
+    this.state = 'title';
+    const nar = this.spec.narrative;
+    const racing = this.spec.meta.genre === 'racing';
+    this.hud.showTitle({
+      name: this.spec.meta.name,
+      premise: nar?.premise ?? this.spec.objective.description,
+      controls: racing
+        ? ['WASD / ARROWS — drive', 'SPACE — boost', 'R — reset car', 'ESC / P — pause']
+        : ['WASD / ARROWS — move', 'MOUSE — attack / aim', 'SPACE — jump / boost', 'SHIFT — sprint / dash', 'E — interact', 'ESC / P — pause'],
+      onStart: () => this.startRun(),
+    });
+  }
+
+  /** Begin the run from the title screen (the click is a user gesture: audio unlocks). */
+  startRun() {
+    if (this.state !== 'title') return;
+    this.hud.clearOverlays();
+    this.audio.unlock();
+    this.audio.play('click');
+    this.state = 'playing';
+    this.last = performance.now();
+  }
+
+  /** Back to the title screen, with a fresh run waiting underneath. */
+  toTitle() {
+    if (this.runBuilder) this.resetRun();
+    else this.hud.clearOverlays();
+    this.audio.setIntensity(0.5);
+    this.audio.setEngine(0, false);
+    this.showTitle();
   }
 
   step(dt: number) {
     this.frame++;
     this.input.beginFrame();
-    if (this.state === 'playing') {
+    if (this.state === 'playing' && !this.juice.hitStopActive()) {
       // testMode: advance many sim steps per rendered frame so headless/SwiftShader
       // runs at full simulation speed regardless of render rate.
       const substeps = this.testMode ? 10 : 1;
@@ -162,16 +264,27 @@ export class Engine {
       this.particles.update(dt * substeps);
       this.hud.update(dt);
     }
+    if (this.state === 'title' && this.input.justPressed('confirm')) this.startRun();
     if (this.input.justPressed('pause')) this.togglePause();
+    this.juice.update(dt, this.camera);
     this.sky.update(dt, this.camera.getWorldPosition(new THREE.Vector3()));
+    // screenshake: offset around the render only, never accumulates into the camera
+    const off = this.juice.shakeOffset(this.shakeVec);
+    this.camera.position.add(off);
     this.postfx.render();
+    this.camera.position.sub(off);
     this.input.endFrame();
   }
 
-  /** Pause the sim without any overlay (for modal flows like level-up). */
-  pause() {
+  /**
+   * Pause the sim. reason 'menu' (Esc/P pause menu) can be toggled back;
+   * reason 'modal' (level-up choice etc.) must resolve through its own UI.
+   */
+  pause(reason: 'menu' | 'modal' = 'modal') {
     if (this.state === 'playing') {
       this.state = 'paused';
+      this.pauseReason = reason;
+      this.audio.setEngine(0, false);
       this.last = performance.now();
     }
   }
@@ -180,18 +293,20 @@ export class Engine {
   resume() {
     if (this.state === 'paused') {
       this.state = 'playing';
+      this.pauseReason = null;
       this.last = performance.now();
     }
   }
 
   togglePause() {
-    if (this.state === 'playing') { this.pause(); this.hud.showPause(); }
-    else if (this.state === 'paused') { this.resume(); this.hud.hidePause(); }
+    if (this.state === 'playing') { this.pause('menu'); this.hud.showPause(); }
+    else if (this.state === 'paused' && this.pauseReason === 'menu') { this.resume(); this.hud.hidePause(); }
   }
 
   win(stats: Partial<RunStats> = {}) {
     if (this.state !== 'playing') return;
     this.state = 'won';
+    this.audio.setEngine(0, false);
     this.audio.play('win');
     this.hud.showEnd(true, {
       score: this.score,
@@ -206,6 +321,7 @@ export class Engine {
   lose(reason = '', stats: Partial<RunStats> = {}) {
     if (this.state !== 'playing') return;
     this.state = 'lost';
+    this.audio.setEngine(0, false);
     this.audio.play('lose');
     this.hud.showEnd(false, {
       score: this.score,
@@ -218,9 +334,72 @@ export class Engine {
     });
   }
 
+  /**
+   * In-place restart: tear down everything the blueprint built and rebuild
+   * the run from the same spec+seed (deterministic — same seed = same run).
+   * Falls back to a page reload when no run builder was registered.
+   */
   restart() {
-    try { sessionStorage.setItem('xandria.restart', '1'); } catch { /* ignore */ }
-    location.reload();
+    if (!this.runBuilder) {
+      try { sessionStorage.setItem('xandria.restart', '1'); } catch { /* ignore */ }
+      location.reload();
+      return;
+    }
+    this.resetRun();
+    this.state = 'playing';
+    this.last = performance.now();
+  }
+
+  /**
+   * Tear down blueprint state back to the post-construction baseline, then
+   * re-run the registered blueprint builder. Deterministic: rng re-seeded,
+   * particles cleared, physics/scene/hooks restored.
+   */
+  private resetRun() {
+    // drop blueprint update hooks, keep persistent bootstrap hooks
+    this.updateHooks = this.updateHooks.filter((h) => this.persistentHooks.has(h));
+    // remove blueprint scene objects (dispose their geometries)
+    for (let i = this.scene.children.length - 1; i >= this.sceneBaseline; i--) {
+      const o = this.scene.children[i];
+      this.scene.remove(o);
+      o.traverse((c: THREE.Object3D) => {
+        const g = (c as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+        g?.dispose();
+      });
+    }
+    // physics back to baseline
+    this.physics.resetToBaseline(this.physicsBodiesBaseline, this.physicsConstraintsBaseline);
+    // deterministic state
+    this.rng.reseed(this.spec.meta.seed);
+    this.particles.reset(this.spec.meta.seed ^ 0x9a77);
+    this.particles.setWeather(this.spec.theme.weather, this.spec.meta.seed);
+    // HUD / juice / input
+    this.hud.resetRun();
+    this.juice.reset();
+    this.input.reset();
+    // audio
+    this.audio.setEngine(0, false);
+    this.audio.setIntensity(0.5);
+    // clocks
+    this.time = 0;
+    this.elapsed = 0;
+    this.score = 0;
+    this.frame = 0;
+    this.pauseReason = null;
+    this.last = performance.now();
+    // rebuild the run from the same spec+seed
+    const blueprint = this.runBuilder!(this);
+    if (typeof window !== 'undefined') {
+      const X = (window as unknown as { __XANDRIA__?: { blueprint?: unknown } }).__XANDRIA__;
+      if (X) X.blueprint = blueprint;
+    }
+    // re-trigger opt-in asset packs (their objects were cleared with the scene)
+    if (this.assetBridge.enabled && !this.testMode) {
+      this.assetBridge.load().then((r) => {
+        if (r.loaded.length) console.info(`[xandria] asset packs loaded: ${r.loaded.join(', ')}`);
+        if (r.failed.length) console.warn(`[xandria] asset packs failed (procedural fallback kept): ${r.failed.join(', ')}`);
+      });
+    }
   }
 
   dispose() {

@@ -7,7 +7,7 @@ import { Rng } from './Rng';
 
 export type Sfx =
   | 'jump' | 'land' | 'hit' | 'hurt' | 'shoot' | 'laser' | 'explosion' | 'pickup' | 'coin' | 'swing'
-  | 'dash' | 'die' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step';
+  | 'dash' | 'die' | 'kill' | 'levelup' | 'chapter' | 'roar' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step';
 
 const SCALES: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -31,6 +31,8 @@ export class AudioEngine {
   private engineOsc: OscillatorNode | null = null;
   private engineGain: GainNode | null = null;
   muted = false;
+  /** master volume 0..1 (from settings) */
+  volume = 0.8;
   private intensity = 0.5;
 
   constructor(spec: GameSpec) {
@@ -52,12 +54,17 @@ export class AudioEngine {
     this.musicBus = c.createGain(); this.musicBus.gain.value = this.spec.musicVolume * 0.6;
     this.sfxBus.connect(this.comp); this.musicBus.connect(this.comp);
     this.comp.connect(this.master); this.master.connect(c.destination);
-    this.master.gain.value = this.muted ? 0 : 1;
+    this.master.gain.value = this.muted ? 0 : this.volume;
     if (this.spec.music && !this.started) this.startMusic();
     this.started = true;
   }
 
-  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 1; }
+  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : this.volume; }
+  /** Master volume 0..1. Applies live. */
+  setVolume(v: number) {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.master) this.master.gain.value = this.muted ? 0 : this.volume;
+  }
   /** 0..1 — how intense the music should be (combat raises it). */
   setIntensity(v: number) { this.intensity = Math.max(0, Math.min(1, v)); }
 
@@ -106,6 +113,10 @@ export class AudioEngine {
       case 'powerup': for (let i = 0; i < 5; i++) this.tone(440 * Math.pow(1.25, i) * p, 0.12, 'triangle', 0.25 * v, b, { when: this.ctx.currentTime + i * 0.06 }); break;
       case 'dash': this.noise(0.25, 0.35 * v, b, 2000, undefined, 'highpass'); this.tone(200, 0.2, 'sine', 0.2 * v, b, { slide: 3 }); break;
       case 'die': this.tone(400, 0.9, 'sawtooth', 0.4 * v, b, { slide: 0.15, filter: 1200 }); this.noise(0.5, 0.4 * v, b, 800); break;
+      case 'kill': this.noise(0.22, 0.65 * v, b, 1800); this.tone(320 * p, 0.22, 'square', 0.35 * v, b, { slide: 0.25, filter: 2200 }); break;
+      case 'levelup': [0, 4, 7, 12, 16, 19].forEach((s, i) => this.tone(523 * Math.pow(2, s / 12) * p, 0.22, 'triangle', 0.3 * v, b, { when: this.ctx!.currentTime + i * 0.08 })); break;
+      case 'chapter': this.tone(196 * p, 0.4, 'sawtooth', 0.32 * v, b, { filter: 1200 }); this.tone(294 * p, 0.55, 'sawtooth', 0.32 * v, b, { filter: 1400, when: this.ctx!.currentTime + 0.16 }); break;
+      case 'roar': this.tone(82 * p, 0.9, 'sawtooth', 0.55 * v, b, { slide: 0.6, filter: 700 }); this.tone(55 * p, 1.1, 'square', 0.4 * v, b, { slide: 1.4, filter: 500, when: this.ctx!.currentTime + 0.08 }); this.noise(0.8, 0.35 * v, b, 400); break;
       case 'checkpoint': [0, 4, 7, 12].forEach((s, i) => this.tone(523 * Math.pow(2, s / 12), 0.2, 'triangle', 0.25 * v, b, { when: this.ctx!.currentTime + i * 0.07 })); break;
       case 'win': [0, 4, 7, 12, 7, 12, 16].forEach((s, i) => this.tone(440 * Math.pow(2, s / 12), 0.35, 'triangle', 0.3 * v, b, { when: this.ctx!.currentTime + i * 0.13 })); break;
       case 'lose': [12, 7, 3, 0].forEach((s, i) => this.tone(330 * Math.pow(2, s / 12), 0.5, 'sawtooth', 0.25 * v, b, { when: this.ctx!.currentTime + i * 0.25, filter: 900 })); break;

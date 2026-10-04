@@ -16,9 +16,18 @@ import {
   makeCampaignObjectives,
   roman,
 } from './campaign';
+import {
+  EffectState,
+  EffectHud,
+  spawnEffectPickup,
+  applyPickupEffect,
+  effectOf,
+} from './fx';
+import { dressRacing } from './dressing';
 import { makeCar } from '../engine/gfx/Characters';
 import { Rng } from '../engine/core/Rng';
 import { toV3 } from '../engine/core/Physics';
+import { Pickups } from '../engine/game/Pickups';
 
 interface AiCar {
   mesh: THREE.Group;
@@ -38,6 +47,9 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   // 'speed' upgrade auto-applies as faster boost-pad charging.
   showIntroCard(engine, spec);
   const prog = new Progression(engine);
+  // content depth: timed pickup effects + roadside dressing/crowd
+  const fx = new EffectState();
+  const fxHud = new EffectHud();
   const racingLevelUp = () => {
     // 'speed' ignores the avatar param (counts the stack only)
     prog.applyUpgrade('speed', undefined as unknown as Parameters<Progression['applyUpgrade']>[1]);
@@ -47,6 +59,9 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   const structures = new Structures(engine.physics, engine.mats);
   const track = structures.track(spec, terrain, spec.meta.seed);
   scene.add(structures.group);
+
+  // roadside dressing: lamp posts, banner arches, grandstands + crowds
+  const updateDressing = dressRacing(engine, track, rng.fork(777), spec, (x, z) => terrain.heightAt(x, z));
 
   // scatter away from the track
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
@@ -88,6 +103,22 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     const gate = new THREE.Mesh(new THREE.TorusGeometry(track.width / 2 + 1, 0.22, 8, 24), engine.mats.glow(spec.theme.palette.accent, 1.5));
     gate.position.copy(cp).add(new THREE.Vector3(0, 4, 0));
     scene.add(gate);
+  }
+
+  // track pickups: overdrive (rapid boost charging) + score×2, collected by driving through
+  const pickups = new Pickups(engine);
+  pickups.onCollect = (p) => {
+    const eff = effectOf(p);
+    if (eff === 'rapid') {
+      applyPickupEffect(engine, fx, null, spec, 'rapid', { name: 'OVERDRIVE', hint: 'boost charging doubled' });
+    } else if (eff === 'mult') {
+      applyPickupEffect(engine, fx, null, spec, 'mult');
+    }
+    if (prog.onPickup()) racingLevelUp();
+  };
+  for (const tt of [0.06, 0.31, 0.56, 0.81]) {
+    const p = track.curve.getPointAt(tt);
+    spawnEffectPickup(pickups, engine, tt < 0.5 ? 'rapid' : 'mult', p.clone().add(new THREE.Vector3(0, 1.6, 0)));
   }
 
   // race state — laps from the quest stage when present, else legacy count.
@@ -140,6 +171,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     while (nextCp < CP_T.length && lastT < CP_T[nextCp] && playerT >= CP_T[nextCp]) {
       hud.toast('CHECKPOINT');
       engine.audio.play('checkpoint');
+      engine.score += Math.round(100 * fx.scoreMult());
+      hud.setScore(engine.score);
       if (prog.onPickup()) racingLevelUp();
       nextCp++;
     }
@@ -149,6 +182,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
         if (lapTime < bestLap) bestLap = lapTime;
         engine.audio.play('checkpoint');
         hud.toast(playerLap >= lapsNeeded ? 'FINISH!' : `LAP ${playerLap + 1} — ${lapTime.toFixed(1)}s`);
+        engine.score += Math.round(500 * fx.scoreMult());
+        hud.setScore(engine.score);
         objectives.addProgress(1);
         if (prog.onKill()) racingLevelUp(); // a lap is worth a kill's XP
         playerLap++;
@@ -158,13 +193,18 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     }
     lastT = playerT;
 
-    // boost pads (charge rate scales with the speed upgrade multiplier)
+    // boost pads (charge rate scales with the speed upgrade multiplier × overdrive)
     for (const pad of pads) {
       if (car.position.distanceToSquared(pad) < 9) {
-        car.boost = Math.min(1, car.boost + dt * 1.4 * prog.speedMult());
+        car.boost = Math.min(1, car.boost + dt * 1.4 * prog.speedMult() * fx.boostMult());
         if (engine.frame % 12 === 0) engine.particles.magic(car.position, '#3fd8ff', 4);
       }
     }
+
+    pickups.update(dt, car.position, 3.5 * fx.magnetMult(), 2.2);
+    fx.tick(dt, spec);
+    fxHud.update(fx, raceTime);
+    updateDressing(dt, raceTime);
 
     // AI follow the curve with rubber-banding
     for (const ai of aiCars) {

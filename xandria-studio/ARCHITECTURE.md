@@ -3,7 +3,9 @@
 XANDRIA Studio is the deterministic game-generation engine at the heart of this
 repository. It turns a plain-language intent ("a spooky racing game in a frozen
 wasteland") into a **validated, playable, exportable game** — with or without an
-LLM in the loop.
+LLM in the loop. Every game it generates is a **mini-campaign**: a multi-stage
+quest chain with narrative framing, XP/levels/upgrades, and phased bosses —
+not a single arcade loop.
 
 The design rule that shapes everything below:
 
@@ -16,27 +18,38 @@ The design rule that shapes everything below:
 ## 1. Pipeline overview
 
 ```
-intent text ──► generator ──► GameSpec (validated) ──► blueprint ──► running game
-                  │                                    │
-                  └─ optional LLM flavor pass ─────────┘
-                                                      │
-                                               export ──┴──► single-file HTML
-                                                      │
-                                               electron ───► Windows / macOS / Linux app
+intent text ──► generator ──► GameSpec (validated) ──► campaign ──► blueprint ──► running game
+                  │                                (quest stages,                    │
+                  └─ optional LLM flavor pass ─────► narrative, XP)                   │
+                                                                                     │
+                                                              export ──┬──► single-file HTML
+                                                                       │    (+ itch.io zip)
+                                                                       │
+                                                              electron ───► Windows / macOS / Linux app
 ```
 
 1. **Generator** (`src/generator/`) maps keywords in the intent to genre,
-   environment, mood and palette, scales difficulty, and produces a partial spec.
+   environment, mood and palette, scales difficulty, and produces a partial spec —
+   including a **quest chain** (`objective.stages`: e.g. survive → eliminate →
+   boss), deterministic **narrative** text (premise / win / lose), and a
+   **progression** config (XP per kill/pickup).
 2. **Spec layer** (`src/spec/`) normalizes it over `defaultSpec(seed)` and runs
    `validateSpec`, which enforces *genre coherence* (racing ⇒ vehicle + chase
    camera, fps ⇒ first-person, platformer ⇒ side camera, top-down ⇒ top-down
-   camera, …). An invalid spec can never reach a blueprint.
-3. **Blueprints** (`src/blueprints/`) are five hand-tuned genre assemblies that
+   camera, …) **and per-stage winnability** (each quest stage must be completable
+   with the entities the spec spawns). An invalid spec can never reach a blueprint.
+3. **Campaign systems** (`src/engine/game/`) turn the quest chain into a run:
+   `Objectives` sequences stages with per-stage timers, `Progression` tracks
+   XP/levels/upgrade choices, `HUD` renders intro/chapter/level-up/end cards,
+   `EnemyAI` phase-shifts bosses at 66%/33% HP.
+4. **Blueprints** (`src/blueprints/`) are five hand-tuned genre assemblies that
    wire the engine modules into a complete game loop: player, camera, enemies,
-   pickups, objective, HUD, win/lose conditions.
-4. **Engine** (`src/engine/`) is the genre-agnostic kernel: rendering, physics,
+   pickups, objective, HUD, win/lose conditions. Shared campaign wiring lives in
+   `src/blueprints/campaign.ts` (intro cards, chapter banners, level-up flow,
+   boss banners, multiplier hooks).
+5. **Engine** (`src/engine/`) is the genre-agnostic kernel: rendering, physics,
    audio, input, terrain, particles, characters, post-processing.
-5. **Runtime** (`src/runtime/main.ts`) boots a spec in the browser; the same
+6. **Runtime** (`src/runtime/main.ts`) boots a spec in the browser; the same
    bundle powers the Studio preview iframe, exported standalone HTML files, and
    the Electron app.
 
@@ -82,12 +95,20 @@ xandria-studio/
 │   │   │   │                      boost meter, flip auto-respawn
 │   │   │   ├── Projectiles.ts     pooled tracers with raycast collision
 │   │   │   ├── Pickups.ts         magnet-attracted collectibles
-│   │   │   ├── EnemyAI.ts         walker/brute/drone/flyer/turret + manager
-│   │   │   ├── HUD.ts             DOM overlay: bars, objective, timer, screens
-│   │   │   └── Objectives.ts      collect/eliminate/reach/survive/race/boss
+│   │   │   ├── EnemyAI.ts         walker/brute/drone/flyer/turret + manager;
+│   │   │   │                      boss phase shifts at 66%/33% HP
+│   │   │   ├── HUD.ts             DOM overlay: bars, objective, timer, screens;
+│   │   │   │                      story cards (intro/chapter/level-up/end)
+│   │   │   ├── Objectives.ts      stage sequencer: walks objective.stages in
+│   │   │   │                      order (per-stage timers); legacy single
+│   │   │   │                      objective behavior unchanged when absent
+│   │   │   └── Progression.ts     XP/levels: xpForNext curve, 6-upgrade pool,
+│   │   │                          3 choices per level-up, stacked multipliers
 │   │   └── Engine.ts        kernel: game states, variable-dt loop (physics on fixed 1/60 substeps)
 │   ├── blueprints/
 │   │   ├── common.ts        PlayerAvatar: health/lives/i-frames, weapons
+│   │   ├── campaign.ts      shared quest wiring: intro card, chapter banners,
+│   │   │                    level-up modal flow, boss-phase banners, XP helpers
 │   │   ├── tpAction.ts      third-person action
 │   │   ├── fpsArena.ts      FPS arena (pointer lock)
 │   │   ├── racing.ts        laps, checkpoints, boost pads, rubber-band AI
@@ -97,6 +118,7 @@ xandria-studio/
 │   ├── generator/
 │   │   ├── generate.ts      deterministic intent→spec (keyword tables,
 │   │   │                    13 environment palettes, difficulty scaling,
+│   │   │                    quest-stage chains, narrative text,
 │   │   │                    seed = hash(intent))
 │   │   └── llm.ts           optional OpenAI-compatible flavor enrichment
 │   │                        (name/desc/palette/mood only — then re-validated)
@@ -104,12 +126,17 @@ xandria-studio/
 │   │                        ?spec= (base64url) → ?intent= → demo
 │   └── studio/studio.ts     Studio UI: prompt, presets, live preview iframe,
 │                            Export (single-file HTML), Share link
-├── scripts/export.ts        CLI: intent/spec → standalone HTML game file
+├── scripts/
+│   ├── export.ts        CLI: intent/spec → standalone HTML + itch.io zip
+│   ├── zip.ts           dependency-free ZIP writer (node:zlib deflate)
+│   └── cover.ts         generated 630×500 PNG cover (pure-TS encoder,
+│                        embedded pixel font, styled from the spec palette)
 ├── electron/                main.cjs + preload.cjs (save-file IPC)
 ├── player.html              player entry (dark boot splash)
 ├── index.html               studio entry
 └── tests/
-    ├── *.test.ts            vitest: schema, generator, rng
+    ├── *.test.ts            vitest: schema, generator, rng, quest stages,
+    │                        campaign systems (130 tests)
     └── e2e/playability.spec.ts  Playwright: every genre boots, accepts input,
                                  runs ≥N simulated frames, zero console errors;
                                  exported HTML boots fully offline
@@ -127,14 +154,20 @@ Everything a game needs is one JSON object:
 | `player`   | type (humanoid/vehicle), camera, speed, jump, abilities, weapon, health, lives |
 | `enemies`  | array of { kind, count, health, speed, damage, weapon? } |
 | `objective`| type + target (collect N, eliminate N, reach goal, survive T, race laps, boss) |
+| `objective.stages` | optional quest chain: ordered stages, each with own type/count/timeLimit/description |
+| `narrative`| premise (intro card), winText, loseText — deterministic, from genre/mood/environment |
+| `progression` | XP config: enabled, xpPerKill, xpPerPickup |
 | `pickups`  | health/ammo/score/boost with counts and values |
 | `rules`    | lives, difficulty |
 | `audio`    | tempo, key, mood → generative soundtrack params |
 
 `validateSpec` checks types, ranges, enum membership **and cross-field
-coherence**. `normalizeSpec` deep-merges any partial over seeded defaults, so
-generators only specify what they care about. `stableStringify` gives a
-canonical serialization for share links, caching and tests.
+coherence** — including **per-stage winnability**: every quest stage must be
+completable with the entities the spec actually spawns (e.g. an eliminate-12
+stage needs ≥12 killable enemies), with error paths like
+`objective.stages[1].count`. `normalizeSpec` deep-merges any partial over seeded
+defaults, so generators only specify what they care about. `stableStringify`
+gives a canonical serialization for share links, caching and tests.
 
 Determinism: `seed` drives `Rng` everywhere world geometry is generated
 (terrain, scatter, enemy placement, name generation, ModelForge plans).
@@ -158,6 +191,45 @@ forces reusable mechanics down into the engine where all genres benefit.
 Note: there is currently no per-blueprint `dispose()` — restarting a game
 reloads the page. Full teardown without reload is future work.
 
+## 4b. Quest campaigns
+
+The campaign layer is what makes each game more than an arcade loop. The
+generator emits a quest chain (`objective.stages`) plus narrative and
+progression config; the engine and blueprints execute it:
+
+- **`Objectives` (stage sequencer)** — walks `stages` in order, each with its
+  own progress counter and `timeLimit`. `onStageComplete(index, stage)` fires
+  per stage (blueprints show a chapter banner); the final stage calls
+  `engine.win()` with `{ kills, stagesCleared, level }`. When `stages` is
+  absent the legacy single-objective behavior is byte-identical.
+- **`Progression`** — XP/level system. `xpForNext(level) = round(100·level^1.5)`;
+  `onKill()`/`onPickup()` add spec-configured XP and return true on level-up.
+  Each level-up offers 3 distinct upgrades drawn (seeded) from a 6-pool:
+  damage +25%, max HP +15% & heal, speed +12%, fire rate +20%, pickup
+  magnet +50%, dash cooldown −25%. Multipliers stack multiplicatively and are
+  exposed as `damageMult()` / `speedMult()` / `magnetMult()` / `dashCdMult()`
+  for blueprints to apply. Clean no-op when `progression.enabled` is false.
+- **`HUD` story cards** — `showCard(title, body)` for the intro premise and
+  chapter banners (non-blocking, auto-dismiss); `showLevelUp(choices)` pauses
+  the game until the player picks an upgrade; `showEnd(win, stats)` renders
+  the narrative win/lose text with run stats (score, time, kills, level,
+  chapters cleared).
+- **Boss phases** (`EnemyAI`) — brute-kind enemies in boss stages get
+  `isBoss`; at ≤66% and ≤33% HP they gain +25% speed / +30% aggression and
+  fire `onPhase`, which blueprints turn into an enrage banner. Ordinary
+  enemies are unaffected.
+- **Blueprint wiring** (`src/blueprints/campaign.ts`) — shared helpers:
+  `showIntroCard`, `makeCampaignObjectives` (chapter banners + HUD objective
+  refresh + level provider for win stats), `makeLevelUpFlow` (queued modals),
+  `grantKillXp` / `grantPickupXp`, `bossPhaseBanner`. Racing is special-cased:
+  XP on laps/checkpoints, level-ups auto-apply speed (no modal — only speed
+  is meaningful for a car).
+
+Generator quest chains per genre (deterministic, from seed):
+fps-arena eliminate→boss · third-person-action collect→eliminate→reach ·
+platformer collect→reach · top-down-shooter survive→eliminate→boss ·
+racing single race stage with narrative framing.
+
 ## 5. Test mode — how CI plays games
 
 Real-time games can't be e2e-tested on a 3-FPS software rasterizer. So
@@ -180,10 +252,21 @@ no network.
 
 - **Standalone HTML**: `vite-plugin-singlefile` inlines everything (three.js,
   cannon-es, all assets — they're procedural, so there's nothing external)
-  into one ~740 KB file (~200 KB gzip). The Studio injects
+  into one ~840 KB file (~250 KB in the zip). The Studio injects
   `window.__XANDRIA_SPEC__` after `<head>` and hands you a file that runs from
   disk with no server, no network.
 - **CLI**: `npm run export -- --intent "neon cyberpunk fps" -o game.html`.
+  Every export also writes `game-itch.zip` (unless `--no-zip`), a distributable
+  bundle containing:
+  - `index.html` — the game (itch.io requires this name at the zip root),
+  - `README.txt` — story, quest chapters, controls, credits,
+  - `itch-upload-guide.txt` — upload checklist: HTML project kind, 1280×720
+    viewport, cover art, pricing, troubleshooting,
+  - `cover.png` — generated 630×500 cover thumbnail (pure-TS PNG encoder +
+    embedded pixel font in `scripts/cover.ts`, styled from the game's own
+    palette; deterministic per seed; zero external assets).
+  The zip is built by a dependency-free writer (`scripts/zip.ts`, node:zlib
+  only) and uploads directly as an itch.io HTML5 project.
 - **Desktop app**: Electron loads the Studio; electron-builder produces
   Windows (NSIS installer + portable .exe), macOS (.dmg) and Linux (AppImage)
   artifacts via `.github/workflows/studio-ci.yml`.

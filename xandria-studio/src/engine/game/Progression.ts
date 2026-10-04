@@ -82,6 +82,7 @@ export class Progression {
       this.level++;
       leveled = true;
     }
+    if (leveled) this.engine.audio?.play('levelup');
     return leveled;
   }
 

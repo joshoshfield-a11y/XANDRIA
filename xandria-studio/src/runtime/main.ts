@@ -69,12 +69,14 @@ function boot() {
   window.__XANDRIA__ = { engine, spec, blueprint, errors: window.__XANDRIA_ERRORS };
   document.body.dataset.genre = spec.meta.genre;
   document.body.dataset.state = engine.state;
-  engine.onUpdate(() => { document.body.dataset.state = engine.state; });
+  engine.onUpdatePersistent(() => { document.body.dataset.state = engine.state; });
   // title card
   engine.hud.toast(spec.meta.name.toUpperCase(), 3);
   engine.hud.setObjective(spec.meta.name.toUpperCase(), spec.objective.description);
   engine.particles.setWeather(spec.theme.weather, spec.meta.seed);
-  engine.onUpdate(() => engine.particles.updateWeather(engine.camera.position, 1 / 60));
+  engine.onUpdatePersistent(() => engine.particles.updateWeather(engine.camera.position, 1 / 60));
+  // register the blueprint builder: enables in-place restart()
+  engine.setRunBuilder((e) => build(e, spec));
   engine.start();
 }
 

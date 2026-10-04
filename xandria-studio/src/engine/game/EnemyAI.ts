@@ -176,6 +176,10 @@ export class Enemy {
       this.speedMult *= 1.25;
       this.aggroMult *= 1.3;
       this.events.onPhase?.(this, this.phase);
+      // engine-owned juice: shake + roar + music slams to full intensity
+      this.engine.juice.shake(0.5);
+      this.engine.audio.play('roar');
+      this.engine.audio.setIntensity(1);
     }
   }
 

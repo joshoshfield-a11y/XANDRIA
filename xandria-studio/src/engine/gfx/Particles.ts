@@ -106,8 +106,28 @@ export class Particles {
     this.emit(pos, new THREE.Vector3(this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4)), 0.4, 1.2, new THREE.Color(color), 0, 0.9);
   }
 
-  /** Ambient weather. Call once. */
+  /** Clear all live particles and re-seed (used by in-place restart). */
+  reset(seed: number) {
+    for (const p of this.pool) p.alive = false;
+    this.cursor = 0;
+    this.rng = new Rng(seed);
+    for (let i = 0; i < MAX; i++) {
+      this.positions[i * 3 + 1] = -9999;
+      this.sizes[i] = 0;
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.psize.needsUpdate = true;
+  }
+
+  /** Ambient weather. Call once. Idempotent — replaces any previous weather. */
   setWeather(kind: Weather, seed: number) {
+    if (this.weatherPoints) {
+      this.scene.remove(this.weatherPoints);
+      this.weatherPoints.geometry.dispose();
+      (this.weatherPoints.material as THREE.Material).dispose();
+      this.weatherPoints = null;
+      this.weatherVel = [];
+    }
     if (kind === 'clear' || kind === 'fog') return;
     this.weatherKind = kind;
     this.weatherCount = kind === 'storm' ? 900 : kind === 'rain' ? 600 : kind === 'snow' ? 500 : 400;

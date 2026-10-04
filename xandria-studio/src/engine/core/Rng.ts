@@ -4,6 +4,10 @@ export class Rng {
   constructor(seed: number) {
     this.s = (seed >>> 0) || 0x9e3779b9;
   }
+  /** Reset to a seed (used by in-place restart for determinism). */
+  reseed(seed: number) {
+    this.s = (seed >>> 0) || 0x9e3779b9;
+  }
   next(): number {
     let t = (this.s += 0x6d2b79f5);
     t = Math.imul(t ^ (t >>> 15), t | 1);

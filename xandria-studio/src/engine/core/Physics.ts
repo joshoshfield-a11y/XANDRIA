@@ -44,6 +44,22 @@ export class Physics {
   /** Register a callback run once per fixed step (for controllers that need stable dt). */
   addStepHandler(fn: (dt: number) => void) { this.onStep.push(fn); return () => { this.onStep = this.onStep.filter((f) => f !== fn); }; }
 
+  /** Baselines for in-place restart: counts captured before the blueprint builds. */
+  bodyBaseline(): number { return this.world.bodies.length; }
+  constraintBaseline(): number { return this.world.constraints.length; }
+
+  /**
+   * Remove every body/constraint added after the baseline and clear step
+   * handlers + accumulator — back to the pre-blueprint physics state.
+   */
+  resetToBaseline(bodies: number, constraints: number) {
+    const w = this.world;
+    for (let i = w.bodies.length - 1; i >= bodies; i--) w.removeBody(w.bodies[i]);
+    for (let i = w.constraints.length - 1; i >= constraints; i--) w.removeConstraint(w.constraints[i]);
+    this.onStep = [];
+    this.accumulator = 0;
+  }
+
   step(dt: number) {
     this.accumulator += Math.min(dt, 0.1);
     let n = 0;

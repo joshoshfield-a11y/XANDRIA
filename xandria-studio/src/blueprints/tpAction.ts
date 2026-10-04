@@ -19,6 +19,22 @@ import {
   grantPickupXp,
   bossPhaseBanner,
 } from './campaign';
+import {
+  VariantDirector,
+  planSpawns,
+  isBossStageActive,
+  ACTION_VARIANTS,
+} from './enemies';
+import {
+  EffectState,
+  EffectHud,
+  scatterEffects,
+  spawnEffectPickup,
+  applyPickupEffect,
+  effectOf,
+  wrapShieldDamage,
+} from './fx';
+import { ChapterDresser } from './dressing';
 import { Scatter } from '../engine/world/Scatter';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
@@ -32,6 +48,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   showIntroCard(engine, spec);
   const prog = new Progression(engine);
   let notifyLevelUp: () => void = () => {};
+  // content depth: enemy variants, timed pickup effects, chapter dressing
+  const fx = new EffectState();
+  const fxHud = new EffectHud();
+  const dresser = new ChapterDresser(engine);
 
   // --- world dressing
   const structures = new Structures(engine.physics, engine.mats);
@@ -53,7 +73,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const enemies = new EnemyManager(engine, projectiles, {
     onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
     onDeath: (e) => {
-      engine.score += 100;
+      variants.onEnemyDeath(e); // splitter minis + visual cleanup first
+      engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
       objectives.addProgress(1);
       grantKillXp(prog, notifyLevelUp);
@@ -61,14 +82,21 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.3)) pickups.spawn(rng.chance(0.6) ? 'health' : 'coin', e.position.clone().add(new THREE.Vector3(0, 0.6, 0)));
+      else if (rng.chance(0.12)) {
+        const kinds = ['shield', 'rapid', 'mult', 'magnet'] as const;
+        spawnEffectPickup(pickups, engine, kinds[rng.int(0, 3)], e.position.clone().add(new THREE.Vector3(0, 0.8, 0)));
+      }
     },
     onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   });
+  // enemy variants: shielded bruisers + ranged casters over the base kinds
+  const variants = new VariantDirector(engine, enemies, projectiles);
 
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
+  wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
   // Campaign: projectile damage scales with the damage upgrade multiplier.
@@ -92,15 +120,30 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     }
     return new THREE.Vector3(rng.range(-20, 20), spawnY + 2, rng.range(-20, 20));
   };
-  enemies.spawnAll(spec.enemies, spawnFor);
+  // --- enemies spawn ringed around spawn, with chapter-0 variants
+  const planned = planSpawns(spec.enemies, rng, 0, ACTION_VARIANTS);
+  {
+    const before = enemies.enemies.length;
+    enemies.spawnAll(spec.enemies, spawnFor);
+    enemies.enemies.slice(before).forEach((e, idx) => {
+      const p = planned[idx];
+      variants.register(e, p ? p.variant : null);
+      if (p) variants.decorate(e, p.variant);
+    });
+  }
 
   // --- pickups
   const pickups = new Pickups(engine);
   pickups.onCollect = (p) => {
-    if (p.kind === 'coin') { engine.score += 50; engine.audio.play('coin'); if (spec.objective.type === 'collect') objectives.addProgress(1); }
-    if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
-    if (p.kind === 'ammo') { avatar.addAmmo(24); engine.audio.play('pickup'); }
-    if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 6; engine.audio.play('powerup'); hud.toast('SPEED SURGE'); }
+    const eff = effectOf(p);
+    if (eff) {
+      applyPickupEffect(engine, fx, avatar, spec, eff);
+    } else {
+      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); if (spec.objective.type === 'collect') objectives.addProgress(1); }
+      if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
+      if (p.kind === 'ammo') { avatar.addAmmo(24); engine.audio.play('pickup'); }
+      if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 6; engine.audio.play('powerup'); hud.toast('SPEED SURGE'); }
+    }
     grantPickupXp(prog, notifyLevelUp);
     hud.setScore(engine.score);
   };
@@ -110,6 +153,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     (x, z) => terrain.heightAt(x, z), half, spec.meta.seed,
     [{ x: 0, z: 0, r: 6 }],
   );
+  // timed effect pickups: shield / rapid-fire / score×2 / magnet
+  scatterEffects(pickups, engine, rng.fork(913), (x, z) => terrain.heightAt(x, z), half,
+    ['shield', 'rapid', 'mult', 'magnet'], [{ x: 0, z: 0, r: 8 }]);
 
   // --- reach objective marker
   let goal: THREE.Group | null = null;
@@ -125,6 +171,26 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setHint('WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
   if (spec.player.weapon !== 'none') hud.setCrosshair(false);
+
+  // chapter-0 world dressing
+  dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half, yAt: (x, z) => terrain.heightAt(x, z) });
+  let lastStage = 0;
+
+  // difficulty ramp: each new chapter drops scaled reinforcements (not during boss stages)
+  const spawnReinforcements = (stage: number) => {
+    if (isBossStageActive(spec, objectives)) return;
+    const n = 2 + stage;
+    const kinds = spec.enemies.length ? spec.enemies : [{ kind: 'walker' as const, count: 1, health: 30, speed: 4, damage: 10, weapon: 'melee' as const }];
+    for (let k = 0; k < n; k++) {
+      const plannedR = planSpawns([{ ...kinds[rng.int(0, kinds.length - 1)], count: 1 }], rng, stage, ACTION_VARIANTS)[0];
+      const before = enemies.enemies.length;
+      enemies.spawnAll([plannedR.spec], () => spawnFor(plannedR.spec.kind, k, n));
+      const e = enemies.enemies[before];
+      if (e) { variants.register(e, plannedR.variant); variants.decorate(e, plannedR.variant); }
+    }
+    hud.toast('HOSTILE REINFORCEMENTS');
+    engine.audio.play('alarm');
+  };
 
   // --- camera
   const camRig = makeCameraRig(spec.player.camera, engine.camera, engine.input, (x, z) => engine.terrain.heightAt(x, z));
@@ -158,9 +224,22 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     }
 
     enemies.update(dt, avatar.ctrl.position, t);
+    variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
-    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult());
+    pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());
     objectives.update(dt);
+    fx.tick(dt, spec);
+    fxHud.update(fx, t);
+
+    // chapter transitions: fresh dressing, difficulty ramp, boss intro
+    const stageIdx = objectives.currentStageIndex;
+    if (stageIdx !== lastStage) {
+      lastStage = stageIdx;
+      dresser.dress(spec, stageIdx, rng.fork(5000 + stageIdx), { cx: 0, cz: 0, half, yAt: (x, z) => terrain.heightAt(x, z) });
+      variants.applyStageScaling(stageIdx);
+      variants.notifyStage(stageIdx, isBossStageActive(spec, objectives));
+      spawnReinforcements(stageIdx);
+    }
 
     // scatter soft collision for player
     const pp = avatar.ctrl.position;
@@ -179,14 +258,11 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       if (b) bossAura.position.copy(b.position).add(new THREE.Vector3(0, 3, 0));
     }
 
-    // FIX 5: combat intensity decays to baseline; boss bar tracks the toughest living enemy
+    // FIX 5: combat intensity decays to baseline; boss bar during boss fights
+    // (legacy boss objective or boss stage)
     combatT = Math.max(0, combatT - dt * 0.25);
     engine.audio.setIntensity(0.35 + combatT * 0.6);
-    if (spec.objective.type === 'boss') {
-      const boss = enemies.enemies.filter((e) => e.alive).sort((a, b) => b.maxHealth - a.maxHealth)[0];
-      if (boss) hud.setBoss(`BOSS — ${boss.spec.kind.toUpperCase()}`, boss.health / boss.maxHealth);
-      else hud.setBoss(null, 0);
-    }
+    variants.updateBossBar(spec.objective.type === 'boss' || isBossStageActive(spec, objectives));
 
     // camera
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);

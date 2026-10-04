@@ -13,7 +13,8 @@ schema validation and hand-tuned genre blueprints.
 
 ## What it generates
 
-Five genre blueprints, all playable out of the box:
+Five genre blueprints, all playable out of the box — and every game is a
+**mini-campaign**, not an arcade loop:
 
 | Genre | Camera | Mechanics |
 |---|---|---|
@@ -22,6 +23,13 @@ Five genre blueprints, all playable out of the box:
 | Racing | chase | laps, checkpoints, boost pads, drift, rubber-band AI racers |
 | Platformer | side view | double-jump, glide, coin arcs, moving hazards, goal flag |
 | Top-down shooter | top-down | twin-stick combat, cover, elimination/survival objectives |
+
+Each generated game runs a multi-stage quest chain (chapters): a narrative
+premise card opens the run, chapter banners mark each new objective stage,
+and a win/lose story card closes it. Kills and pickups earn XP; every level
+offers a choice of upgrades (damage, health, speed, fire rate, magnet,
+dash cooldown). Bosses fight in phases — they speed up and hit harder at
+66% and 33% health, with an on-screen warning when they enrage.
 
 Worlds are themed across 13 environments (desert, tundra, neon city, volcanic,
 dreamscape, …) with day/night, weather, and seeded terrain — every game is
@@ -41,6 +49,9 @@ npm run export -- --intent "a hard platformer in a crystal dreamscape" -o my-gam
 ```
 
 Open `my-game.html` in any browser — it works from disk, fully offline.
+`npm run export` also drops a `my-game-itch.zip` next to it: the game as
+`index.html` plus a README, an itch.io upload guide, and a generated cover
+thumbnail — ready to upload as an HTML5 project on itch.io.
 
 ## Desktop app (Windows / macOS / Linux)
 
@@ -60,12 +71,18 @@ Tagged releases on GitHub build all three automatically
 ## How it works
 
 ```
-intent ──► deterministic generator ──► GameSpec (validated) ──► genre blueprint ──► game
+intent ──► deterministic generator ──► GameSpec (validated) ──► quest campaign ──► genre blueprint ──► game
 ```
 
 - **GameSpec** (`src/spec/schema.ts`) is the contract: theme, world, player,
-  enemies, objective, rules, audio. `validateSpec` enforces genre coherence, so
-  a broken game is *unrepresentable*.
+  enemies, objective, rules, audio — plus `narrative` (premise / win / lose
+  text) and `progression` (XP rates). `validateSpec` enforces genre coherence
+  and per-stage winnability, so a broken game is *unrepresentable*.
+- **Quest campaigns** turn one objective into a chapter chain: the generator
+  emits `objective.stages` (e.g. survive → eliminate → boss), the engine's
+  `Objectives` sequencer walks them with per-stage timers, `Progression`
+  tracks XP/levels/upgrades, `HUD` shows intro/chapter/level-up/end cards,
+  and bosses phase-shift at 66%/33% health.
 - **Blueprints** (`src/blueprints/`) assemble the engine (three.js rendering,
   cannon-es physics, WebAudio synth) into complete game loops.
 - The **LLM adapter** (`src/generator/llm.ts`) is optional and constrained to
@@ -80,7 +97,7 @@ How this engine realizes the legacy 72/216-operator lattice:
 
 ```bash
 cd xandria-studio
-npm test            # vitest: schema, generator determinism, RNG
+npm test            # vitest: schema, generator, campaign systems, RNG (130 tests)
 npm run test:e2e    # Playwright: every genre boots, plays, zero errors
 ```
 

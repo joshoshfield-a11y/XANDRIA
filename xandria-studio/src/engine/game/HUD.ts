@@ -61,6 +61,19 @@ const CSS = `
 .xhud .lvlopt:hover { border-color:#ffd23f; background:linear-gradient(180deg,#2e4258,#1a2438); }
 .xhud .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:#ffd23f; margin-bottom:6px; }
 .xhud .lvlopt .ds { font-size:12px; opacity:.8; line-height:1.45; }
+.xhud .title-screen { background:rgba(4,6,10,.62); }
+.xhud .title-screen .tag { font-size:13px; letter-spacing:.5em; opacity:.6; margin-bottom:10px; }
+.xhud .title-screen h1 { font-size:52px; }
+.xhud .title-screen .premise { max-width:520px; font-size:15px; line-height:1.65; opacity:.92; margin:0 24px 18px; text-align:center; }
+.xhud .title-screen .controls { display:flex; flex-wrap:wrap; gap:6px 18px; justify-content:center; max-width:520px; font-size:12px; opacity:.65; margin-bottom:26px; }
+.xhud .title-screen .start-btn { font-size:18px; padding:14px 44px; animation:pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
+.xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
+.xhud .settings-row { display:flex; align-items:center; gap:14px; font-size:13px; letter-spacing:.1em; }
+.xhud .settings-row span { width:110px; text-align:right; opacity:.8; }
+.xhud .settings-row input[type=range] { flex:1; accent-color:#ffd23f; }
+.xhud .settings-row select { flex:1; background:#1a2536; color:#e8ecf1; border:1px solid rgba(140,180,220,.4); border-radius:8px; padding:8px 10px; font-size:13px; }
+.xhud .settings-row input[type=checkbox] { width:20px; height:20px; accent-color:#ffd23f; }
 @keyframes cardin { from { opacity:0; transform:translate(-50%,-10px); } }
 `;
 
@@ -81,6 +94,7 @@ export class HUD {
   private boostBar: HTMLDivElement;
   private vignetteT = 0;
   private toastT = 0;
+  private lowHp = false;
   private hintEl: HTMLDivElement;
   private bossEl: HTMLDivElement;
   private bossName: HTMLDivElement;
@@ -252,7 +266,15 @@ export class HUD {
     });
   }
 
-  damageFlash() { this.vignetteT = 0.35; }
+  damageFlash() {
+    this.vignetteT = 0.35;
+    // every blueprint routes player damage through here — free screenshake
+    this.eng?.juice.shake(0.35);
+  }
+
+  /** Low-HP heartbeat vignette pulse (blueprints toggle based on health frac). */
+  setLowHp(on: boolean) { this.lowHp = on; }
+
   toast(text: string, seconds = 2.2) {
     this.toastEl.textContent = text;
     this.toastT = seconds;
@@ -260,24 +282,149 @@ export class HUD {
 
   update(dt: number) {
     this.vignetteT = Math.max(0, this.vignetteT - dt);
-    this.vignette.style.opacity = String(Math.min(1, this.vignetteT * 3));
+    const dmg = Math.min(1, this.vignetteT * 3);
+    const pulse = this.lowHp ? 0.22 + 0.13 * Math.sin(performance.now() / 170) : 0;
+    this.vignette.style.opacity = String(Math.max(dmg, pulse));
     this.toastT = Math.max(0, this.toastT - dt);
     this.toastEl.style.opacity = String(Math.min(1, this.toastT * 1.5));
   }
 
-  showPause() {
-    this.clearOverlay();
-    this.overlay = document.createElement('div');
-    this.overlay.className = 'overlay';
-    this.overlay.innerHTML = `<h1>PAUSED</h1><div class="sub">${this.spec.meta.name}</div><div><button data-a="resume">RESUME</button><button data-a="restart">RESTART</button></div>`;
-    this.root.appendChild(this.overlay);
-    this.overlay.querySelector('[data-a="resume"]')?.addEventListener('click', () => (window.__XANDRIA__ as any)?.engine.togglePause());
-    this.overlay.querySelector('[data-a="restart"]')?.addEventListener('click', () => (window.__XANDRIA__ as any)?.engine.restart());
+  /**
+   * Title screen — game name, narrative premise, controls, click-to-start.
+   * onStart fires once; the engine removes the overlay and starts the run.
+   */
+  showTitle(opts: { name: string; premise: string; controls: string[]; onStart: () => void }) {
+    this.clearOverlays();
+    const ov = document.createElement('div');
+    ov.className = 'overlay title-screen';
+    const tag = document.createElement('div');
+    tag.className = 'tag';
+    tag.textContent = 'XANDRIA';
+    const h = document.createElement('h1');
+    h.textContent = opts.name;
+    const p = document.createElement('p');
+    p.className = 'premise';
+    p.textContent = opts.premise;
+    const cl = document.createElement('div');
+    cl.className = 'controls';
+    for (const c of opts.controls) {
+      const d = document.createElement('div');
+      d.textContent = c;
+      cl.appendChild(d);
+    }
+    const b = document.createElement('button');
+    b.className = 'start-btn';
+    b.textContent = 'CLICK TO START';
+    let started = false;
+    const go = () => {
+      if (started) return;
+      started = true;
+      opts.onStart();
+    };
+    b.addEventListener('click', (e) => { e.stopPropagation(); go(); });
+    ov.addEventListener('click', go);
+    ov.append(tag, h, p, cl, b);
+    this.root.appendChild(ov);
+    this.overlay = ov;
   }
-  hidePause() { this.clearOverlay(); }
+
+  showPause() {
+    this.clearOverlays();
+    const eng = this.eng;
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    const h = document.createElement('h1');
+    h.textContent = 'PAUSED';
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = this.spec.meta.name;
+    const btns = document.createElement('div');
+    const mk = (label: string, fn: () => void) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.addEventListener('click', () => { eng?.audio.play('click'); fn(); });
+      return b;
+    };
+    btns.append(
+      mk('RESUME', () => eng?.togglePause()),
+      mk('RESTART', () => eng?.restart()),
+      mk('SETTINGS', () => this.showSettings(ov)),
+      mk('QUIT TO TITLE', () => eng?.toTitle()),
+    );
+    ov.append(h, sub, btns);
+    this.root.appendChild(ov);
+    this.overlay = ov;
+  }
+  hidePause() { this.clearOverlays(); }
+
+  /** Settings panel rendered inside the pause overlay. */
+  private showSettings(ov: HTMLDivElement) {
+    const eng = this.eng;
+    ov.innerHTML = '';
+    const h = document.createElement('h1');
+    h.textContent = 'SETTINGS';
+    h.style.fontSize = '30px';
+    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const };
+    const wrap = document.createElement('div');
+    wrap.className = 'settings';
+
+    const vrow = document.createElement('div');
+    vrow.className = 'settings-row';
+    const vlab = document.createElement('span');
+    vlab.textContent = 'VOLUME';
+    const vsl = document.createElement('input');
+    vsl.type = 'range'; vsl.min = '0'; vsl.max = '100';
+    vsl.value = String(Math.round(s.volume * 100));
+    vsl.setAttribute('aria-label', 'Volume');
+    vsl.addEventListener('input', () => {
+      eng?.settings.set({ volume: Number(vsl.value) / 100 });
+      eng?.applySettings();
+    });
+    vrow.append(vlab, vsl);
+
+    const qrow = document.createElement('div');
+    qrow.className = 'settings-row';
+    const qlab = document.createElement('span');
+    qlab.textContent = 'QUALITY';
+    const qsel = document.createElement('select');
+    qsel.setAttribute('aria-label', 'Quality');
+    for (const q of ['auto', 'retro', 'standard', 'high'] as const) {
+      const o = document.createElement('option');
+      o.value = q;
+      o.textContent = q.toUpperCase();
+      if (q === s.quality) o.selected = true;
+      qsel.appendChild(o);
+    }
+    qsel.addEventListener('change', () => {
+      eng?.settings.set({ quality: qsel.value as typeof s.quality });
+      eng?.applySettings();
+    });
+    qrow.append(qlab, qsel);
+
+    const mrow = document.createElement('div');
+    mrow.className = 'settings-row';
+    const mlab = document.createElement('span');
+    mlab.textContent = 'MUTE';
+    const mcb = document.createElement('input');
+    mcb.type = 'checkbox';
+    mcb.checked = s.muted;
+    mcb.setAttribute('aria-label', 'Mute');
+    mcb.addEventListener('change', () => {
+      eng?.settings.set({ muted: mcb.checked });
+      eng?.applySettings();
+    });
+    mrow.append(mlab, mcb);
+
+    const back = document.createElement('button');
+    back.textContent = 'BACK';
+    back.addEventListener('click', () => { eng?.audio.play('click'); this.showPause(); });
+    wrap.append(vrow, qrow, mrow);
+    ov.append(h, wrap, back);
+    this.overlay = ov;
+  }
 
   showEnd(won: boolean, stats: RunStats) {
-    this.clearOverlay();
+    this.clearOverlays();
     this.overlay = document.createElement('div');
     this.overlay.className = 'overlay';
     const m = Math.floor(stats.time / 60),
@@ -300,13 +447,35 @@ export class HUD {
       `SCORE ${Math.round(stats.score)} · TIME ${m}:${String(s).padStart(2, '0')}` +
       ` · KILLS ${stats.kills} · LEVEL ${stats.level}${stageBit}`;
     const btnWrap = document.createElement('div');
-    const btn = document.createElement('button');
-    btn.textContent = won ? 'PLAY AGAIN' : 'RETRY';
-    btn.addEventListener('click', () => (window.__XANDRIA__ as any)?.engine.restart());
-    btnWrap.appendChild(btn);
+    const again = document.createElement('button');
+    again.textContent = 'RESTART';
+    again.addEventListener('click', () => this.eng?.restart());
+    const title = document.createElement('button');
+    title.textContent = 'TITLE';
+    title.addEventListener('click', () => this.eng?.toTitle());
+    btnWrap.append(again, title);
     this.overlay.append(h, sub, statsEl, btnWrap);
     this.root.appendChild(this.overlay);
   }
 
-  private clearOverlay() { this.overlay?.remove(); this.overlay = null; }
+  /** Reset HUD for an in-place restart. */
+  resetRun() {
+    this.clearOverlays();
+    this.setScore(0);
+    this.setHealth(1);
+    this.setBoost(1);
+    this.setBoss(null, 0);
+    this.setCrosshair(false);
+    this.setObjective(this.spec.objective.description, '');
+    this.setProgress('');
+    this.setHint('');
+    this.setLowHp(false);
+    this.vignetteT = 0;
+    this.toastT = 0;
+    this.vignette.style.opacity = '0';
+    this.toastEl.style.opacity = '0';
+  }
+
+  /** Remove any overlay (title / pause / settings / end / level-up). Public for Engine. */
+  clearOverlays() { this.overlay?.remove(); this.overlay = null; }
 }
