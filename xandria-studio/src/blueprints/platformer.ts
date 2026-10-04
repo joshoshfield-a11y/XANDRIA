@@ -16,7 +16,11 @@ import {
   makeLevelUpFlow,
   grantKillXp,
   grantPickupXp,
+  registerWorldAssets,
+  registerPickupAssets,
+  registerEnemyAssets,
 } from './campaign';
+import { AssetRegistry } from '../engine/game/Assets';
 import { VariantDirector } from './enemies';
 import {
   EffectState,
@@ -44,6 +48,10 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const fx = new EffectState();
   const fxHud = new EffectHud();
   const dresser = new ChapterDresser(engine);
+
+  // asset registry (reskin layer): world assets first, the rest after spawns
+  const assets = new AssetRegistry();
+  registerWorldAssets(assets, engine);
 
   // world = mostly visual; course floats above a hazard
   const startY = Math.max(3, terrain.heightAt(-terrain.size / 2 + 14, 0) + 3);
@@ -104,6 +112,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // enemy variants: spikeballs (never stomp) + skyrays (sine patrol)
   const variants = new VariantDirector(engine, enemies, null, 31337);
   avatar = new PlayerAvatar(engine, spec, start.clone().add(new THREE.Vector3(0, 2, 0)), enemies, projectiles);
+  assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
@@ -166,6 +175,12 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const q3 = platforms[Math.floor(platforms.length * 0.7)];
   spawnEffectPickup(pickups, engine, 'magnet', q1.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
   spawnEffectPickup(pickups, engine, 'shield', q3.pos.clone().add(new THREE.Vector3(0, 1.2, 0)));
+
+  // asset registration: enemies (dynamic roots), pickups, platforms, hazard
+  registerEnemyAssets(assets, enemies, ['walker', 'flyer'], variants);
+  registerPickupAssets(assets, pickups);
+  assets.register('world.platform', { kind: 'world', roots: [structures.group, hazard] });
+  assets.applyOverrides(spec);
 
   // clamp collect targets (legacy or staged) to coins actually placed on the course
   const clampCollect = (count: number) => Math.min(count || 20, pickups.remaining('coin'));
@@ -248,5 +263,5 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives };
+  return { avatar, enemies, pickups, objectives, assets };
 }

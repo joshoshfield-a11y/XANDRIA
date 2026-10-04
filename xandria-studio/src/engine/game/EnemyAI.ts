@@ -11,7 +11,7 @@ import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { GROUP, toV3 } from '../core/Physics';
 import { makeHumanoid, makeDrone, makeTurret, disposeOwned, type CharacterRig } from '../gfx/Characters';
-import type { EnemySpec } from '@spec';
+import type { EnemySpec, EnemyKind } from '@spec';
 import type { Projectiles } from './Projectiles';
 import { Rng } from '../core/Rng';
 
@@ -50,6 +50,10 @@ export class Enemy {
   isBoss: boolean;
   /** boss phase: 0 = full, 1 = enraged (≤66%), 2 = desperate (≤33%) */
   private phase = 0;
+  /** custom kind def when spec.kind was registered via engine.hooks.registerEnemyKind */
+  private customDef: import('./Modding').CustomEnemyKindDef | null = null;
+  /** effective build kind: the registered base for custom kinds, else spec.kind */
+  private readonly kind: EnemyKind;
 
   constructor(
     private engine: Engine,
@@ -62,24 +66,29 @@ export class Enemy {
     const mods = engine.spec.custom?.enemyMods;
     this.speedMult = mods?.speed ?? 1;
     this.aggroMult = mods?.aggression ?? 1;
-    const sz = mods?.size ?? 1;
+    // custom kind: body/rig/behavior are built from the registered base kind
+    this.customDef = engine.hooks.enemyKinds.get(spec.kind as string) ?? null;
+    const buildKind = this.customDef?.base ?? spec.kind;
+    this.kind = buildKind;
+    const tint = this.customDef?.tint;
+    const sz = (mods?.size ?? 1) * (this.customDef?.scale ?? 1);
     this.health = this.maxHealth = spec.health;
     this.home = spawn.clone();
     this.rng = new Rng(seed);
     this.hoverPhase = this.rng.range(0, Math.PI * 2);
-    this.isBoss = spec.kind === 'brute' && Enemy.isBossObjective(engine);
+    this.isBoss = buildKind === 'brute' && Enemy.isBossObjective(engine);
 
-    if (spec.kind === 'walker' || spec.kind === 'brute') {
-      const bulk = (spec.kind === 'brute' ? 1.7 : 1) * sz;
+    if (buildKind === 'walker' || buildKind === 'brute') {
+      const bulk = (buildKind === 'brute' ? 1.7 : 1) * sz;
       this.body = engine.physics.capsule(0.42 * bulk, 1.7 * bulk, [spawn.x, spawn.y + 1.4 * bulk, spawn.z], {
         mass: 70 * bulk,
         group: GROUP.ENEMY,
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.ENEMY | GROUP.PROJECTILE,
       });
-      this.rig = makeHumanoid(engine.mats, { ...ENEMY_COLORS[spec.kind], skin: '#8f8a80', bulk }, seed, engine.spec.custom?.forge);
+      this.rig = makeHumanoid(engine.mats, { ...(tint ?? ENEMY_COLORS[buildKind]), skin: '#8f8a80', bulk }, seed, engine.spec.custom?.forge);
       if (sz !== 1) this.rig.group.scale.setScalar(sz);
       engine.scene.add(this.rig.group);
-    } else if (spec.kind === 'drone' || spec.kind === 'flyer') {
+    } else if (buildKind === 'drone' || buildKind === 'flyer') {
       this.body = engine.physics.sphere(0.5 * sz, [spawn.x, spawn.y + 2.5, spawn.z], {
         mass: 8,
         group: GROUP.ENEMY,
@@ -87,10 +96,10 @@ export class Enemy {
         material: engine.physics.slipperyMat,
       });
       this.body.linearDamping = 0.85;
-      this.rig = makeDrone(engine.mats, spec.kind === 'flyer' ? '#8a4a2e' : '#5e2e2e', mods?.glow ?? '#ff4444', seed);
+      this.rig = makeDrone(engine.mats, buildKind === 'flyer' ? '#8a4a2e' : '#5e2e2e', mods?.glow ?? '#ff4444', seed);
       if (sz !== 1) this.rig.group.scale.setScalar(sz);
       engine.scene.add(this.rig.group);
-    } else if (spec.kind === 'turret') {
+    } else if (buildKind === 'turret') {
       this.body = engine.physics.cylinder(0.65, 0.8, 1.4, [spawn.x, spawn.y + 0.7, spawn.z], {
         group: GROUP.ENEMY,
         mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE,
@@ -176,6 +185,7 @@ export class Enemy {
       this.speedMult *= 1.25;
       this.aggroMult *= 1.3;
       this.events.onPhase?.(this, this.phase);
+      this.engine.hooks.emit('onPhase', { enemy: this, phase: this.phase });
       // engine-owned juice: shake + roar + music slams to full intensity
       this.engine.juice.shake(0.5);
       this.engine.audio.play('roar');
@@ -192,7 +202,7 @@ export class Enemy {
     this.alive = false;
     const p = this.position;
     this.deathPos = p.clone();
-    this.engine.particles.explosion(p, this.spec.kind === 'brute' ? 1.8 : 1);
+    this.engine.particles.explosion(p, this.kind === 'brute' ? 1.8 : 1);
     this.engine.audio.play('explosion', { vol: 0.7 });
     this.dispose();
     this.events.onDeath?.(this);
@@ -223,14 +233,14 @@ export class Enemy {
     const dist = pos.distanceTo(playerPos);
     this.attackCd -= dt;
 
-    const aggroR = (this.spec.kind === 'turret' ? 42 : 30) * this.aggroMult;
-    const attackR = this.spec.kind === 'walker' || this.spec.kind === 'brute' ? 2.2 : 26;
+    const aggroR = (this.kind === 'turret' ? 42 : 30) * this.aggroMult;
+    const attackR = this.kind === 'walker' || this.kind === 'brute' ? 2.2 : 26;
 
     if (dist < attackR && this.attackCd <= 0) this.state = 'attack';
     else if (dist < aggroR) this.state = 'chase';
     else if (this.state !== 'idle' && dist > aggroR * 1.3) this.state = 'idle';
 
-    switch (this.spec.kind) {
+    switch (this.kind) {
       case 'walker': case 'brute': {
         const b = this.body!;
         if (this.state === 'chase' || this.state === 'attack') {
@@ -253,14 +263,14 @@ export class Enemy {
           b.velocity.x = dir.x * this.spec.speed * this.speedMult * 0.3;
           b.velocity.z = dir.z * this.spec.speed * this.speedMult * 0.3;
         }
-        this.rig!.group.position.set(pos.x, pos.y - 0.85 * (this.spec.kind === 'brute' ? 1.7 : 1), pos.z);
+        this.rig!.group.position.set(pos.x, pos.y - 0.85 * (this.kind === 'brute' ? 1.7 : 1), pos.z);
         const planar = Math.hypot(b.velocity.x, b.velocity.z);
         this.rig!.animate(t, planar, {});
         break;
       }
       case 'drone': case 'flyer': {
         const b = this.body!;
-        const hoverY = (this.engine.terrain ? this.engine.terrain.heightAt(pos.x, pos.z) : 0) + (this.spec.kind === 'flyer' ? 4 : 3) + Math.sin(t * 2 + this.hoverPhase) * 0.4;
+        const hoverY = (this.engine.terrain ? this.engine.terrain.heightAt(pos.x, pos.z) : 0) + (this.kind === 'flyer' ? 4 : 3) + Math.sin(t * 2 + this.hoverPhase) * 0.4;
         const target = this.state === 'idle' ? this.home : playerPos;
         const dir = target.clone().sub(pos);
         dir.y = 0;
@@ -279,7 +289,7 @@ export class Enemy {
         this.rig!.group.rotation.y = Math.atan2(playerPos.x - pos.x, playerPos.z - pos.z);
         this.rig!.animate(t, sp, {});
         if (this.state === 'attack' && this.attackCd <= 0 && this.projectiles) {
-          this.attackCd = this.spec.kind === 'flyer' ? 1.6 : 2.2;
+          this.attackCd = this.kind === 'flyer' ? 1.6 : 2.2;
           const aim = playerPos.clone().add(new THREE.Vector3(0, 0.9, 0)).sub(pos).normalize();
           this.projectiles.fire(pos.clone().add(aim.clone().multiplyScalar(0.8)), aim, { speed: 26, damage: this.spec.damage, friendly: false });
           this.engine.audio.play('laser', { pitch: 0.8, vol: 0.5 });
@@ -307,6 +317,8 @@ export class Enemy {
         break;
       }
     }
+    // custom kind behavior overlay (registered via engine.hooks.registerEnemyKind)
+    this.customDef?.update?.(this, { dt, t, playerPos });
   }
 }
 
@@ -328,7 +340,7 @@ export class EnemyManager {
         const e = new Enemy(this.engine, spec, pos, this.projectiles, {
           onPlayerHit: this.events.onPlayerHit,
           // FIX: splice the dead enemy out of the roster so waves can't accumulate corpses forever
-          onDeath: (en) => { this.killed++; this.removeEnemy(en); this.events.onDeath?.(en); },
+          onDeath: (en) => { this.killed++; this.removeEnemy(en); this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
         }, this.engine.spec.meta.seed ^ (this.enemies.length * 7919));
         this.enemies.push(e);
       }

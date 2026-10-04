@@ -7,9 +7,15 @@
  */
 import type { Engine } from '../engine/Engine';
 import type { GameSpec, ObjectiveStage, ObjectiveType } from '@spec';
+import * as THREE from 'three';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression, type UpgradeDef, type UpgradeId } from '../engine/game/Progression';
+import { AssetRegistry, rigsOfKind } from '../engine/game/Assets';
+import type { EnemyManager } from '../engine/game/EnemyAI';
+import type { Pickups } from '../engine/game/Pickups';
 import type { PlayerAvatar } from './common';
+import { effectOf } from './fx';
+import type { VariantDirector, EnemyVariant } from './enemies';
 
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
 export const roman = (n: number): string => ROMAN[n - 1] ?? String(n);
@@ -103,3 +109,84 @@ export function hasBossStage(spec: GameSpec): boolean {
 
 /** ObjectiveType import re-export for blueprint convenience. */
 export type { ObjectiveType };
+
+// ---------------------------------------------------------------------------
+// Asset registry (reskin layer) — shared registration helpers.
+// Each blueprint creates its AssetRegistry, registers what it builds with the
+// helpers below, then calls assets.applyOverrides(spec) after construction
+// (and again after any dynamic wave spawn so new waves are reskinned too).
+// ---------------------------------------------------------------------------
+
+/** Engine-level world assets: sky rig, terrain mesh, scene fog. */
+export function registerWorldAssets(assets: AssetRegistry, engine: Engine): void {
+  assets.register('world.sky', { kind: 'world', roots: [engine.sky.group] });
+  if (engine.terrain) assets.register('world.ground', { kind: 'world', roots: [engine.terrain.mesh] });
+  if (engine.scene.fog) assets.register('world.fog', { kind: 'world', fog: engine.scene.fog as THREE.Fog });
+}
+
+/** Collect the distinct shared materials used by one pickup mesh. */
+function pickupMaterials(mesh: THREE.Object3D): THREE.Material[] {
+  const mats: THREE.Material[] = [];
+  mesh.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const list = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mm of list) {
+      const mat = mm as THREE.Material | undefined;
+      if (mat && !mats.includes(mat)) mats.push(mat);
+    }
+  });
+  return mats;
+}
+
+/**
+ * Pickup assets from the live pickup list — vanilla kinds (coin/health/ammo/
+ * powerup) plus timed effect kinds (shield/rapid/score/magnet). Registers the
+ * shared cached materials, so pickups dropped later in the run inherit
+ * overrides automatically.
+ */
+export function registerPickupAssets(assets: AssetRegistry, pickups: Pickups): void {
+  const seen = new Set<string>();
+  for (const p of pickups.list) {
+    const eff = effectOf(p);
+    const id = eff ? `pickup.${eff === 'mult' ? 'score' : eff}` : `pickup.${p.kind}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    assets.register(id, { kind: 'pickup', materials: pickupMaterials(p.mesh) });
+  }
+}
+
+/**
+ * Enemy kind assets with dynamic roots: the provider re-resolves live rigs,
+ * so calling assets.applyOverrides(spec) after a wave spawn reskins the new
+ * wave too. Also mirrors brute rigs as boss.body and registers per-variant
+ * rig providers when a VariantDirector is present.
+ */
+export function registerEnemyAssets(
+  assets: AssetRegistry,
+  enemies: EnemyManager,
+  kinds: string[],
+  variants?: VariantDirector,
+): void {
+  for (const kind of kinds) {
+    assets.register(`enemy.${kind}`, { kind: 'enemy', roots: () => rigsOfKind(enemies, kind) });
+  }
+  if (kinds.includes('brute')) {
+    assets.register('boss.body', { kind: 'boss', roots: () => rigsOfKind(enemies, 'brute') });
+  }
+  if (variants) {
+    const all: EnemyVariant[] = ['charger', 'sniper', 'splitter', 'caster', 'shielded', 'skyray', 'spikeball', 'mini'];
+    for (const v of all) {
+      assets.register(`enemy.${v}`, {
+        kind: 'enemy',
+        roots: () => {
+          const out: THREE.Object3D[] = [];
+          for (const e of enemies.enemies) {
+            if (e.alive && e.rig && variants.getVariant(e) === v) out.push(e.rig.group);
+          }
+          return out;
+        },
+      });
+    }
+  }
+}

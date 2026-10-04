@@ -19,7 +19,8 @@ export type UpgradeId =
   | 'dash';
 
 export interface UpgradeDef {
-  id: UpgradeId;
+  /** built-ins use the UpgradeId union; custom upgrades use their registered id */
+  id: string;
   name: string;
   desc: string;
 }
@@ -45,7 +46,7 @@ const UPGRADE_POOL: UpgradeDef[] = [
 export class Progression {
   level = 1;
   xp = 0;
-  private counts = new Map<UpgradeId, number>();
+  private counts = new Map<string, number>();
   private readonly opts: ProgressionOpts;
 
   /**
@@ -83,6 +84,7 @@ export class Progression {
       leveled = true;
     }
     if (leveled) this.engine.audio?.play('levelup');
+    if (leveled) this.engine.hooks.emit('onLevelUp', { level: this.level, progression: this });
     return leveled;
   }
 
@@ -96,9 +98,12 @@ export class Progression {
     return this.addXp(this.opts.xpPerPickup);
   }
 
-  /** 3 distinct upgrade choices, drawn deterministically from engine.rng. */
+  /**
+   * 3 distinct upgrade choices, drawn deterministically from engine.rng.
+   * Pool = built-ins + upgrades registered via engine.hooks.registerUpgrade.
+   */
   getUpgradeChoices(): UpgradeDef[] {
-    const pool = [...UPGRADE_POOL];
+    const pool = [...UPGRADE_POOL, ...this.engine.hooks.customUpgradeDefs()];
     const out: UpgradeDef[] = [];
     for (let i = 0; i < 3 && pool.length > 0; i++) {
       const j = Math.floor(this.engine.rng.next() * pool.length);
@@ -115,7 +120,7 @@ export class Progression {
    * recorded as counts and exposed via the *Mult() accessors for blueprint
    * wiring (blueprints multiply projectile/melee damage, pickup radius, etc.).
    */
-  applyUpgrade(id: UpgradeId, avatar: PlayerAvatar): void {
+  applyUpgrade(id: string, avatar: PlayerAvatar): void {
     if (!this.opts.enabled) return;
     this.counts.set(id, (this.counts.get(id) ?? 0) + 1);
     switch (id) {
@@ -136,10 +141,14 @@ export class Progression {
       case 'dash':
         // applied via the multiplier accessors below (blueprint wiring)
         break;
+      default:
+        // custom upgrade (registered via engine.hooks.registerUpgrade)
+        this.engine.hooks.upgrades.get(id)?.apply(this, avatar);
+        break;
     }
   }
 
-  upgradeCount(id: UpgradeId): number {
+  upgradeCount(id: string): number {
     return this.counts.get(id) ?? 0;
   }
 

@@ -11,6 +11,7 @@ import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
+import { AssetRegistry } from '../engine/game/Assets';
 import {
   showIntroCard,
   makeCampaignObjectives,
@@ -18,6 +19,9 @@ import {
   grantKillXp,
   grantPickupXp,
   bossPhaseBanner,
+  registerWorldAssets,
+  registerPickupAssets,
+  registerEnemyAssets,
 } from './campaign';
 import {
   VariantDirector,
@@ -51,6 +55,10 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const fx = new EffectState();
   const fxHud = new EffectHud();
   const dresser = new ChapterDresser(engine);
+
+  // asset registry (reskin layer): world assets first, the rest after spawns
+  const assets = new AssetRegistry();
+  registerWorldAssets(assets, engine);
 
   // arena: perimeter + cover
   const structures = new Structures(engine.physics, engine.mats);
@@ -100,6 +108,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
@@ -175,6 +184,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       left--;
       i++;
     }
+    assets.applyOverrides(spec); // reskin the new wave
   };
 
   // initial spawn (capped at 8 alive at once), with chapter-0 variants
@@ -195,6 +205,13 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     });
   };
   spawnInitial();
+
+  // asset registration: enemies (dynamic roots), pickups, projectiles, arena
+  registerEnemyAssets(assets, enemies, ['walker', 'drone', 'brute', 'turret'], variants);
+  registerPickupAssets(assets, pickups);
+  assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
+  assets.register('world.arena', { kind: 'world', roots: [structures.group] });
+  assets.applyOverrides(spec);
 
   // chapter-0 arena dressing
   dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half: arenaR - 4, yAt: (x, z) => terrain.heightAt(x, z) });
@@ -243,5 +260,5 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (spec.objective.type === 'survive') hud.setProgress(`${objectives.done ? 0 : ''}${enemies.aliveCount()} hostiles`);
   });
 
-  return { avatar, enemies, pickups, objectives };
+  return { avatar, enemies, pickups, objectives, assets };
 }

@@ -224,13 +224,27 @@ export interface AssetPacks {
   /** name → GLB/GLTF URL (https only). Online-only; procedural fallback always. */
   packs?: Record<string, string>;
 }
+/**
+ * Per-asset visual override (the reskin contract).
+ * `custom.assets` accepts either the legacy AssetPacks shape (when an
+ * `enabled` key is present) or a record of these overrides keyed by asset id
+ * (e.g. "player.body", "enemy.walker", "world.sky"). Visual only — never
+ * affects gameplay. Unknown ids warn at runtime; invalid values are skipped.
+ */
+export interface AssetOverride {
+  color?: string;              // CSS hex, e.g. "#ff0044"
+  emissive?: string;           // CSS hex
+  emissiveIntensity?: number;
+  scale?: number;              // multiplicative, clamped 0.05..10 at runtime
+  visible?: boolean;
+}
 export interface CustomSpec {
   biome?: BiomeCustom;
   forge?: ForgeCustom;
   enemyMods?: EnemyMods;
   weaponMods?: WeaponMods;
   quality?: QualityMode;
-  assets?: AssetPacks;
+  assets?: AssetPacks | Record<string, AssetOverride>;
   /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
   legacyOperators?: number[];
 }
@@ -572,14 +586,29 @@ export function validateSpec(spec: unknown): ValidationResult {
       const as = c.assets;
       if (as !== undefined) {
         if (!isObj(as)) err('custom.assets', 'must be an object');
-        else {
+        else if ('enabled' in as) {
+          // legacy AssetPacks shape
           if (typeof as.enabled !== 'boolean') err('custom.assets.enabled', 'must be boolean');
           if (as.packs !== undefined) {
             if (!isObj(as.packs)) err('custom.assets.packs', 'must be an object');
             else for (const [k, u] of Object.entries(as.packs)) {
-              if (typeof u !== 'string' || !/^https:\/\/.+\.(glb|gltf)(\?.*)?$/i.test(u))
+              if (typeof u !== 'string' || !/^https:\/\/[^?#]+\.(glb|gltf)(\?.*)?$/i.test(u))
                 err(`custom.assets.packs.${k}`, 'must be an https URL ending in .glb/.gltf');
             }
+          }
+        } else {
+          // reskin override-record shape: asset id → AssetOverride
+          const isHex = (s: unknown): s is string =>
+            typeof s === 'string' && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s);
+          for (const [id, o] of Object.entries(as)) {
+            const p = `custom.assets.${id}`;
+            if (!isObj(o)) { err(p, 'must be an override object'); continue; }
+            if (o.color !== undefined && !isHex(o.color)) err(`${p}.color`, 'must be a CSS hex color');
+            if (o.emissive !== undefined && !isHex(o.emissive)) err(`${p}.emissive`, 'must be a CSS hex color');
+            if (o.emissiveIntensity !== undefined && typeof o.emissiveIntensity !== 'number')
+              err(`${p}.emissiveIntensity`, 'must be a number');
+            if (o.scale !== undefined && typeof o.scale !== 'number') err(`${p}.scale`, 'must be a number');
+            if (o.visible !== undefined && typeof o.visible !== 'boolean') err(`${p}.visible`, 'must be boolean');
           }
         }
       }

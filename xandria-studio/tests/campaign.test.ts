@@ -81,6 +81,7 @@ function fakeEngine() {
     win: vi.fn(),
     lose: vi.fn(),
     hud: { setProgress: vi.fn(), setTimer: vi.fn() },
+    hooks: { emit: vi.fn(), tap: vi.fn(), tapCount: () => 0 },
   };
 }
 
@@ -226,7 +227,7 @@ describe('Objectives — stage sequencer', () => {
 
 describe('Progression — XP curve and level-ups', () => {
   const progEngine = (seed = 42) =>
-    ({ rng: new Rng(seed), spec: { custom: {} } }) as unknown as Engine;
+    ({ rng: new Rng(seed), spec: { custom: {} }, hooks: { emit() {}, tap() {}, tapCount: () => 0, enemyKinds: new Map(), upgrades: new Map(), customUpgradeDefs: () => [] } }) as unknown as Engine;
   const opts = { enabled: true, xpPerKill: 20, xpPerPickup: 5 };
 
   it('xpForNext follows 100 * level^1.5', () => {
@@ -287,7 +288,7 @@ describe('Progression — XP curve and level-ups', () => {
 
 describe('Progression — upgrade choices and application', () => {
   const progEngine = (seed = 7) =>
-    ({ rng: new Rng(seed), spec: { custom: {} } }) as unknown as Engine;
+    ({ rng: new Rng(seed), spec: { custom: {} }, hooks: { emit() {}, tap() {}, tapCount: () => 0, enemyKinds: new Map(), upgrades: new Map(), customUpgradeDefs: () => [] } }) as unknown as Engine;
   const opts = { enabled: true, xpPerKill: 20, xpPerPickup: 5 };
   const fakeAvatar = () => {
     const a: any = {
@@ -312,7 +313,7 @@ describe('Progression — upgrade choices and application', () => {
   });
 
   it('pool has at least 6 upgrades', () => {
-    const ids = new Set<UpgradeId>();
+    const ids = new Set<string>();
     for (let s = 0; s < 20; s++) {
       for (const c of new Progression(progEngine(s), opts).getUpgradeChoices()) ids.add(c.id);
     }

@@ -18,7 +18,11 @@ import {
   grantKillXp,
   grantPickupXp,
   bossPhaseBanner,
+  registerWorldAssets,
+  registerPickupAssets,
+  registerEnemyAssets,
 } from './campaign';
+import { AssetRegistry } from '../engine/game/Assets';
 import {
   VariantDirector,
   planSpawns,
@@ -52,6 +56,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const fx = new EffectState();
   const fxHud = new EffectHud();
   const dresser = new ChapterDresser(engine);
+
+  // asset registry (reskin layer): world assets first, the rest after spawns
+  const assets = new AssetRegistry();
+  registerWorldAssets(assets, engine);
 
   const structures = new Structures(engine.physics, engine.mats);
   structures.arenaWalls(new THREE.Vector3(0, terrain.heightAt(0, 0), 0), arenaR, 4);
@@ -92,6 +100,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
@@ -157,8 +166,16 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
       if (e) { variants.register(e, planned.variant); variants.decorate(e, planned.variant); }
       spawned++;
     }
+    assets.applyOverrides(spec); // reskin the new wave
   };
   topUp();
+
+  // asset registration: enemies (dynamic roots), pickups, projectiles, arena
+  registerEnemyAssets(assets, enemies, ['walker', 'drone', 'brute', 'turret'], variants);
+  registerPickupAssets(assets, pickups);
+  assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
+  assets.register('world.arena', { kind: 'world', roots: [structures.group] });
+  assets.applyOverrides(spec);
 
   // chapter-0 arena dressing
   dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half: arenaR - 8, yAt: (x, z) => terrain.heightAt(x, z) });
@@ -214,5 +231,5 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives };
+  return { avatar, enemies, pickups, objectives, assets };
 }

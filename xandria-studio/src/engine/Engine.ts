@@ -19,6 +19,7 @@ import { HUD, type RunStats } from './game/HUD';
 import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
+import { Modding } from './game/Modding';
 
 export type EngineState = 'loading' | 'ready' | 'title' | 'playing' | 'paused' | 'won' | 'lost';
 
@@ -45,6 +46,8 @@ export class Engine {
   readonly postfx: PostFX;
   readonly settings: Settings;
   readonly juice: Juice;
+  /** modding surface: hook taps + custom enemy/upgrade registries (additive) */
+  readonly hooks: Modding;
   sky!: SkyRig;
   terrain!: Terrain;
   assetBridge: AssetBridge;
@@ -102,6 +105,7 @@ export class Engine {
     this.audio.setMuted(this.settings.data.muted);
     this.particles = new Particles(this.scene, spec.meta.seed ^ 0x9a77);
     this.juice = new Juice(container, this.particles);
+    this.hooks = new Modding(this);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
@@ -263,6 +267,7 @@ export class Engine {
       }
       this.particles.update(dt * substeps);
       this.hud.update(dt);
+      this.hooks.emit('onTick', { dt, t: this.elapsed });
     }
     if (this.state === 'title' && this.input.justPressed('confirm')) this.startRun();
     if (this.input.justPressed('pause')) this.togglePause();
@@ -308,6 +313,7 @@ export class Engine {
     this.state = 'won';
     this.audio.setEngine(0, false);
     this.audio.play('win');
+    this.hooks.emit('onWin', { stats });
     this.hud.showEnd(true, {
       score: this.score,
       time: this.elapsed,
@@ -323,6 +329,7 @@ export class Engine {
     this.state = 'lost';
     this.audio.setEngine(0, false);
     this.audio.play('lose');
+    this.hooks.emit('onLose', { reason, stats });
     this.hud.showEnd(false, {
       score: this.score,
       time: this.elapsed,

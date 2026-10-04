@@ -9,6 +9,8 @@ import { validateSpec, normalizeSpec, type Genre, type GameSpec, type QualityMod
 import './inspector/inspectorPanel';
 import { applyPatch, type Scalar } from './inspector/specInspector';
 import type { XandriaSpecInspector } from './inspector/inspectorPanel';
+import { createEditorPanel, readProjectFile, type EditorPanel } from './editor/editorPanel';
+import { projectToJson } from './editor/specOps';
 
 declare global {
   interface Window { xandria?: { saveFile(name: string, content: string): Promise<string | null> } }
@@ -73,6 +75,11 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     <div id="layout">
       <div id="side">
         <h1>XANDRIA STUDIO<small>INTENT → PLAYABLE GAME</small></h1>
+        <div class="row" id="viewtabs" style="gap:6px">
+          <button id="tab-generate" class="primary" style="flex:1">✨ GENERATE</button>
+          <button id="tab-editor" style="flex:1">🛠 EDITOR</button>
+        </div>
+        <div id="view-generate" style="display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow-y:auto">
         <div><div class="lbl">DESCRIBE YOUR GAME</div><textarea id="prompt" placeholder="a dark knight questing through volcanic ruins, brutal difficulty…"></textarea></div>
         <div class="presets" id="presets"></div>
         <div class="row">
@@ -94,6 +101,8 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
         <button class="primary" id="generate">⚡ GENERATE &amp; PLAY</button>
         <div class="row"><button id="export" style="flex:1">⬇ EXPORT .HTML</button><button id="copy" style="flex:1">🔗 SHARE LINK</button></div>
         <div id="meta"></div>
+        </div><!-- /view-generate -->
+        <div id="view-editor" style="display:none;flex:1;min-height:0;overflow:hidden"></div>
       </div>
       <div id="frame-wrap"><div id="empty">✦<br/>GENERATE A GAME TO PLAY IT HERE</div><iframe id="game" style="display:none"></iframe></div>
     </div>`;
@@ -167,6 +176,62 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     }
   });
 
+  // ---- Editor panel (basic-user editing): tabs for story/world/player/
+  // ---- enemies/pickups/assets. Shares the preview iframe via ?spec= URLs.
+  const editorHost = {
+    getSpec: (): GameSpec | null => (lastSpec ? JSON.parse(lastSpec) as GameSpec : null),
+    play: (spec: GameSpec) => {
+      const v = validateSpec(spec);
+      if (!v.ok) { meta.textContent = 'SPEC INVALID:\n' + v.errors.join('\n'); return; }
+      lastSpec = JSON.stringify(spec);
+      inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
+      frame.src = `${playerBase}?spec=${b64url(lastSpec)}&autostart=1`;
+      frame.style.display = 'block';
+      empty.style.display = 'none';
+    },
+    regenerate: (): GameSpec | null => {
+      if (!lastSpec) return null;
+      const spec = JSON.parse(lastSpec) as GameSpec;
+      spec.meta.seed = (Math.random() * 0x7fffffff) | 0;
+      if (!validateSpec(spec).ok) return null;
+      lastSpec = JSON.stringify(spec);
+      inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
+      return spec;
+    },
+    saveProject: (spec: GameSpec) => {
+      const json = projectToJson(spec);
+      const name = `${(spec.meta.name || 'xandria-game').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'xandria-game'}.xandria.json`;
+      if (window.xandria?.saveFile) {
+        window.xandria.saveFile(name, json).catch(() => {});
+      } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        a.download = name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      }
+      meta.innerHTML += `<br/><i>saved ${name}</i>`;
+    },
+    loadProject: (file: File) => readProjectFile(file),
+  };
+  const editor: EditorPanel = createEditorPanel(editorHost);
+  root.querySelector('#view-editor')!.appendChild(editor.root);
+
+  const tabGen = root.querySelector<HTMLButtonElement>('#tab-generate')!;
+  const tabEd = root.querySelector<HTMLButtonElement>('#tab-editor')!;
+  const viewGen = root.querySelector<HTMLElement>('#view-generate')!;
+  const viewEd = root.querySelector<HTMLElement>('#view-editor')!;
+  const showTab = (which: 'generate' | 'editor') => {
+    const isGen = which === 'generate';
+    viewGen.style.display = isGen ? 'flex' : 'none';
+    viewEd.style.display = isGen ? 'none' : 'flex';
+    tabGen.classList.toggle('primary', isGen);
+    tabEd.classList.toggle('primary', !isGen);
+    if (!isGen) editor.setSpec(editorHost.getSpec());
+  };
+  tabGen.addEventListener('click', () => showTab('generate'));
+  tabEd.addEventListener('click', () => showTab('editor'));
+
   const applyOnline = (spec: GameSpec): GameSpec => {
     const next = JSON.parse(JSON.stringify(spec)) as GameSpec;
     next.custom = next.custom ?? {};
@@ -176,7 +241,14 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       const m = line.match(/^\s*([\w-]+)\s*=\s*(https?:\/\/\S+\.(?:glb|gltf))\s*$/i);
       if (m) packs[m[1]] = m[2];
     }
-    if (Object.keys(packs).length) next.custom.assets = { enabled: true, packs };
+    if (Object.keys(packs).length) {
+      // Merge: preserve any reskin overrides already in custom.assets instead
+      // of clobbering them (the engine skips reskins while packs are enabled,
+      // but the data survives for when packs are removed).
+      const prev = next.custom.assets as unknown as Record<string, unknown> | undefined;
+      const overrides = prev && typeof prev.enabled !== 'boolean' ? prev : {};
+      next.custom.assets = { ...overrides, enabled: true, packs } as unknown as NonNullable<GameSpec['custom']>['assets'];
+    }
     const v = validateSpec(next);
     return v.ok ? normalizeSpec(next) : spec;
   };
@@ -207,6 +279,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     if (!v.ok) { meta.textContent = 'SPEC INVALID:\n' + v.errors.join('\n'); return; }
     lastSpec = JSON.stringify(spec);
     inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
+    editor.setSpec(spec);
     const url = `${playerBase}?spec=${b64url(lastSpec)}`;
     frame.src = url;
     frame.style.display = 'block';

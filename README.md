@@ -35,6 +35,25 @@ Worlds are themed across 13 environments (desert, tundra, neon city, volcanic,
 dreamscape, …) with day/night, weather, and seeded terrain — every game is
 reproducible from its spec.
 
+### Make it yours: the Studio editor
+
+Open the **🛠 EDITOR** tab in the Studio to customize any generated game
+without writing code — story, chapters, world mood and palette, player stats,
+enemy mix, pickups, and per-asset reskins (colors, scale, visibility) for 34
+named assets (`player.body`, `enemy.walker`, `world.sky`, …). Edits
+re-validate live, projects save as `.xandria.json`, and re-rolling the seed
+keeps your changes.
+
+### For developers: modding SDK and source export
+
+- **Source export**: `npm run export:source -- --out ./my-game --genre fps-arena --seed 123`
+  produces a standalone, readable TypeScript project (engine vendored, deps
+  pinned) you can install, build, and mod.
+- **Modding API** (`src/engine/game/Modding.ts`): tap gameplay events
+  (`onKill`, `onPickup`, `onStageComplete`, `onPhase`, `onLevelUp`, `onWin`,
+  `onLose`, `onTick`), register custom enemy kinds and upgrades — no engine
+  forks required. Full reference in `xandria-studio/docs/API.md`.
+
 ## Quick start
 
 ```bash

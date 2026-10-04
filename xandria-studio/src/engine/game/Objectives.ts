@@ -121,6 +121,7 @@ export class Objectives {
       this.timeLeft = this.cur().timeLimit;
       this.updateHud();
       this.onStageComplete?.(finishedIndex, finished);
+      this.engine.hooks.emit('onStageComplete', { index: finishedIndex, stage: finished });
       // engine-owned juice: chapter sting + music intensity climbs per chapter
       this.engine.audio?.play('chapter');
       this.engine.audio?.setIntensity(Math.min(1, 0.45 + 0.2 * this.stageIndex));

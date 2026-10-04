@@ -15,7 +15,10 @@ import {
   showIntroCard,
   makeCampaignObjectives,
   roman,
+  registerWorldAssets,
+  registerPickupAssets,
 } from './campaign';
+import { AssetRegistry } from '../engine/game/Assets';
 import {
   EffectState,
   EffectHud,
@@ -55,6 +58,10 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     prog.applyUpgrade('speed', undefined as unknown as Parameters<Progression['applyUpgrade']>[1]);
     hud.showCard('LEVEL UP', `Engine tuned — boost pads charge ${Math.round((prog.speedMult() - 1) * 100)}% faster`);
   };
+
+  // asset registry (reskin layer): world assets first, the rest after the course is built
+  const assets = new AssetRegistry();
+  registerWorldAssets(assets, engine);
 
   const structures = new Structures(engine.physics, engine.mats);
   const track = structures.track(spec, terrain, spec.meta.seed);
@@ -98,11 +105,13 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   scene.add(padMesh);
 
   // checkpoint gates (visual arcs at 25/50/75%)
+  const gateMeshes: THREE.Object3D[] = [];
   const checkpoints = [0.25, 0.5, 0.75].map((t) => track.curve.getPointAt(t));
   for (const cp of checkpoints) {
     const gate = new THREE.Mesh(new THREE.TorusGeometry(track.width / 2 + 1, 0.22, 8, 24), engine.mats.glow(spec.theme.palette.accent, 1.5));
     gate.position.copy(cp).add(new THREE.Vector3(0, 4, 0));
     scene.add(gate);
+    gateMeshes.push(gate);
   }
 
   // track pickups: overdrive (rapid boost charging) + score×2, collected by driving through
@@ -120,6 +129,14 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     const p = track.curve.getPointAt(tt);
     spawnEffectPickup(pickups, engine, tt < 0.5 ? 'rapid' : 'mult', p.clone().add(new THREE.Vector3(0, 1.6, 0)));
   }
+
+  // asset registration: vehicles, gates, track, pickups
+  assets.register('player.vehicle', { kind: 'vehicle', roots: [car.mesh] });
+  assets.register('vehicle.ai', { kind: 'vehicle', roots: aiCars.map((a) => a.mesh) });
+  assets.register('world.gate', { kind: 'world', roots: gateMeshes });
+  assets.register('world.track', { kind: 'world', roots: [structures.group] });
+  registerPickupAssets(assets, pickups);
+  assets.applyOverrides(spec);
 
   // race state — laps from the quest stage when present, else legacy count.
   // Staged specs flow through untouched; legacy specs get the defensive race override.
@@ -227,5 +244,5 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
 
   const trackLenApprox = track.curve.getLength();
 
-  return { car, aiCars, objectives };
+  return { car, aiCars, objectives, assets };
 }

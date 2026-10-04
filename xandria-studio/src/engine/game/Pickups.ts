@@ -93,6 +93,7 @@ export class Pickups {
         p.taken = true;
         p.mesh.visible = false;
         this.engine.particles.magic(p.mesh.position, p.kind === 'coin' ? '#ffd23f' : p.kind === 'health' ? '#4dff6a' : p.kind === 'ammo' ? '#ff9a3c' : '#c97aff', 12);
+        this.engine.hooks.emit('onPickup', { pickup: p });
         this.onCollect(p);
       }
     }

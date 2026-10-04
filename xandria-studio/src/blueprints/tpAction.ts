@@ -18,7 +18,11 @@ import {
   grantKillXp,
   grantPickupXp,
   bossPhaseBanner,
+  registerWorldAssets,
+  registerPickupAssets,
+  registerEnemyAssets,
 } from './campaign';
+import { AssetRegistry } from '../engine/game/Assets';
 import {
   VariantDirector,
   planSpawns,
@@ -52,6 +56,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const fx = new EffectState();
   const fxHud = new EffectHud();
   const dresser = new ChapterDresser(engine);
+
+  // asset registry (reskin layer): world assets first, the rest after spawns
+  const assets = new AssetRegistry();
+  registerWorldAssets(assets, engine);
 
   // --- world dressing
   const structures = new Structures(engine.physics, engine.mats);
@@ -95,6 +103,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
+  assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
@@ -169,6 +178,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   }
 
   const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
+
+  // asset registration: enemies (dynamic roots), pickups, projectiles, city
+  registerEnemyAssets(assets, enemies, ['walker', 'drone', 'brute', 'turret'], variants);
+  registerPickupAssets(assets, pickups);
+  assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
+  assets.register('world.arena', { kind: 'world', roots: [structures.group] });
+  assets.applyOverrides(spec);
   hud.setHint('WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
   if (spec.player.weapon !== 'none') hud.setCrosshair(false);
 
@@ -190,6 +206,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     }
     hud.toast('HOSTILE REINFORCEMENTS');
     engine.audio.play('alarm');
+    assets.applyOverrides(spec); // reskin the reinforcements
   };
 
   // --- camera
@@ -268,5 +285,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives };
+  return { avatar, enemies, pickups, objectives, assets };
 }
