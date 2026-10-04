@@ -8,6 +8,7 @@ import {
   type TerrainType, type Weapon, type EnemyKind, type ObjectiveType, type Palette,
 } from '@spec';
 import { hashString } from '../engine/core/Rng';
+import { applyOperators } from './operators';
 
 const has = (s: string, ...words: string[]) => words.some((w) => new RegExp(`\\b${w}\\b`, 'i').test(s));
 
@@ -182,8 +183,8 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     objectiveType = 'reach';
     objectiveDesc = genre === 'platformer' ? 'Reach the flag' : 'Reach the beacon';
   } else {
+    // count never exceeds actual spawns — a floor above the spawn total is unwinnable
     objectiveCount = enemySpecs.reduce((n, e) => n + e.count, 0);
-    if (genre === 'fps-arena' || genre === 'top-down-shooter') objectiveCount = Math.max(objectiveCount, Math.round(18 * diffK));
     objectiveDesc = `Eliminate ${objectiveCount} hostiles`;
   }
 
@@ -213,8 +214,9 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
       terrain: {
         type: genre === 'racing' || genre === 'fps-arena' || genre === 'top-down-shooter' ? 'flat' : terrain,
         size: genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220,
-        maxHeight: terrain === 'mountains' ? 30 : 14,
-        roughness: 0.5,
+        // racing needs a truly flat ribbon — hills clip through the track
+        maxHeight: genre === 'racing' ? 2 : terrain === 'mountains' ? 30 : 14,
+        roughness: genre === 'racing' ? 0 : 0.5,
         water: wantsWater,
         waterLevel: environment === 'islands' ? -0.5 : -2,
       },
@@ -257,6 +259,12 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
       musicVolume: 0.7,
     },
   };
+
+  // --- legacy operator bridge: lattice-era OP-N/name references degrade gracefully
+  const legacyOperators = applyOperators(text);
+  if (legacyOperators.length > 0) {
+    partial.custom = { ...(partial.custom ?? {}), legacyOperators };
+  }
 
   return normalizeSpec(partial);
 }

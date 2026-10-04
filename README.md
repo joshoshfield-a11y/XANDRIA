@@ -81,8 +81,7 @@ How this engine realizes the legacy 72/216-operator lattice:
 ```bash
 cd xandria-studio
 npm test            # vitest: schema, generator determinism, RNG
-npm run test:e2e    # Playwright: every genre boots, plays, zero errors;
-                    # exported HTML boots with network disabled
+npm run test:e2e    # Playwright: every genre boots, plays, zero errors
 ```
 
 The e2e suite literally plays the games (fixed timestep + simulation substeps)

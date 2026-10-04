@@ -85,7 +85,7 @@ xandria-studio/
 │   │   │   ├── EnemyAI.ts         walker/brute/drone/flyer/turret + manager
 │   │   │   ├── HUD.ts             DOM overlay: bars, objective, timer, screens
 │   │   │   └── Objectives.ts      collect/eliminate/reach/survive/race/boss
-│   │   └── Engine.ts        kernel: game states, fixed-step loop, substeps
+│   │   └── Engine.ts        kernel: game states, variable-dt loop (physics on fixed 1/60 substeps)
 │   ├── blueprints/
 │   │   ├── common.ts        PlayerAvatar: health/lives/i-frames, weapons
 │   │   ├── tpAction.ts      third-person action
@@ -128,7 +128,7 @@ Everything a game needs is one JSON object:
 | `enemies`  | array of { kind, count, health, speed, damage, weapon? } |
 | `objective`| type + target (collect N, eliminate N, reach goal, survive T, race laps, boss) |
 | `pickups`  | health/ammo/score/boost with counts and values |
-| `rules`    | timeLimit, friendlyFire, fallDamage, gravityScale |
+| `rules`    | lives, difficulty |
 | `audio`    | tempo, key, mood → generative soundtrack params |
 
 `validateSpec` checks types, ranges, enum membership **and cross-field
@@ -136,27 +136,27 @@ coherence**. `normalizeSpec` deep-merges any partial over seeded defaults, so
 generators only specify what they care about. `stableStringify` gives a
 canonical serialization for share links, caching and tests.
 
-Determinism: `seed` drives `Rng` everywhere (terrain, scatter, enemy placement,
-name generation). Same spec ⇒ same game, every time.
+Determinism: `seed` drives `Rng` everywhere world geometry is generated
+(terrain, scatter, enemy placement, name generation, ModelForge plans).
+Same spec ⇒ same world, every time. Note: live gameplay runs on a
+variable-dt loop, so long play sessions can diverge frame-to-frame;
+determinism covers generation, not moment-to-moment replay.
 
 ## 4. Blueprint contract
 
-A blueprint is:
+A blueprint is a plain function registered in `src/blueprints/index.ts`:
 
 ```ts
-interface Blueprint {
-  genre: Genre;
-  build(engine: Engine, spec: GameSpec): BlueprintInstance;
-}
-interface BlueprintInstance {
-  onUpdate?(dt: number): void;   // per-fixed-step game logic
-  dispose(): void;               // full teardown for restart/regeneration
-}
+type BlueprintFn = (engine: Engine, spec: GameSpec) => unknown;
 ```
 
-Blueprints never touch the renderer directly — they compose engine modules.
-This keeps genre code small (150–300 lines each) and forces reusable mechanics
-down into the engine where all genres benefit.
+It subscribes game logic to the engine via `engine.onUpdate(fn)` and composes
+engine modules (enemies, projectiles, objectives, HUD). Blueprints never touch
+the renderer directly — this keeps genre code small (120–160 lines each) and
+forces reusable mechanics down into the engine where all genres benefit.
+
+Note: there is currently no per-blueprint `dispose()` — restarting a game
+reloads the page. Full teardown without reload is future work.
 
 ## 5. Test mode — how CI plays games
 
@@ -171,8 +171,10 @@ Real-time games can't be e2e-tested on a 3-FPS software rasterizer. So
 
 Playwright then: boots each genre, injects movement input, asserts simulated
 frames advance, asserts player state changed, asserts **zero** errors, and
-screenshots for visual QA. A seventh test boots an exported standalone HTML
-file with **network disabled** to prove offline playability.
+screenshots for visual QA. A sixth test builds a real export (spec injected
+into the single-file bundle, exactly like `scripts/export.ts`) and boots it
+from `file://` in a fully offline browser context — proving the export needs
+no network.
 
 ## 6. Export & packaging
 

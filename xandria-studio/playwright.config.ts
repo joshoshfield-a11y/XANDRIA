@@ -9,7 +9,9 @@ export default defineConfig({
     baseURL: 'http://localhost:4180',
     headless: true,
     launchOptions: {
-      executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+      // No executablePath: use Playwright's bundled Chromium (CI installs it).
+      // Override locally with CHROMIUM_PATH only if you know what you're doing.
+      ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
       args: [
         '--use-angle=swiftshader',
         '--enable-unsafe-swiftshader',

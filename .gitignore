@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+dist_electron/
+out/
+
+# Electron builder artifacts
+*.AppImage
+*.dmg
+*.exe
+*.msi
+*.snap
+*.deb
+*.rpm
+*.zip
+latest*.yml
+
+# e2e screenshots churn every run — visual review only, never asserted
+xandria-studio/tests/e2e/shots/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# logs / caches
+*.log
+npm-debug.log*
+.vite/
+.playwright/
+
+# OS
+.DS_Store
+Thumbs.db

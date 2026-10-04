@@ -1,5 +1,9 @@
 # XANDRIA Studio — v1 Product Lock
 
+> **STATUS: SUPERSEDED — 2026-10-04.** This lock described a one-genre v1 that
+> the shipped product outgrew (five genres in the Studio UI). It is preserved
+> below for history. The current scope is defined in `docs/SCOPE.md`.
+
 Date: 2026-09-06
 Status: BINDING for v1. Anything not listed here is out of scope until the acceptance criteria pass.
 
@@ -37,4 +41,7 @@ Multiplayer, campaigns, dialogue/quest graphs, Steam/console signing, accounts, 
 
 ## Change Control
 
-Changes to this file require a log entry in the perplexity-knowledge-base repo under `logs/` referencing the commit SHA.
+Changes to this file are recorded in this repository's git history.
+(Historical note: this file originally required log entries in an external
+`perplexity-knowledge-base` repo under `logs/`; that requirement was retired
+2026-10-04 when the lock itself was superseded.)

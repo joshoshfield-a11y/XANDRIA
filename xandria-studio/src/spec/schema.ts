@@ -211,6 +211,8 @@ export interface CustomSpec {
   weaponMods?: WeaponMods;
   quality?: QualityMode;
   assets?: AssetPacks;
+  /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
+  legacyOperators?: number[];
 }
 
 export interface GameSpec {
@@ -283,14 +285,20 @@ const num = (v: unknown, lo: number, hi: number): v is number => typeof v === 'n
 export interface ValidationResult {
   ok: boolean;
   errors: string[];
+  /** Non-fatal notices: unknown keys that were ignored, etc. Never affect `ok`. */
+  warnings: string[];
 }
+
+// top-level GameSpec keys; anything else is reported as a warning, not an error
+const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'custom'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators'];
 
 /** Strict structural validation. Returns every problem found. */
 export function validateSpec(spec: unknown): ValidationResult {
   const errors: string[] = [];
   const err = (p: string, m: string) => errors.push(`${p}: ${m}`);
 
-  if (!isObj(spec)) return { ok: false, errors: ['spec: not an object'] };
+  if (!isObj(spec)) return { ok: false, errors: ['spec: not an object'], warnings: [] };
 
   // meta
   if (!isObj(spec.meta)) err('meta', 'missing');
@@ -376,6 +384,26 @@ export function validateSpec(spec: unknown): ValidationResult {
     if (typeof spec.objective.description !== 'string') err('objective.description', 'must be a string');
   }
 
+  // winnability — every objective must be completable with what's in the spec
+  if (isObj(spec.objective) && inEnum(spec.objective.type, OBJECTIVES)) {
+    const o = spec.objective as unknown as ObjectiveSpec;
+    const totalEnemies = Array.isArray(spec.enemies)
+      ? spec.enemies.reduce((n: number, e: unknown) => n + (isObj(e) && typeof e.count === 'number' ? e.count : 0), 0)
+      : 0;
+    if (o.type === 'eliminate' && typeof o.count === 'number' && o.count > totalEnemies)
+      err('objective.count', `eliminate count ${o.count} exceeds total spawned enemies ${totalEnemies}`);
+    if (o.type === 'collect' && typeof o.count === 'number' && isObj(spec.pickups) && typeof spec.pickups.coins === 'number' && o.count > spec.pickups.coins)
+      err('objective.count', `collect count ${o.count} exceeds pickups.coins ${spec.pickups.coins}`);
+    if (o.type === 'race' && typeof o.count === 'number' && o.count < 1)
+      err('objective.count', 'race requires at least 1 lap');
+    if (o.type === 'survive' && typeof o.timeLimit === 'number' && o.timeLimit <= 0)
+      err('objective.timeLimit', 'survive requires timeLimit > 0');
+    if (o.type === 'boss' && Array.isArray(spec.enemies) && !spec.enemies.some((e: unknown) => isObj(e) && e.kind === 'brute'))
+      err('objective.type', 'boss objective requires at least one brute-class enemy');
+  }
+  if (isObj(spec.meta) && spec.meta.genre === 'platformer' && isObj(spec.player) && typeof spec.player.jump === 'number' && spec.player.jump <= 0)
+    err('player.jump', 'platformer requires player.jump > 0');
+
   // pickups
   if (!isObj(spec.pickups)) err('pickups', 'missing');
   else for (const k of ['coins', 'health', 'ammo', 'powerups'] as const) {
@@ -455,6 +483,10 @@ export function validateSpec(spec: unknown): ValidationResult {
         }
       }
       if (c.quality !== undefined && !inEnum(c.quality, QUALITY_MODES)) err('custom.quality', `must be one of ${QUALITY_MODES.join('|')}`);
+      if (c.legacyOperators !== undefined) {
+        if (!Array.isArray(c.legacyOperators) || !c.legacyOperators.every((id) => Number.isInteger(id) && (id as number) >= 1 && (id as number) <= 72))
+          err('custom.legacyOperators', 'must be an array of operator ids 1..72');
+      }
       const as = c.assets;
       if (as !== undefined) {
         if (!isObj(as)) err('custom.assets', 'must be an object');
@@ -484,17 +516,35 @@ export function validateSpec(spec: unknown): ValidationResult {
       err('player.camera', 'top-down-shooter requires top-down camera');
   }
 
-  return { ok: errors.length === 0, errors };
+  // unknown keys are ignored, never errors — but reported so typos don't vanish silently
+  const warnings: string[] = [];
+  for (const k of Object.keys(spec)) {
+    if (!TOP_LEVEL_KEYS.includes(k)) warnings.push(`unknown top-level key "${k}" ignored`);
+  }
+  const customLayer: unknown = (spec as Record<string, unknown>).custom;
+  if (isObj(customLayer)) {
+    for (const k of Object.keys(customLayer)) {
+      if (!CUSTOM_KEYS.includes(k)) warnings.push(`unknown custom key "${k}" ignored`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 /** Deep-merge `partial` over defaults, then validate. Throws with full error list if invalid. */
 export function normalizeSpec(partial: unknown): GameSpec {
   const base = defaultSpec(Number(isObj(partial) && isObj(partial.meta) && Number.isInteger(partial.meta.seed) ? partial.meta.seed : 1));
+  // deep-clone so the caller's input is never aliased into (or mutated by) the result
+  const clone = (v: any): any => {
+    if (Array.isArray(v)) return v.map(clone);
+    if (isObj(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clone(x)]));
+    return v;
+  };
   const merge = (dst: any, src: any): any => {
     if (!isObj(src)) return dst;
     for (const [k, v] of Object.entries(src)) {
       if (isObj(v) && isObj(dst[k])) dst[k] = merge(dst[k], v);
-      else if (v !== undefined) dst[k] = v;
+      else if (v !== undefined) dst[k] = clone(v);
     }
     return dst;
   };

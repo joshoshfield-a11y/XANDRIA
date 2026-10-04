@@ -58,6 +58,9 @@ export class HUD {
   private vignetteT = 0;
   private toastT = 0;
   private hintEl: HTMLDivElement;
+  private bossEl: HTMLDivElement;
+  private bossName: HTMLDivElement;
+  private bossFill: HTMLDivElement;
 
   constructor(private container: HTMLElement, private spec: GameSpec) {
     const style = document.createElement('style');
@@ -86,7 +89,8 @@ export class HUD {
       </div>
       <div class="vignette"></div>
       <div class="toast"></div>
-      <div class="hint"></div>`;
+      <div class="hint"></div>
+      <div class="boss" style="display:none"><div class="name"></div><div class="bar"><div style="width:100%"></div></div></div>`;
     container.style.position = 'relative';
     container.appendChild(this.root);
 
@@ -102,6 +106,9 @@ export class HUD {
     this.vignette = this.root.querySelector('.vignette')!;
     this.toastEl = this.root.querySelector('.toast')!;
     this.hintEl = this.root.querySelector('.hint')!;
+    this.bossEl = this.root.querySelector('.boss')!;
+    this.bossName = this.root.querySelector('.boss .name')!;
+    this.bossFill = this.root.querySelector('.boss .bar > div')!;
     this.crosshair = document.createElement('div');
     this.crosshair.className = 'crosshair';
     this.crosshair.style.display = 'none';
@@ -130,6 +137,13 @@ export class HUD {
   setLives(n: number) { this.livesEl.textContent = n > 1 ? '♥'.repeat(Math.min(9, n)) : ''; }
   setCrosshair(show: boolean) { this.crosshair.style.display = show ? '' : 'none'; }
   setHint(text: string) { this.hintEl.textContent = text; }
+  /** Boss health bar. Pass null to hide. */
+  setBoss(name: string | null, frac: number) {
+    if (name === null) { this.bossEl.style.display = 'none'; return; }
+    this.bossEl.style.display = '';
+    this.bossName.textContent = name;
+    this.bossFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
+  }
 
   damageFlash() { this.vignetteT = 0.35; }
   toast(text: string, seconds = 2.2) {

@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { GROUP, toV3 } from '../core/Physics';
-import { makeHumanoid, makeDrone, makeTurret, type CharacterRig } from '../gfx/Characters';
+import { makeHumanoid, makeDrone, makeTurret, disposeOwned, type CharacterRig } from '../gfx/Characters';
 import type { EnemySpec } from '@spec';
 import type { Projectiles } from './Projectiles';
 import { Rng } from '../core/Rng';
@@ -94,19 +94,36 @@ export class Enemy {
   }
 
   private applyGlow(color: string, root: THREE.Object3D) {
+    // FIX: never mutate shared MaterialLibrary-cached materials — clone per-instance
+    // first so the glow tints only this enemy.
     root.traverse((o) => {
       const m = o as THREE.Mesh;
-      if (m.isMesh) {
-        const mat = m.material as THREE.MeshStandardMaterial;
-        if (mat && 'emissive' in mat) { mat.emissive = new THREE.Color(color); mat.emissiveIntensity = 0.55; }
+      if (!m.isMesh) return;
+      const cur = m.material as THREE.Material | THREE.Material[];
+      const list = (Array.isArray(cur) ? cur : [cur]).map((mm) => {
+        const mat = mm as THREE.MeshStandardMaterial;
+        if (mat && 'emissive' in mat && !mat.userData.owned) {
+          const c = mat.clone() as THREE.MeshStandardMaterial;
+          c.userData.owned = true;
+          return c;
+        }
+        return mat;
+      });
+      m.material = (Array.isArray(cur) ? list : list[0]) as THREE.Material | THREE.Material[];
+      for (const mm of list) {
+        mm.emissive = new THREE.Color(color);
+        mm.emissiveIntensity = 0.55;
       }
     });
   }
 
   get position(): THREE.Vector3 {
     if (this.body) return toV3(this.body.position);
-    return this.turret ? this.turret.group.position.clone() : this.home.clone();
+    if (this.turret) return this.turret.group.position.clone();
+    // post-mortem: body/turret are disposed — report the death site, not the spawn
+    return this.deathPos ? this.deathPos.clone() : this.home.clone();
   }
+  private deathPos: THREE.Vector3 | null = null;
 
   damage(amount: number, from?: THREE.Vector3) {
     if (!this.alive) return;
@@ -128,14 +145,30 @@ export class Enemy {
   private die() {
     this.alive = false;
     const p = this.position;
+    this.deathPos = p.clone();
     this.engine.particles.explosion(p, this.spec.kind === 'brute' ? 1.8 : 1);
     this.engine.audio.play('explosion', { vol: 0.7 });
+    this.dispose();
+    this.events.onDeath?.(this);
+  }
+
+  /**
+   * FIX: full lifecycle — remove the body from physics, detach the rig from the
+   * scene, and dispose per-instance GPU resources (geometries + owned materials).
+   * Shared MaterialLibrary-cached materials are never disposed. Idempotent.
+   */
+  dispose() {
     if (this.body) {
       this.engine.physics.remove(this.body);
+      this.body = null;
     }
-    if (this.rig) this.rig.group.visible = false;
-    if (this.turret) this.turret.group.visible = false;
-    this.events.onDeath?.(this);
+    const root = this.rig?.group ?? this.turret?.group;
+    if (root) {
+      this.engine.scene.remove(root);
+      disposeOwned(root);
+    }
+    this.rig = null;
+    this.turret = null;
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
@@ -248,11 +281,18 @@ export class EnemyManager {
         const pos = spawnFor(spec.kind, i, spec.count);
         const e = new Enemy(this.engine, spec, pos, this.projectiles, {
           onPlayerHit: this.events.onPlayerHit,
-          onDeath: (en) => { this.killed++; this.events.onDeath?.(en); },
+          // FIX: splice the dead enemy out of the roster so waves can't accumulate corpses forever
+          onDeath: (en) => { this.killed++; this.removeEnemy(en); this.events.onDeath?.(en); },
         }, this.engine.spec.meta.seed ^ (this.enemies.length * 7919));
         this.enemies.push(e);
       }
     }
+  }
+
+  /** Remove a dead enemy from the roster (its scene/physics/GPU resources are already disposed by die()). */
+  private removeEnemy(e: Enemy) {
+    const i = this.enemies.indexOf(e);
+    if (i >= 0) this.enemies.splice(i, 1);
   }
 
   aliveCount() { return this.enemies.filter((e) => e.alive).length; }
@@ -269,6 +309,7 @@ export class EnemyManager {
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
-    for (const e of this.enemies) e.update(dt, playerPos, t);
+    // iterate a copy: die() → onDeath → removeEnemy() splices the array mid-loop
+    for (const e of [...this.enemies]) e.update(dt, playerPos, t);
   }
 }

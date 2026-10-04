@@ -270,6 +270,9 @@ export class Vegetation {
   /** GPU wind sway: bend foliage by height, phase from instance position. */
   private addWind(mat: THREE.Material) {
     const u = this.windUniforms;
+    // FIX: customProgramCacheKey — without it, three.js could reuse a compiled program
+    // from another material that shares the cache key but lacks our injected uniforms.
+    mat.customProgramCacheKey = () => 'xandria-wind-v1';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = u.uTime;
       shader.uniforms.uWind = u.uWind;
@@ -339,7 +342,8 @@ export class Vegetation {
     for (const t of this.tiers) {
       scene.remove(t.mesh);
       t.mesh.geometry.dispose();
-      (t.mesh.material as THREE.Material).dispose();
+      // FIX: materials come from the MaterialLibrary cache (shared) — never dispose
+      // cache-owned materials here; only the per-tier geometries are uniquely ours.
       t.mesh.dispose();
     }
     this.tiers = [];

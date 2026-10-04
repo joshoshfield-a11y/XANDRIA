@@ -127,9 +127,9 @@ export class PlayerAvatar {
       for (let i = 0; i < pellets; i++) {
         const spread = dir.clone();
         const amt = 0.12 + extraSpread;
-        spread.x += (Math.random() - 0.5) * amt;
-        spread.y += (Math.random() - 0.5) * amt;
-        spread.z += (Math.random() - 0.5) * amt;
+        spread.x += (this.engine.rng.next() - 0.5) * amt;
+        spread.y += (this.engine.rng.next() - 0.5) * amt;
+        spread.z += (this.engine.rng.next() - 0.5) * amt;
         this.projectiles.fire(from, spread.normalize(), { speed: 42 * spdMult, damage: 9, friendly: true, life: 0.8, ...beam });
       }
     } else if (w === 'rifle') {

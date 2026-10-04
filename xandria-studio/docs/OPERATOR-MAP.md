@@ -57,9 +57,10 @@ operator family, and the module that now executes it.
 | Composition by LLM attention | Composition by blueprint code |
 | Validation: none (hope) | Validation: `validateSpec`, 100% of generated specs |
 | Output: a demo scene | Output: a playable, winnable/losable, exportable game |
-| Determinism: none | Determinism: seeded end-to-end, bit-identical replays |
+| Determinism: none | Determinism: seeded generation, same spec ⇒ same world |
 | Creativity: fixed catalog | Creativity: `spec.custom` freeform layer (biomes, forge hints, enemy/weapon mods, quality, online asset packs) |
 
-Any prompt written in the old operator vocabulary still works: the generator's
-keyword tables recognize the operator names themselves, so lattice-era intents
-degrade gracefully into modern specs.
+Any prompt written in the old operator vocabulary still works: the frozen
+vocabulary bridge (`src/generator/operators.ts`, vendored from
+`legacy/core/operators.mjs`) recognizes operator names and `OP-N` references,
+so lattice-era intents degrade gracefully into modern specs.

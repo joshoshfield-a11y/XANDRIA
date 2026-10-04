@@ -19,6 +19,33 @@ export interface CharacterRig {
   swing(): void;
   setDead(dead: boolean): void;
   flash(): void; // damage blink
+  /** release per-instance GPU resources (geometries + owned materials) */
+  dispose(): void;
+}
+
+/**
+ * Clone a (possibly MaterialLibrary-cached/shared) material into a per-instance
+ * owned copy. Owned materials are flagged via userData and disposed by disposeOwned().
+ * Textures stay shared — only the material wrapper is unique.
+ */
+function own<T extends THREE.Material>(m: T): T {
+  const c = m.clone() as T;
+  c.userData.owned = true;
+  return c;
+}
+
+/** Dispose per-instance GPU resources under root: every geometry + materials flagged owned. Shared cached materials are left alone. */
+export function disposeOwned(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.geometry.dispose();
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mm of mats) {
+      const mat = mm as THREE.Material | undefined;
+      if (mat && mat.userData.owned) mat.dispose();
+    }
+  });
 }
 
 function box(w: number, h: number, d: number, mat: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
@@ -117,10 +144,13 @@ function dressTorso(torso: THREE.Mesh, group: THREE.Group, plan: HumanoidPlan, a
 export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shirt?: string; pants?: string; accent?: string; bulk?: number }, seed = 1, hints?: ForgeCustom): CharacterRig {
   const plan = forgeHumanoidPlan(seed, colors, hints);
   const { height, bulk, legLen } = plan;
-  const skin = mats.flat(plan.colors.skin, { roughness: 0.8 });
-  const shirt = mats.flat(plan.colors.shirt, { roughness: 0.85 });
-  const pants = mats.flat(plan.colors.pants, { roughness: 0.9 });
-  const accent = mats.flat(plan.colors.accent, { roughness: 0.5, metalness: 0.3 });
+  // FIX: clone into per-instance owned materials — flash() mutates emissive, and
+  // mutating the MaterialLibrary-cached originals permanently tinted every
+  // same-palette character. Owned clones are disposed by dispose().
+  const skin = own(mats.flat(plan.colors.skin, { roughness: 0.8 }));
+  const shirt = own(mats.flat(plan.colors.shirt, { roughness: 0.85 }));
+  const pants = own(mats.flat(plan.colors.pants, { roughness: 0.9 }));
+  const accent = own(mats.flat(plan.colors.accent, { roughness: 0.5, metalness: 0.3 }));
 
   const legL0 = 0.74 * legLen, torsoY = legL0 + 0.38;
   const group = new THREE.Group();
@@ -181,6 +211,7 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
     },
     setDead(dead) { if (dead) group.userData.deadT = 0; },
     flash() { flashTime = 0.25; },
+    dispose() { disposeOwned(group); },
   };
 }
 
@@ -189,7 +220,8 @@ export function makeDrone(mats: MaterialLibrary, color = '#c33', eye = '#ff4444'
   const plan = forgeDronePlan(seed);
   const s = plan.size;
   const group = new THREE.Group();
-  const body = mats.flat(color, { roughness: 0.4, metalness: 0.6 });
+  // FIX: per-instance owned clone — drone flash() mutates emissive on this material.
+  const body = own(mats.flat(color, { roughness: 0.4, metalness: 0.6 }));
   const core = box(0.7 * s, 0.3 * s, 0.7 * s, body, 0, 0, 0);
   const eyeM = new THREE.Mesh(new THREE.SphereGeometry(0.12 * s, 8, 8), mats.glow(eye, 2));
   eyeM.position.set(0, 0, 0.36 * s);
@@ -234,16 +266,18 @@ export function makeDrone(mats: MaterialLibrary, color = '#c33', eye = '#ff4444'
     swing() { /* drones don't melee */ },
     setDead() { /* explosion handled by AI */ },
     flash() { flashTime = 0.25; },
+    dispose() { disposeOwned(group); },
   };
 }
 
 /** Static turret: base + swiveling head + barrel. */
-export function makeTurret(mats: MaterialLibrary, color = '#5a6270', accent = '#ff5533'): { group: THREE.Group; head: THREE.Group; muzzle: THREE.Object3D } {
+export function makeTurret(mats: MaterialLibrary, color = '#5a6270', accent = '#ff5533'): { group: THREE.Group; head: THREE.Group; muzzle: THREE.Object3D; dispose(): void } {
   const group = new THREE.Group();
   const base = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.65, 0.7, 8), mats.flat(color, { metalness: 0.6, roughness: 0.4 }));
   base.position.y = 0.35; base.castShadow = true;
   const head = new THREE.Group(); head.position.y = 0.85;
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.4, 10, 8), mats.flat(color, { metalness: 0.6, roughness: 0.35 }));
+  // FIX: dome is flash-mutated on damage — per-instance owned clone, not the cached shared material.
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.4, 10, 8), own(mats.flat(color, { metalness: 0.6, roughness: 0.35 })));
   dome.castShadow = true;
   const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.9, 6), mats.flat('#222831', { metalness: 0.8, roughness: 0.3 }));
   barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0, 0.55);
@@ -252,7 +286,7 @@ export function makeTurret(mats: MaterialLibrary, color = '#5a6270', accent = '#
   eye.position.set(0, 0.12, 0.36);
   head.add(dome, barrel, muzzle, eye);
   group.add(base, head);
-  return { group, head, muzzle };
+  return { group, head, muzzle, dispose() { disposeOwned(group); } };
 }
 
 /** Forged low-poly car: silhouette varies by seed. Origin at chassis center. */

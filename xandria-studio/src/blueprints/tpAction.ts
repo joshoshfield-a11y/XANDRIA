@@ -32,12 +32,19 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
   let avatar: PlayerAvatar;
 
+  // FIX 5: combat music intensity — pulsed up by combat events, decays to baseline
+  let combatT = 0;
+  const combatPulse = () => { combatT = 1; };
+
   const enemies = new EnemyManager(engine, projectiles, {
-    onPlayerHit: (dmg, from) => avatar.damage(dmg, from),
+    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
     onDeath: (e) => {
       engine.score += 100;
       hud.setScore(engine.score);
       objectives.addProgress(1);
+      combatPulse();
+      const d = e.position.distanceTo(avatar.ctrl.position);
+      if (d < 14) camRig.shake(0.6 * (1 - d / 14));
       if (rng.chance(0.3)) pickups.spawn(rng.chance(0.6) ? 'health' : 'coin', e.position.clone().add(new THREE.Vector3(0, 0.6, 0)));
     },
   });
@@ -45,6 +52,16 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
+
+  // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
+  projectiles.onHit = (p, hitBody, point) => {
+    if (p.friendly) {
+      const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
+      if (target) { target.damage(p.damage, point); combatPulse(); }
+    } else if (hitBody === avatar.ctrl.body) {
+      avatar.damage(p.damage, point);
+    }
+  };
 
   // --- enemies spawn ringed around spawn
   const spawnFor = (kind: string, i: number, n: number): THREE.Vector3 => {
@@ -133,7 +150,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     avatar.ctrl.body.position.x = pp.x; avatar.ctrl.body.position.z = pp.z;
 
     // fell out of world
-    if (pp.y < -40) avatar.damage(1000);
+    if (pp.y < -40) { avatar.damage(1000); camRig.shake(0.8); }
 
     // reach goal check
     if (goalPos && pp.distanceTo(goalPos) < 3.5) objectives.reachedGoal();
@@ -142,6 +159,15 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     if (bossAura) {
       const b = enemies.enemies.find((e) => e.alive);
       if (b) bossAura.position.copy(b.position).add(new THREE.Vector3(0, 3, 0));
+    }
+
+    // FIX 5: combat intensity decays to baseline; boss bar tracks the toughest living enemy
+    combatT = Math.max(0, combatT - dt * 0.25);
+    engine.audio.setIntensity(0.35 + combatT * 0.6);
+    if (spec.objective.type === 'boss') {
+      const boss = enemies.enemies.filter((e) => e.alive).sort((a, b) => b.maxHealth - a.maxHealth)[0];
+      if (boss) hud.setBoss(`BOSS — ${boss.spec.kind.toUpperCase()}`, boss.health / boss.maxHealth);
+      else hud.setBoss(null, 0);
     }
 
     // camera

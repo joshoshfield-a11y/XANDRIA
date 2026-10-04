@@ -68,4 +68,21 @@ describe('generator', () => {
       if (!v.ok) throw new Error(`intent "${intent}" failed: ${v.errors.join('; ')}`);
     }
   });
+
+  it('eliminate objective never exceeds spawned enemies (P0 winnability)', () => {
+    for (const intent of ['neon cyberpunk fps arena', 'brutal fps deathmatch']) {
+      const s = generateSpec(intent);
+      expect(s.objective.type).toBe('eliminate');
+      const total = s.enemies.reduce((n, e) => n + e.count, 0);
+      expect(s.objective.count).toBeLessThanOrEqual(total);
+    }
+  });
+
+  it('racing terrain is flat and smooth (no hill clipping)', () => {
+    const s = generateSpec('kart grand prix');
+    expect(s.meta.genre).toBe('racing');
+    expect(s.world.terrain.type).toBe('flat');
+    expect(s.world.terrain.roughness).toBe(0);
+    expect(s.world.terrain.maxHeight).toBeLessThanOrEqual(2);
+  });
 });

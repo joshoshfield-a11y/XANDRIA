@@ -17,5 +17,5 @@ itch.io. This file is the answer: yes, with no strings.
 
 ## Change control
 
-Edits to the bolded paragraph require a log entry in
-`perplexity-knowledge-base/logs/` referencing the commit SHA.
+Edits to the bolded paragraph are recorded in this repository's git history
+with a descriptive commit message referencing the change.

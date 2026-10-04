@@ -19,6 +19,9 @@ export const STRANGER_TEST_SEEDS: readonly number[] = [
   41278, 95304, 26741, 58967, 70413,
 ] as const;
 
+import { generateSpec } from './generate';
+import { validateSpec } from '@spec';
+
 export interface SeedResult {
   seed: number;
   ok: boolean;
@@ -35,10 +38,51 @@ export interface SeedResult {
  */
 export type SeedRunner = (seed: number) => Promise<SeedResult>;
 
+/**
+ * Representative intents covering every objective type and genre the
+ * winnability rules care about. Each seed is exercised through all of them
+ * via the deterministic seed-override path.
+ */
+const STRANGER_INTENTS = [
+  'neon cyberpunk fps arena',       // eliminate, fps-arena
+  'brutal fps deathmatch',          // eliminate, hard difficulty
+  'collect treasure coins',         // collect
+  'survive the endless horde',      // survive
+  'kart grand prix',                // race
+  'boss battle colossus',           // boss
+  'dreamy platformer in the clouds', // platformer / reach
+] as const;
+
+/**
+ * Real stranger test: for every frozen seed, generate a spec per
+ * representative intent through the deterministic compiler (seed override),
+ * validate it — validation now includes the winnability invariants — and
+ * also run the provided engine harness. Returns a per-seed pass/fail report;
+ * a seed fails if ANY intent is unwinnable/invalid or the harness reports
+ * failure. Never throws: harness/spec errors become failing notes.
+ */
 export async function runStrangerTest(run: SeedRunner): Promise<SeedResult[]> {
   const results: SeedResult[] = [];
   for (const seed of STRANGER_TEST_SEEDS) {
-    results.push(await run(seed));
+    const notes: string[] = [];
+    // spec-level: deterministic generation + validation (incl. winnability)
+    for (const intent of STRANGER_INTENTS) {
+      try {
+        const spec = generateSpec(intent, { seed });
+        const v = validateSpec(spec);
+        if (!v.ok) notes.push(`intent "${intent}" invalid: ${v.errors.join('; ')}`);
+      } catch (e) {
+        notes.push(`intent "${intent}" threw: ${(e as Error).message}`);
+      }
+    }
+    // engine-level: the harness contract (Playwright capture in CI)
+    try {
+      const r = await run(seed);
+      if (!r.ok) notes.push(`harness: ${r.notes ?? 'runner reported failure'}`);
+    } catch (e) {
+      notes.push(`harness threw: ${(e as Error).message}`);
+    }
+    results.push({ seed, ok: notes.length === 0, notes: notes.length ? notes.join(' | ') : undefined });
   }
   return results;
 }

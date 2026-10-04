@@ -65,9 +65,34 @@ for (const g of GENRES) {
   });
 }
 
-test('exported standalone HTML boots offline', async ({ page }) => {
-  await page.goto('/player.html?test=1', { waitUntil: 'load' });
+test('exported standalone HTML boots fully offline', async ({ browser }) => {
+  // Build a REAL export exactly like scripts/export.ts does: inject a spec
+  // into the single-file dist/player.html bundle, then prove it boots with
+  // the network completely disabled (file:// + offline context = no request
+  // can possibly succeed).
+  const { readFileSync, writeFileSync } = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const playerHtml = readFileSync('dist/player.html', 'utf8');
+  const specJson = readFileSync('tests/e2e/fixtures/export-spec.json', 'utf8');
+  const specJsonSafe = specJson.replace(/<\/script/gi, '<\\/script');
+  const exported = playerHtml.replace(
+    '<head>',
+    `<head><script>window.__XANDRIA_SPEC__=${specJsonSafe};</script>`
+  );
+  const outPath = path.join(os.tmpdir(), 'xandria-e2e-export.html');
+  writeFileSync(outPath, exported);
+
+  const ctx = await browser.newContext({ offline: true });
+  const page = await ctx.newPage();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  await page.goto('file://' + outPath + '?test=1', { waitUntil: 'load' });
   await page.waitForFunction(() => (window as any).__XANDRIA__?.engine?.state === 'playing', null, { timeout: 30000 });
   const genre = await page.evaluate(() => (window as any).__XANDRIA__.spec.meta.genre);
-  expect(genre).toBeTruthy();
+  expect(genre).toBe('fps-arena');
+  const captured = await page.evaluate(() => (window as any).__XANDRIA_ERRORS ?? []);
+  expect([...captured, ...errors]).toEqual([]);
+  await ctx.close();
 });

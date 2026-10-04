@@ -123,7 +123,11 @@ function mergeFlavor(base: GameSpec, overrides: Record<string, unknown>): GameSp
 /** Architect merge: deep-merge the whole partial spec, then validate. Returns null if invalid. */
 function mergeArchitect(base: GameSpec, overrides: Record<string, unknown>): GameSpec | null {
   const merged = JSON.parse(JSON.stringify(base)) as Record<string, unknown>;
-  if (overrides.meta && typeof overrides.meta === 'object') delete (overrides.meta as Record<string, unknown>).seed; // never let the LLM change the seed
+  if (overrides.meta && typeof overrides.meta === 'object') {
+    const m = overrides.meta as Record<string, unknown>;
+    delete m.seed; // never let the LLM change the seed
+    delete m.genre; // never let the LLM swap genre under a stale blueprint
+  }
   deepMerge(merged, overrides);
   const v = validateSpec(merged);
   return v.ok ? normalizeSpec(merged as unknown as GameSpec) : null;

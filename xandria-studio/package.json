@@ -16,11 +16,11 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "cli": "tsx scripts/export.ts",
-    "studio": "vite build && electron .",
-    "dist": "vite build && electron-builder",
-    "dist:win": "vite build && electron-builder --win",
-    "dist:mac": "vite build && electron-builder --mac",
-    "dist:linux": "vite build && electron-builder --linux"
+    "studio": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

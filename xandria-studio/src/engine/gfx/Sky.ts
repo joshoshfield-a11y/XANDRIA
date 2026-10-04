@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
+import { Rng } from '../core/Rng';
 
 export interface SkyRig {
   group: THREE.Group;
@@ -58,16 +59,18 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   }
 
   // Clouds: a few flat translucent discs drifting
+  // FIX: seeded RNG (was Math.random) so world generation is fully deterministic.
+  const rng = new Rng(spec.meta.seed ^ 0xc10d5);
   const cloudGroup = new THREE.Group();
   if (weather !== 'clear' || environment !== 'space-station') {
     const cm = new THREE.MeshBasicMaterial({ color: night ? '#3a4460' : '#ffffff', transparent: true, opacity: weather === 'storm' ? 0.85 : 0.55, depthWrite: false, fog: false });
     const count = weather === 'clear' ? 10 : 26;
     for (let i = 0; i < count; i++) {
-      const w = 60 + Math.random() * 120;
+      const w = 60 + rng.range(0, 120);
       const c = new THREE.Mesh(new THREE.CircleGeometry(w, 12), cm);
       c.rotation.x = -Math.PI / 2;
-      c.position.set((Math.random() - 0.5) * 1400, 180 + Math.random() * 80, (Math.random() - 0.5) * 1400);
-      c.scale.set(1, 0.5 + Math.random(), 1);
+      c.position.set(rng.range(-700, 700), 180 + rng.range(0, 80), rng.range(-700, 700));
+      c.scale.set(1, 0.5 + rng.next(), 1);
       cloudGroup.add(c);
     }
   }

@@ -6,6 +6,9 @@ import { generateSpec } from '../generator/generate';
 import { generateWithLLM } from '../generator/llm';
 import { GENRE_LABELS } from '../blueprints/index';
 import { validateSpec, normalizeSpec, type Genre, type GameSpec, type QualityMode } from '@spec';
+import './inspector/inspectorPanel';
+import { applyPatch, type Scalar } from './inspector/specInspector';
+import type { XandriaSpecInspector } from './inspector/inspectorPanel';
 
 declare global {
   interface Window { xandria?: { saveFile(name: string, content: string): Promise<string | null> } }
@@ -43,6 +46,8 @@ const css = `
            letter-spacing:.06em; background:linear-gradient(180deg,#24304a,#182034); color:#e6ecf5; }
   button:hover { border-color:#3fd8ff; }
   button.primary { background:linear-gradient(180deg,#1f6d8a,#144256); border-color:#3fd8ff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button:disabled:hover { border-color:#2a3550; }
   .presets { display:flex; flex-wrap:wrap; gap:6px; }
   .presets button { font-size:11px; padding:6px 9px; font-weight:400; opacity:.85; }
   #frame-wrap { flex:1; position:relative; background:#000; }
@@ -137,6 +142,31 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   let lastSpec = '';
   const playerBase = opts.playerUrl ?? 'player.html';
 
+  // Spec inspector (v1 edit loop): mounted next to the preview; patches are
+  // applied via specInspector and the preview iframe reloads with the new spec.
+  const frameWrap = root.querySelector<HTMLElement>('#frame-wrap')!;
+  const inspector = document.createElement('xandria-spec-inspector') as XandriaSpecInspector;
+  frameWrap.appendChild(inspector);
+
+  const reloadPreview = () => {
+    if (!lastSpec) return;
+    frame.src = `${playerBase}?spec=${b64url(lastSpec)}`;
+    frame.style.display = 'block';
+    empty.style.display = 'none';
+  };
+
+  inspector.addEventListener('xandria-spec-patch', (e) => {
+    if (!lastSpec) return;
+    const detail = (e as CustomEvent<Record<string, Scalar>>).detail;
+    const current = JSON.parse(lastSpec) as Record<string, unknown>;
+    const { spec: next, changed } = applyPatch(current, detail, inspector.lockedKeys);
+    if (changed.length > 0) {
+      lastSpec = JSON.stringify(next);
+      inspector.spec = next;
+      reloadPreview();
+    }
+  });
+
   const applyOnline = (spec: GameSpec): GameSpec => {
     const next = JSON.parse(JSON.stringify(spec)) as GameSpec;
     next.custom = next.custom ?? {};
@@ -176,6 +206,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     const v = validateSpec(spec);
     if (!v.ok) { meta.textContent = 'SPEC INVALID:\n' + v.errors.join('\n'); return; }
     lastSpec = JSON.stringify(spec);
+    inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
     const url = `${playerBase}?spec=${b64url(lastSpec)}`;
     frame.src = url;
     frame.style.display = 'block';
@@ -196,13 +227,23 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     meta.innerHTML += '<br/><i>link copied</i>';
   });
 
+  // Exporting from `vite dev` serves the dev module graph, not the singlefile
+  // bundle — the result is a broken file. Disable in dev with an explanation.
+  const exportBtn = root.querySelector<HTMLButtonElement>('#export')!;
+  if (import.meta.env.DEV) {
+    exportBtn.disabled = true;
+    exportBtn.title = 'Export needs a production build: run npm run build, then export from dist/index.html';
+  }
+
   root.querySelector('#export')!.addEventListener('click', async () => {
     if (!lastSpec) return;
     try {
       // fetch the built single-file player and inject the spec
       const res = await fetch(`${playerBase}?export-template`);
       let html = await res.text();
-      html = html.replace('<head>', `<head><script>window.__XANDRIA_SPEC__=${lastSpec};</script>`);
+      // Escape </script inside the spec so it can't break out of the injection block
+      const specSafe = lastSpec.replace(/<\/script/gi, '<\\/script');
+      html = html.replace('<head>', `<head><script>window.__XANDRIA_SPEC__=${specSafe};</script>`);
       const name = 'xandria-game.html';
       if (window.xandria?.saveFile) {
         await window.xandria.saveFile(name, html);
