@@ -105,6 +105,11 @@ export class MaterialLibrary {
           }
         }
         tmp.copy(base).lerp(alt, t).offsetHSL(0, 0, extra);
+        // Canvas ImageData is sRGB: convert out of the linear working space.
+        // (Writing linear values here double-darkened every texture ~10x once
+        // the renderer re-converted the sRGB-marked texture — structures
+        // rendered near-black even at noon.)
+        tmp.convertLinearToSRGB();
         put(i, tmp);
       }
     }

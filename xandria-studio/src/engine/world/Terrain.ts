@@ -66,9 +66,14 @@ export class Terrain {
     geo.rotateX(-Math.PI / 2);
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
-    const cGround = new THREE.Color(spec.theme.palette.ground);
-    const cAlt = new THREE.Color(spec.theme.palette.groundAlt);
-    const cRock = new THREE.Color(spec.theme.palette.rock);
+    // NOTE: vertex colors are consumed RAW by the shader (no color-management
+    // conversion), so write the palette's sRGB components directly. Using
+    // `new THREE.Color(hex)` here would store linear-workspace values and make
+    // the terrain ~7x darker than the authored palette (it rendered black at
+    // night). convertLinearToSRGB() recovers the raw sRGB components.
+    const cGround = new THREE.Color(spec.theme.palette.ground).convertLinearToSRGB();
+    const cAlt = new THREE.Color(spec.theme.palette.groundAlt).convertLinearToSRGB();
+    const cRock = new THREE.Color(spec.theme.palette.rock).convertLinearToSRGB();
     const tmp = new THREE.Color();
     for (let k = 0; k < pos.count; k++) {
       const x = pos.getX(k), z = pos.getZ(k);

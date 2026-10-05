@@ -13,6 +13,55 @@ import { applyOperators } from './operators';
 
 const has = (s: string, ...words: string[]) => words.some((w) => new RegExp(`\\b${w}\\b`, 'i').test(s));
 
+/* ---------- palette visibility floor ---------- */
+/** hex -> [h, s, l] with h in [0,360), s/l in [0,1] */
+function hexToHsl(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+  else if (max === g) h = ((b - r) / d + 2) * 60;
+  else h = ((r - g) / d + 4) * 60;
+  return [h, s, l];
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+  const to = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+/**
+ * Lift dark ground-family colors to a minimum lightness. A dark palette (e.g.
+ * neon-city's #232838 ground) under night lighting rendered an effectively
+ * black framebuffer — this guarantees the terrain stays readable while keeping
+ * the palette's hue. Sky/horizon are left alone (a dark night sky is intended).
+ */
+export function floorPalette(p: Palette): Palette {
+  const lift = (hex: string, minL: number): string => {
+    const [h, s, l] = hexToHsl(hex);
+    return l >= minL ? hex : hslToHex(h, Math.min(s, 0.85), minL);
+  };
+  return {
+    ...p,
+    ground: lift(p.ground, 0.20),
+    groundAlt: lift(p.groundAlt, 0.20),
+    rock: lift(p.rock, 0.20),
+    fog: lift(p.fog, 0.10),
+  };
+}
+
 const GENRE_KEYS: [Genre, string[]][] = [
   ['racing', ['race', 'racing', 'car', 'cars', 'drive', 'driving', 'drift', 'kart', 'grand prix', 'rally', 'f1']],
   ['fps-arena', ['fps', 'first person', 'first-person', 'deathmatch', 'arena shooter', 'quake', 'doom']],
@@ -408,7 +457,7 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const partial: any = {
     meta: { name, seed, genre, description: text.slice(0, 300), version: 1 },
     theme: {
-      palette: ENV_PALETTE[environment],
+      palette: floorPalette(ENV_PALETTE[environment]),
       environment,
       timeOfDay,
       weather,

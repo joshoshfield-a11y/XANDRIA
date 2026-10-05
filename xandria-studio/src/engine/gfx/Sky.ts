@@ -77,8 +77,11 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   group.add(cloudGroup);
 
   // Lighting
+  // Visibility floor: night stays moody but never renders pitch-black. These are
+  // minimums — a dark palette (e.g. neon-city) under the old 0.5/0.35/0.12 levels
+  // produced an effectively black framebuffer (see visibility.spec.ts).
   const sunColor = night ? new THREE.Color('#7f8fc0') : dusk ? new THREE.Color('#ffb070') : new THREE.Color('#fff4e0');
-  const sun = new THREE.DirectionalLight(sunColor, night ? 0.5 : dusk ? 1.6 : 2.2);
+  const sun = new THREE.DirectionalLight(sunColor, night ? 1.8 : dusk ? 1.6 : 2.2);
   const sunDir = sunDirPhys ? sunDirPhys.clone() : new THREE.Vector3(0.45, dusk ? 0.35 : 0.75, 0.35).normalize();
   sun.position.copy(sunDir).multiplyScalar(140);
   sun.castShadow = true;
@@ -90,8 +93,8 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   if (skyMat) skyMat.uniforms.sunDir.value.copy(sunDir);
   group.add(sun); group.add(sun.target);
 
-  const hemi = new THREE.HemisphereLight(top.clone().lerp(new THREE.Color('#ffffff'), 0.3), new THREE.Color(palette.ground).multiplyScalar(0.6), night ? 0.35 : 0.9);
-  const ambient = new THREE.AmbientLight('#ffffff', night ? 0.12 : 0.25);
+  const hemi = new THREE.HemisphereLight(top.clone().lerp(new THREE.Color('#ffffff'), 0.3), new THREE.Color(palette.ground).multiplyScalar(0.6), night ? 1.3 : 0.9);
+  const ambient = new THREE.AmbientLight('#ffffff', night ? 0.9 : 0.25);
   group.add(hemi, ambient);
 
   // Fog

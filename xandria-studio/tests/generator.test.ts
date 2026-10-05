@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateSpec } from '../src/generator/generate';
+import { generateSpec, floorPalette } from '../src/generator/generate';
 import { validateSpec } from '../src/spec/schema';
 
 const CASES: [string, string][] = [
@@ -84,5 +84,32 @@ describe('generator', () => {
     expect(s.world.terrain.type).toBe('flat');
     expect(s.world.terrain.roughness).toBe(0);
     expect(s.world.terrain.maxHeight).toBeLessThanOrEqual(2);
+  });
+
+  it('palette floor: dark ground colors are lifted to stay visible at night', () => {
+    // neon-city is the darkest palette and defaults to night — the exact combo
+    // that rendered an effectively black framebuffer before the floor.
+    const s = generateSpec('top-down twin stick shooter in a neon city at night');
+    expect(s.theme.timeOfDay).toBe('night');
+    const lightness = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+      return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+    };
+    for (const k of ['ground', 'groundAlt', 'rock'] as const) {
+      expect(lightness(s.theme.palette[k])).toBeGreaterThanOrEqual(0.20);
+    }
+  });
+
+  it('floorPalette keeps hue, lifts only dark colors', () => {
+    const p = floorPalette({
+      primary: '#2a2f45', secondary: '#3d2a5e', accent: '#ff3fd8',
+      sky: '#1a1a2e', horizon: '#3a2a5e',
+      ground: '#232838', groundAlt: '#c9a869', rock: '#3a4050',
+      fog: '#2a2545', water: '#3fd8ff',
+    });
+    expect(p.ground).not.toBe('#232838'); // lifted
+    expect(p.groundAlt).toBe('#c9a869');  // bright already — untouched
+    expect(p.sky).toBe('#1a1a2e');        // sky never floored
   });
 });
