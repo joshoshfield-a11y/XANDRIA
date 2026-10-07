@@ -8,7 +8,8 @@ import { deflateSync } from 'node:zlib';
 import type { GameSpec } from '../src/spec/schema';
 
 // ---------------------------------------------------------------- font ---
-// 5x7 pixel font, rows top→bottom, '1' = ink. Covers A-Z 0-9 + punctuation.
+// 5x7 pixel font, rows top→bottom, '1' = ink. Covers A-Z 0-9 + punctuation,
+// plus Latin-1 accented capitals (À–Þ, composed below). CJK/other scripts → '?'.
 const GLYPHS: Record<string, string[]> = {
   A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
   B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
@@ -58,6 +59,45 @@ const GLYPHS: Record<string, string[]> = {
   ':': ['00000', '00100', '00000', '00000', '00000', '00100', '00000'],
   '?': ['01110', '10001', '00001', '00010', '00100', '00000', '00100'],
 };
+
+// --- Latin-1 accents (QA X4) ---
+// Accented capitals compose a 2-row accent mark over the base letter's lower
+// 5 rows — cheap in this bitmap format, no new rasterization needed.
+// Covers À–Þ (after the title's toUpperCase()); CJK, emoji, and other scripts
+// still fall back to '?' — a real multilingual font is out of scope here.
+const ACCENT_TOP: Record<string, string[]> = {
+  acute: ['00010', '00100'],
+  grave: ['00100', '00010'],
+  circumflex: ['00100', '01010'],
+  tilde: ['01010', '10100'],
+  diaeresis: ['01010', '00000'],
+  ring: ['01110', '01010'],
+};
+const ACCENTED: Array<[string, string, string]> = [
+  ['À', 'A', 'grave'], ['Á', 'A', 'acute'], ['Â', 'A', 'circumflex'],
+  ['Ã', 'A', 'tilde'], ['Ä', 'A', 'diaeresis'], ['Å', 'A', 'ring'],
+  ['È', 'E', 'grave'], ['É', 'E', 'acute'], ['Ê', 'E', 'circumflex'], ['Ë', 'E', 'diaeresis'],
+  ['Ì', 'I', 'grave'], ['Í', 'I', 'acute'], ['Î', 'I', 'circumflex'], ['Ï', 'I', 'diaeresis'],
+  ['Ò', 'O', 'grave'], ['Ó', 'O', 'acute'], ['Ô', 'O', 'circumflex'],
+  ['Õ', 'O', 'tilde'], ['Ö', 'O', 'diaeresis'],
+  ['Ù', 'U', 'grave'], ['Ú', 'U', 'acute'], ['Û', 'U', 'circumflex'], ['Ü', 'U', 'diaeresis'],
+  ['Ý', 'Y', 'acute'],
+  ['Ñ', 'N', 'tilde'],
+];
+for (const [ch, base, ac] of ACCENTED) {
+  GLYPHS[ch] = [...ACCENT_TOP[ac], ...GLYPHS[base].slice(2)];
+}
+// Ligatures / letters that don't decompose into base + mark:
+GLYPHS['Æ'] = ['01111', '10001', '10001', '11110', '10001', '10001', '01111'];
+GLYPHS['Ç'] = ['01110', '10001', '10000', '10000', '10000', '10001', '00110'];
+GLYPHS['Ð'] = ['11100', '10010', '10001', '11111', '10001', '10010', '11100'];
+GLYPHS['Ø'] = ['01110', '10011', '10101', '11001', '10001', '10001', '01110'];
+GLYPHS['Þ'] = ['10000', '11110', '10001', '10001', '10001', '11110', '10000'];
+
+/** Glyph lookup with '?' fallback; exported for tests. */
+export function glyphFor(ch: string): string[] {
+  return GLYPHS[ch] ?? GLYPHS['?'];
+}
 
 type RGB = [number, number, number];
 
@@ -111,7 +151,7 @@ class Canvas {
   text(str: string, x: number, y: number, scale: number, c: RGB) {
     let cx = x;
     for (const raw of str.toUpperCase()) {
-      const g = GLYPHS[raw] ?? GLYPHS['?'];
+      const g = glyphFor(raw);
       for (let r = 0; r < 7; r++)
         for (let col = 0; col < 5; col++)
           if (g[r][col] === '1') this.rect(cx + col * scale, y + r * scale, scale, scale, c);

@@ -64,7 +64,13 @@ export interface CustomEnemyKindDef {
  * Progression.applyUpgrade() like a built-in.
  */
 export interface CustomUpgradeDef {
-  /** unique id (must not collide with built-in ids) */
+  /**
+   * Unique id for the choice pool. Not checked against built-in ids — if it
+   * collides with one ('damage' | 'maxhp' | 'speed' | 'firerate' | 'magnet'
+   * | 'dash'), the built-in wins at apply time (Progression.applyUpgrade's
+   * switch handles built-ins before customs), so the custom apply() would
+   * never run. Use an id no built-in uses.
+   */
   id: string;
   name: string;
   desc: string;
@@ -115,7 +121,10 @@ export class Modding {
   /**
    * Register a custom upgrade. It joins the level-up choice pool immediately
    * and applies through Progression.applyUpgrade(id, avatar).
-   * Throws on duplicate registration or id collision with built-ins.
+   * Throws on duplicate registration. Note: unlike the old doc claim, a
+   * custom id that collides with a built-in id is NOT rejected — the
+   * built-in's apply path wins (see CustomUpgradeDef.id), so register a
+   * unique id.
    */
   registerUpgrade(def: CustomUpgradeDef): void {
     if (this.upgrades.has(def.id)) throw new Error(`upgrade "${def.id}" already registered`);

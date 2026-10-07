@@ -17,7 +17,11 @@ export interface AtmosphereRig {
 export function createAtmosphere(spec: GameSpec): AtmosphereRig {
   const { timeOfDay, weather } = spec.theme;
   const sky = new Sky();
-  sky.scale.setScalar(450000);
+  // The dome follows the camera every frame (see SkyRig.update), so it only
+  // needs to comfortably enclose the view — and it MUST stay inside the
+  // camera far plane (1400 in Engine.ts), otherwise the whole sky is
+  // GPU-clipped (B4). Matches the night dome's radius-900 approach.
+  sky.scale.setScalar(1000);
 
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
   const elevation = dusk ? 4 : 48;                     // degrees above horizon

@@ -91,13 +91,13 @@ describe('layoutForGenre', () => {
     expect(l.autoForward).toBe(false);
   });
 
-  it('racing: steer-only stick, automatic gas, BRAKE/BOOST', () => {
+  it('racing: steer-only stick, automatic gas, BRAKE/BOOST/RESET', () => {
     const l = layoutForGenre('racing');
     expect(l.move).toBe('steer');
     expect(l.aim).toBe(null);
     expect(l.autoForward).toBe(true);
     const acts = l.buttons.map((b) => b.action);
-    expect(acts).toEqual(expect.arrayContaining(['brake', 'boost']));
+    expect(acts).toEqual(expect.arrayContaining(['brake', 'boost', 'reset'])); // N3: touch reset
   });
 
   it('platformer: d-pad + JUMP', () => {

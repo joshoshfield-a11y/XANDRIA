@@ -18,6 +18,7 @@ import { normalizeSpec, validateSpec } from '../src/spec/schema';
 import type { GameSpec } from '../src/spec/schema';
 import { ZipBuilder } from './zip';
 import { generateCover } from './cover';
+import { injectSpecScript } from './specInject';
 
 const GENRE_LABEL: Record<string, string> = {
   'fps-arena': 'FPS arena shooter',
@@ -61,7 +62,9 @@ if (!existsSync(playerPath)) {
 let html = readFileSync(playerPath, 'utf8');
 // Escape </script inside the spec JSON so it can't break out of the injection block
 const specJsonSafe = JSON.stringify(spec).replace(/<\/script/gi, '<\\/script');
-html = html.replace('<head>', `<head><script>window.__XANDRIA_SPEC__=${specJsonSafe};</script>`);
+// Throws (loudly) if the bundle has no <head> tag — never silently ship the
+// default spec instead of the user's game.
+html = injectSpecScript(html, `<script>window.__XANDRIA_SPEC__=${specJsonSafe};</script>`);
 writeFileSync(out, html);
 console.log(`Exported "${spec.meta.name}" (${spec.meta.genre}) -> ${out} (${(html.length / 1024 / 1024).toFixed(2)} MB, fully offline)`);
 
@@ -174,8 +177,9 @@ ${'-'.repeat(50)}
 3. Embed options (recommended):
      Viewport dimensions: 1280 x 720
      [x] Automatically start on page load
-     [ ] Mobile friendly — leave OFF unless you tested touch;
-         this game needs keyboard + mouse.
+     [x] Mobile friendly — v1.5.0 added touch controls for all
+         five genres (on-screen stick + buttons), so mobile play
+         works. Desktop keyboard + mouse still work as before.
 
 4. Cover art: upload cover.png (630x500, generated for this game)
    as the project's cover image.

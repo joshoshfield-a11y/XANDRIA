@@ -3,7 +3,7 @@
  * cover crates, ammo/health economy, survive N waves.
  */
 import * as THREE from 'three';
-import type { GameSpec } from '@spec';
+import type { GameSpec, EnemySpec } from '@spec';
 import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
@@ -19,10 +19,13 @@ import {
   grantKillXp,
   grantPickupXp,
   bossPhaseBanner,
+  bossQuotaDeficit,
   registerWorldAssets,
   registerPickupAssets,
   registerEnemyAssets,
 } from './campaign';
+import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { isTouchDevice } from '../engine/game/TouchControls';
 import {
   VariantDirector,
   planSpawns,
@@ -46,6 +49,11 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(202);
   const arenaR = Math.min(46, terrain.size / 2 - 12);
+
+  // M2: snapshot the pristine run config before any run-time mutation.
+  snapshotLoadoutBase(spec);
+  // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
+  engine.assetBridge.dispose();
 
   // campaign layer: intro card + XP progression (non-blocking at boot)
   showIntroCard(engine, spec);
@@ -90,7 +98,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
-      objectives.addProgress(1);
+      objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
       grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
@@ -132,7 +140,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     } else {
       if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
       if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
-      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); }
+      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); objectives.addProgress(1, 'collect'); }
       if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 5; engine.audio.play('powerup'); }
     }
     grantPickupXp(prog, notifyLevelUp);
@@ -148,10 +156,21 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
 
   const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
   hud.setCrosshair(true);
-  hud.setHint('WASD move · mouse aim · LMB fire · Space jump · Esc pause');
+  // N1: touch-aware hint bar (drag-to-look replaces pointer lock on touch)
+  hud.setHint(isTouchDevice()
+    ? 'Left stick move · drag right side to look · FIRE shoot · JUMP jump'
+    : 'WASD move · mouse aim · LMB fire · Space jump · Esc pause');
 
-  // pointer lock on click
-  engine.renderer.domElement.addEventListener('click', () => input.requestPointerLock());
+  // pointer lock on click — registered once per canvas (M7: the blueprint body
+  // re-runs on every in-place restart; engine.input is stable across restarts)
+  const canvas = engine.renderer.domElement as unknown as {
+    __xandriaLockHandler?: () => void;
+    addEventListener(t: string, fn: () => void): void;
+  };
+  if (!canvas.__xandriaLockHandler) {
+    canvas.__xandriaLockHandler = () => input.requestPointerLock();
+    canvas.addEventListener('click', canvas.__xandriaLockHandler);
+  }
 
   const camRig = makeCameraRig('first-person', engine.camera, input, (x, z) => terrain.heightAt(x, z));
 
@@ -159,6 +178,23 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const totalNeeded = spec.objective.type === 'eliminate' ? spec.objective.count : spec.enemies.reduce((n, e) => n + e.count, 0);
   const initialCount = spec.enemies.reduce((n, e) => n + e.count, 0);
   let spawned = initialCount;
+  // M4: brutes spawned during the CURRENT stage. Boss stages need their quota
+  // spawned in-stage — a brute spent on an earlier stage doesn't count.
+  let brutesSpawnedForStage = 0;
+
+  const spawnOne = (kindSpec: EnemySpec, stage: number) => {
+    const planned = planSpawns([{ ...kindSpec, count: 1 }], rng, stage, ARENA_VARIANTS)[0];
+    const a = rng.range(0, Math.PI * 2);
+    const r = rng.range(arenaR * 0.5, arenaR - 4);
+    const pos = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
+    pos.y = terrain.heightAt(pos.x, pos.z) + 1.5;
+    const before = enemies.enemies.length;
+    enemies.spawnAll([planned.spec], () => pos);
+    const e = enemies.enemies[before];
+    if (e) { variants.register(e, planned.variant); variants.decorate(e, planned.variant); }
+    spawned++;
+    if (planned.spec.kind === 'brute') brutesSpawnedForStage++;
+  };
 
   const spawnWave = () => {
     const remaining = totalNeeded - spawned;
@@ -171,19 +207,32 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const kinds = spec.enemies.length ? spec.enemies : [{ kind: 'walker' as const, count: 1, health: 30, speed: 4, damage: 10, weapon: 'melee' as const }];
     let i = 0;
     while (left > 0) {
-      const planned = planSpawns([{ ...kinds[i % kinds.length], count: 1 }], rng, stage, ARENA_VARIANTS)[0];
-      const a = rng.range(0, Math.PI * 2);
-      const r = rng.range(arenaR * 0.5, arenaR - 4);
-      const pos = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
-      pos.y = terrain.heightAt(pos.x, pos.z) + 1.5;
-      const before = enemies.enemies.length;
-      enemies.spawnAll([planned.spec], () => pos);
-      const e = enemies.enemies[before];
-      if (e) { variants.register(e, planned.variant); variants.decorate(e, planned.variant); }
-      spawned++;
+      spawnOne(kinds[i % kinds.length], stage);
       left--;
       i++;
     }
+    assets.applyOverrides(spec); // reskin the new wave
+  };
+
+  /**
+   * M4: guarantee the current boss stage's brute quota. The initial spawn's
+   * brute is typically spent on an earlier stage (e.g. 'warden'), and when the
+   * spawn cap already covered every enemy the generic waves never fire —
+   * leaving 'ruin'-style stages with zero brutes and no way to complete.
+   * Waves top up the unmet requirement; counts are never changed.
+   */
+  const topUpBossQuota = () => {
+    const stage = spec.objective.stages?.[objectives.currentStageIndex];
+    if (!stage || stage.type !== 'boss' || stage.count <= objectives.progress) return;
+    const aliveBrutes = enemies.enemies.filter((e) => e.alive && e.spec.kind === 'brute').length;
+    const need = bossQuotaDeficit(stage, objectives.progress, brutesSpawnedForStage, aliveBrutes);
+    if (need <= 0) return;
+    const bruteSpec = spec.enemies.find((e) => e.kind === 'brute')
+      ?? { kind: 'brute' as const, count: 1, health: 300, speed: 3.5, damage: 22, weapon: 'melee' as const };
+    hud.toast('THE WARDEN STIRS');
+    engine.audio.play('alarm');
+    // sanity cap per check; the alive-brute gate paces the rest
+    for (let k = 0; k < Math.min(need, 4); k++) spawnOne(bruteSpec, objectives.currentStageIndex);
     assets.applyOverrides(spec); // reskin the new wave
   };
 
@@ -192,6 +241,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const capped = spec.enemies.map((e) => ({ ...e, count: Math.min(e.count, Math.ceil(8 / spec.enemies.length)) }));
     const planned = planSpawns(capped, rng, 0, ARENA_VARIANTS);
     spawned = planned.length;
+    brutesSpawnedForStage = 0;
     planned.forEach((p, idx) => {
       const before = enemies.enemies.length;
       enemies.spawnAll([p.spec], () => {
@@ -202,6 +252,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       });
       const e = enemies.enemies[before];
       if (e) { variants.register(e, p.variant); variants.decorate(e, p.variant); }
+      if (p.spec.kind === 'brute') brutesSpawnedForStage++;
     });
   };
   spawnInitial();
@@ -212,6 +263,10 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
   assets.register('world.arena', { kind: 'world', roots: [structures.group] });
   assets.applyOverrides(spec);
+  // M6: wire the (cloned, never the shared cache entry) tracer material into
+  // the projectile pool so the override actually reaches pixels
+  const tracerMat = assets.currentMaterial('weapon.projectile');
+  if (tracerMat) projectiles.setTracerMaterial(tracerMat);
 
   // chapter-0 arena dressing
   dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half: arenaR - 4, yAt: (x, z) => terrain.heightAt(x, z) });
@@ -240,12 +295,14 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const stageIdx = objectives.currentStageIndex;
     if (stageIdx !== lastStage) {
       lastStage = stageIdx;
+      brutesSpawnedForStage = 0; // M4: boss quota is per-stage
       dresser.dress(spec, stageIdx, rng.fork(5000 + stageIdx), { cx: 0, cz: 0, half: arenaR - 4, yAt: (x, z) => terrain.heightAt(x, z) });
       variants.applyStageScaling(stageIdx);
       variants.notifyStage(stageIdx, isBossStageActive(spec, objectives));
     }
 
     if (enemies.aliveCount() === 0 && spawned < totalNeeded) spawnWave();
+    topUpBossQuota(); // M4: guarantee the boss stage's brute quota
 
     if (avatar.ctrl.position.y < -40) { avatar.damage(1000); camRig.shake(0.8); }
 
@@ -256,8 +313,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     variants.updateBossBar(spec.objective.type === 'boss' || isBossStageActive(spec, objectives));
 
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
-    // keep HUD objective fresh for wave counter
-    if (spec.objective.type === 'survive') hud.setProgress(`${objectives.done ? 0 : ''}${enemies.aliveCount()} hostiles`);
+    // keep HUD objective fresh for wave counter (N6: no literal-zero prefix)
+    if (spec.objective.type === 'survive') hud.setProgress(`${enemies.aliveCount()} hostiles`);
   });
 
   return { avatar, enemies, pickups, objectives, assets };

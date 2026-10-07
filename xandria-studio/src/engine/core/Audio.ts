@@ -68,6 +68,23 @@ export class AudioEngine {
   /** 0..1 — how intense the music should be (combat raises it). */
   setIntensity(v: number) { this.intensity = Math.max(0, Math.min(1, v)); }
 
+  /**
+   * Stop the generative-music scheduler (pause menu, victory, defeat).
+   * SFX keep working and the AudioContext is kept — scheduling alone stops.
+   */
+  pauseMusic() {
+    if (this.musicTimer !== null) { window.clearInterval(this.musicTimer); this.musicTimer = null; }
+  }
+
+  /**
+   * Resume generative-music scheduling after pauseMusic(). No-op when music
+   * was never started (no context / spec.music off) or is already running.
+   */
+  resumeMusic() {
+    if (this.musicTimer !== null || !this.ctx || !this.spec.music) return;
+    this.startMusic();
+  }
+
   private tone(freq: number, dur: number, type: OscillatorType, vol: number, bus: GainNode, opts: { slide?: number; attack?: number; decay?: number; detune?: number; filter?: number; when?: number } = {}) {
     const c = this.ctx; if (!c) return;
     const t0 = opts.when ?? c.currentTime;

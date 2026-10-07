@@ -119,6 +119,8 @@ export class HUD {
   private toastEl: HTMLDivElement;
   private crosshair: HTMLDivElement;
   private overlay: HTMLDivElement | null = null;
+  /** live story card from showCard (tracked so restarts can dismiss it) */
+  private card: HTMLDivElement | null = null;
   private boostBar: HTMLDivElement;
   private vignetteT = 0;
   private toastT = 0;
@@ -235,7 +237,8 @@ export class HUD {
    */
   showCard(title: string, body: string, buttonText = 'CONTINUE'): Promise<void> {
     // dismiss any previous card first
-    this.root.querySelector('.card')?.remove();
+    this.card?.remove();
+    this.card = null;
     return new Promise((resolve) => {
       const el = document.createElement('div');
       el.className = 'card';
@@ -253,10 +256,12 @@ export class HUD {
         done = true;
         clearTimeout(timer);
         el.remove();
+        if (this.card === el) this.card = null;
         resolve();
       };
       el.addEventListener('click', finish);
       this.root.appendChild(el);
+      this.card = el;
       const timer = setTimeout(finish, 3500);
     });
   }
@@ -650,6 +655,11 @@ export class HUD {
     this.toastEl.style.opacity = '0';
   }
 
-  /** Remove any overlay (title / pause / settings / end / level-up). Public for Engine. */
-  clearOverlays() { this.overlay?.remove(); this.overlay = null; }
+  /** Remove any overlay (title / pause / settings / end / level-up / story card). Public for Engine. */
+  clearOverlays() {
+    this.overlay?.remove(); this.overlay = null;
+    // N8: story cards are appended straight to root (non-blocking) — a card
+    // shown just before a restart must not survive into the new run
+    this.card?.remove(); this.card = null;
+  }
 }

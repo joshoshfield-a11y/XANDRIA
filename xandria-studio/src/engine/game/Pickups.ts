@@ -54,7 +54,8 @@ export class Pickups {
     mesh.position.copy(pos);
     mesh.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
     this.engine.scene.add(mesh);
-    this.list.push({ kind, mesh, pos: pos.clone(), taken: false, baseY: pos.y, phase: Math.random() * Math.PI * 2 });
+    // N10: bob phase from the run RNG, not Math.random() (determinism)
+    this.list.push({ kind, mesh, pos: pos.clone(), taken: false, baseY: pos.y, phase: this.engine.rng.range(0, Math.PI * 2) });
   }
 
   /** Scatter N pickups of each kind over walkable terrain. */
@@ -79,6 +80,7 @@ export class Pickups {
 
   update(dt: number, playerPos: THREE.Vector3, magnetR = 2.6, collectR = 1.1) {
     this.t += dt;
+    let collected = false;
     for (const p of this.list) {
       if (p.taken) continue;
       // bob + spin
@@ -91,11 +93,17 @@ export class Pickups {
       }
       if (d < collectR) {
         p.taken = true;
-        p.mesh.visible = false;
         this.engine.particles.magic(p.mesh.position, p.kind === 'coin' ? '#ffd23f' : p.kind === 'health' ? '#4dff6a' : p.kind === 'ammo' ? '#ff9a3c' : '#c97aff', 12);
+        // M7: prune taken pickups — the list (and scene) grew without bound
+        // on long survive runs. Remove from the scene and free the mesh's
+        // (per-spawn, unshared) geometry; materials stay cached/shared.
+        this.engine.scene.remove(p.mesh);
+        p.mesh.traverse((o) => { (o as THREE.Mesh).geometry?.dispose(); });
         this.engine.hooks.emit('onPickup', { pickup: p });
         this.onCollect(p);
+        collected = true;
       }
     }
+    if (collected) this.list = this.list.filter((p) => !p.taken);
   }
 }

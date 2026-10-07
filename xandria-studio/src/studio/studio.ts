@@ -9,8 +9,9 @@ import { validateSpec, normalizeSpec, type Genre, type GameSpec, type QualityMod
 import './inspector/inspectorPanel';
 import { applyPatch, type Scalar } from './inspector/specInspector';
 import type { XandriaSpecInspector } from './inspector/inspectorPanel';
-import { createEditorPanel, readProjectFile, type EditorPanel } from './editor/editorPanel';
+import { createEditorPanel, readProjectFile, escapeHtml, type EditorPanel } from './editor/editorPanel';
 import { projectToJson } from './editor/specOps';
+import { injectSpecScript } from '../../scripts/specInject';
 
 declare global {
   interface Window { xandria?: { saveFile(name: string, content: string): Promise<string | null> } }
@@ -287,7 +288,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     meta.innerHTML =
       `<span class="badge">${GENRE_LABELS[spec.meta.genre]}</span><span class="badge">${spec.theme.environment}</span>` +
       `<span class="badge">${spec.theme.timeOfDay}</span><span class="badge">${spec.rules.difficulty}</span>` +
-      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b style="color:#8fa5c8">${spec.meta.name}</b> — ${spec.objective.description}`;
+      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b style="color:#8fa5c8">${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}`;
   };
 
   root.querySelector('#generate')!.addEventListener('click', generate);
@@ -316,7 +317,9 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       let html = await res.text();
       // Escape </script inside the spec so it can't break out of the injection block
       const specSafe = lastSpec.replace(/<\/script/gi, '<\\/script');
-      html = html.replace('<head>', `<head><script>window.__XANDRIA_SPEC__=${specSafe};</script>`);
+      // Throws (loudly) if the bundle has no <head> tag — never silently
+      // ship the default spec instead of the user's game.
+      html = injectSpecScript(html, `<script>window.__XANDRIA_SPEC__=${specSafe};</script>`);
       const name = 'xandria-game.html';
       if (window.xandria?.saveFile) {
         await window.xandria.saveFile(name, html);
@@ -328,7 +331,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       }
       meta.innerHTML += '<br/><i>exported xandria-game.html — double-click to play offline</i>';
     } catch (e) {
-      meta.innerHTML += `<br/><i>export failed: ${e}</i>`;
+      meta.innerHTML += `<br/><i>export failed: ${escapeHtml(e instanceof Error ? e.message : String(e))}</i>`;
     }
   });
 }

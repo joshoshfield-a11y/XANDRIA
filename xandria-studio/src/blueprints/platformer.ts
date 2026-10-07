@@ -21,6 +21,8 @@ import {
   registerEnemyAssets,
 } from './campaign';
 import { AssetRegistry } from '../engine/game/Assets';
+import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { isTouchDevice } from '../engine/game/TouchControls';
 import { VariantDirector } from './enemies';
 import {
   EffectState,
@@ -39,6 +41,11 @@ import { Rng } from '../engine/core/Rng';
 export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const { scene, hud, terrain } = engine;
   const rng = new Rng(spec.meta.seed ^ 0x4a7f);
+
+  // M2: snapshot the pristine run config before any run-time mutation.
+  snapshotLoadoutBase(spec);
+  // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
+  engine.assetBridge.dispose();
 
   // campaign layer: intro card + XP progression (non-blocking at boot)
   showIntroCard(engine, spec);
@@ -101,11 +108,13 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const enemies = new EnemyManager(engine, null, {
     onPlayerHit: (dmg, from) => avatar.damage(dmg, from),
     // platformer has no player weapons; walkers are stompable hazards —
-    // if one dies (stomp/hazard/fall), it still feeds the XP economy
+    // if one dies (stomp/hazard/fall), it still feeds the XP economy, and
+    // kills now count toward kill stages too (B1: onDeath never reported)
     onDeath: (e) => {
       variants.onEnemyDeath(e);
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
+      objectives.addProgress(1, 'kill');
       grantKillXp(prog, notifyLevelUp);
     },
   });
@@ -151,7 +160,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
         engine.score += Math.round(50 * fx.scoreMult());
         engine.audio.play('coin');
         hud.setScore(engine.score);
-        if (spec.objective.type === 'collect') objectives.addProgress(1);
+        // B1: route by current stage type, not the legacy objective type
+        objectives.addProgress(1, 'collect');
       }
       if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
     }
@@ -190,7 +200,10 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
       ? { ...spec.objective, count: clampCollect(spec.objective.count) }
       : spec.objective;
   const objectives = makeCampaignObjectives(engine, { ...spec, objective: objSpec }, undefined, () => prog.level);
-  hud.setHint('A/D move · Space jump (x2) · Shift dash · reach the flag · stomp foes (not the spiky ones!)');
+  // N1: touch-aware hint bar
+  hud.setHint(isTouchDevice()
+    ? 'D-pad move · JUMP jump (x2) · reach the flag · stomp foes (not the spiky ones!)'
+    : 'A/D move · Space jump (x2) · Shift dash · reach the flag · stomp foes (not the spiky ones!)');
 
   // chapter-0 floating dressing (crystals drift near the course)
   const courseCx = start.x + 60;

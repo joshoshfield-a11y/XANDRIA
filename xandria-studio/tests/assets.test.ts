@@ -6,6 +6,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as THREE from 'three';
 import { AssetRegistry, ASSET_IDS } from '../src/engine/game/Assets';
+import { Pickups } from '../src/engine/game/Pickups';
+import { registerPickupAssets } from '../src/blueprints/campaign';
+import { Rng } from '../src/engine/core/Rng';
 import type { GameSpec } from '../src/spec/schema';
 
 function specWithAssets(assets: unknown): GameSpec {
@@ -46,16 +49,40 @@ describe('AssetRegistry.applyOverrides', () => {
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  it('applies color/emissive/scale/visible to registered materials', () => {
+  it('clones registered materials before overriding — the registered instance is never mutated (M6)', () => {
     const reg = new AssetRegistry();
     const mat = stdMat('#112233');
     reg.register('pickup.coin', { kind: 'pickup', materials: [mat] });
     reg.applyOverrides(specWithAssets({
       'pickup.coin': { color: '#ff0000', emissive: '#00ff00', emissiveIntensity: 3 },
     }));
-    expect('#' + mat.color.getHexString()).toBe('#ff0000');
-    expect('#' + (mat.emissive as THREE.Color).getHexString()).toBe('#00ff00');
-    expect(mat.emissiveIntensity).toBe(3);
+    // the registered (possibly shared/cached) instance is untouched…
+    expect('#' + mat.color.getHexString()).toBe('#112233');
+    expect(mat.emissive.getHexString()).toBe('000000');
+    // …the override lives on the per-entry clone
+    const clone = reg.currentMaterial('pickup.coin') as THREE.MeshStandardMaterial;
+    expect(clone).not.toBe(mat);
+    expect('#' + clone.color.getHexString()).toBe('#ff0000');
+    expect('#' + clone.emissive.getHexString()).toBe('#00ff00');
+    expect(clone.emissiveIntensity).toBe(3);
+    expect(reg.list().find((e) => e.id === 'pickup.coin')?.currentColor).toBe('#ff0000');
+  });
+
+  it('two meshes sharing a cached material do not cross-recolor (M6)', () => {
+    const reg = new AssetRegistry();
+    // stands in for a MaterialLibrary-cached material shared across assets
+    const shared = stdMat('#445566');
+    const coinMesh = box(shared);
+    const unrelatedProp = box(shared);
+    reg.register('pickup.coin', { kind: 'pickup', materials: [shared] });
+    reg.applyOverrides(specWithAssets({ 'pickup.coin': { color: '#ff0000' } }));
+    // the shared cache entry is untouched…
+    expect('#' + shared.color.getHexString()).toBe('#445566');
+    // …so the unrelated prop keeps its color
+    expect(unrelatedProp.material).toBe(shared);
+    expect(coinMesh.material).toBe(shared); // materials-path entries hold no live meshes
+    // and the override is recorded on the entry's clone, not lost
+    expect(reg.list().find((e) => e.id === 'pickup.coin')?.currentColor).toBe('#ff0000');
   });
 
   it('swaps shared materials on roots instead of mutating them (no cross-talk)', () => {
@@ -205,5 +232,58 @@ describe('AssetRegistry.list', () => {
     const reg = new AssetRegistry();
     reg.register('world.fog', { kind: 'world', fog: new THREE.Fog('#000000') });
     expect(reg.list()[0].currentColor).toBeNull();
+  });
+});
+
+describe('registerPickupAssets (M6)', () => {
+  // mock engine with a caching glow() like the real MaterialLibrary
+  function mockEngine() {
+    const cache = new Map<string, THREE.Material>();
+    return {
+      rng: new Rng(99),
+      scene: { add() {}, remove() {} },
+      mats: {
+        glow: (hex: string, intensity = 1) => {
+          const key = `${hex}:${intensity}`;
+          if (!cache.has(key)) cache.set(key, new THREE.MeshStandardMaterial({ color: hex }));
+          return cache.get(key)!;
+        },
+      },
+      particles: { magic() {} },
+      hooks: { emit() {} },
+    };
+  }
+
+  function firstMat(root: THREE.Object3D): THREE.MeshStandardMaterial {
+    let out: THREE.MeshStandardMaterial | null = null;
+    root.traverse((o) => {
+      if (!out && (o as THREE.Mesh).isMesh) out = (o as THREE.Mesh).material as THREE.MeshStandardMaterial;
+    });
+    return out!;
+  }
+
+  it('reskins live pickup meshes without mutating the shared cached materials', () => {
+    const engine = mockEngine();
+    const pickups = new Pickups(engine as any);
+    pickups.spawn('coin', new THREE.Vector3(0, 1, 0));
+    pickups.spawn('coin', new THREE.Vector3(2, 1, 0));
+    pickups.spawn('health', new THREE.Vector3(4, 1, 0));
+    const sharedCoin = firstMat(pickups.list[0].mesh);
+    expect(firstMat(pickups.list[1].mesh)).toBe(sharedCoin); // cache shared, like the real library
+
+    const reg = new AssetRegistry();
+    registerPickupAssets(reg, pickups);
+    reg.applyOverrides(specWithAssets({ 'pickup.coin': { color: '#ff0000' } }));
+
+    // live coin meshes carry the override via per-entry clones…
+    for (const p of pickups.list.filter((p) => p.kind === 'coin')) {
+      const m = firstMat(p.mesh);
+      expect(m).not.toBe(sharedCoin);
+      expect('#' + m.color.getHexString()).toBe('#ff0000');
+    }
+    // …the shared cache entry is untouched, and health pickups are unaffected
+    expect('#' + sharedCoin.color.getHexString()).toBe('#ffd23f');
+    const healthMat = firstMat(pickups.list.find((p) => p.kind === 'health')!.mesh);
+    expect('#' + healthMat.color.getHexString()).toBe('#4dff6a');
   });
 });

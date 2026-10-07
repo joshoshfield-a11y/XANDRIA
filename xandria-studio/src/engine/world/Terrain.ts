@@ -104,7 +104,17 @@ export class Terrain {
     scene.add(this.mesh);
 
     // ---- physics heightfield (cannon expects matrix[i][j] with x along i, y along j)
-    const shape = new CANNON.Heightfield(h, { elementSize: this.cell });
+    // The body rotation (-90° about X) + position map local (i·e, j·e) to world
+    // (−half+i·e, +half−j·e), i.e. the j axis comes out Z-mirrored relative to
+    // the visual mesh and heightAt(), which place h[i][j] at z = −half+j·e.
+    // Mirror the data along j so physics grid sample (i,j) collides exactly
+    // where heightAt()/the mesh put h[i][j] (B3).
+    const phys: number[][] = [];
+    for (let i = 0; i < this.res; i++) {
+      phys[i] = [];
+      for (let j = 0; j < this.res; j++) phys[i][j] = h[i][this.res - 1 - j];
+    }
+    const shape = new CANNON.Heightfield(phys, { elementSize: this.cell });
     this.body = new CANNON.Body({ mass: 0, material: physics.defaultMat, collisionFilterGroup: GROUP.WORLD });
     this.body.addShape(shape);
     // rotate so that heightfield's local (x, y) → world (x, z), local z → world y

@@ -19,6 +19,8 @@ import {
   registerPickupAssets,
 } from './campaign';
 import { AssetRegistry } from '../engine/game/Assets';
+import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { isTouchDevice } from '../engine/game/TouchControls';
 import {
   EffectState,
   EffectHud,
@@ -44,6 +46,11 @@ interface AiCar {
 export function buildRacing(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(303);
+
+  // M2: snapshot the pristine run config before any run-time mutation.
+  snapshotLoadoutBase(spec);
+  // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
+  engine.assetBridge.dispose();
 
   // campaign layer: intro card + XP progression (non-blocking at boot).
   // Racing has no avatar/kills: XP comes from laps + checkpoints, and the
@@ -146,7 +153,10 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     ? spec.objective
     : { ...spec.objective, type: 'race' as const, count: lapsNeeded };
   const objectives = makeCampaignObjectives(engine, { ...spec, objective: objSpec }, undefined, () => prog.level);
-  hud.setHint('W/S throttle · A/D steer · Space boost · Ctrl drift · R reset');
+  // N1: touch-aware hint bar (gas is automatic on touch)
+  hud.setHint(isTouchDevice()
+    ? 'Left stick steer (gas auto) · BOOST boost · BRAKE brake · RESET reset'
+    : 'W/S throttle · A/D steer · Space boost · Ctrl drift · R reset');
   hud.showBoostBar(true);
 
   // player progress tracking: nearest curve param
@@ -201,7 +211,7 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
         hud.toast(playerLap >= lapsNeeded ? 'FINISH!' : `LAP ${playerLap + 1} — ${lapTime.toFixed(1)}s`);
         engine.score += Math.round(500 * fx.scoreMult());
         hud.setScore(engine.score);
-        objectives.addProgress(1);
+        objectives.addProgress(1, 'lap'); // M5: laps only count toward race stages
         if (prog.onKill()) racingLevelUp(); // a lap is worth a kill's XP
         playerLap++;
         lapStart = raceTime;
@@ -223,9 +233,12 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     fxHud.update(fx, raceTime);
     updateDressing(dt, raceTime);
 
-    // AI follow the curve with rubber-banding
+    // AI follow the curve with rubber-banding (N4: wrap the delta — an AI just
+    // across the start/finish line must not get a full-lap speed spike/drop)
     for (const ai of aiCars) {
-      const targetSpeed = 22 + (playerT - ai.t) * 8; // rubber band
+      let gap = playerT - ai.t;
+      gap -= Math.round(gap); // wrap to [-0.5, 0.5]
+      const targetSpeed = 22 + gap * 8; // rubber band
       ai.speed = THREE.MathUtils.damp(ai.speed, Math.max(16, Math.min(30, targetSpeed)), 0.8, dt);
       ai.t = (ai.t + (ai.speed * dt) / trackLenApprox) % 1;
       const p = track.curve.getPointAt(ai.t);

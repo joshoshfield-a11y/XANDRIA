@@ -122,6 +122,27 @@ const css = `
 
 let styleInjected = false;
 
+/**
+ * Escape for HTML text contexts. Validator errors embed raw spec strings
+ * (stage ids, descriptions), and load errors echo project-file content —
+ * both are untrusted, so they must never reach innerHTML raw (QA N9).
+ * Pure and unit-testable; the panel has no DOM test harness.
+ */
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+};
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
+}
+
+/** One validator-error row: `<path>: <detail>`, both halves escaped. */
+export function errorRowHtml(e: string): string {
+  const i = e.indexOf(':');
+  const path = escapeHtml(i >= 0 ? e.slice(0, i) : e);
+  const rest = escapeHtml(i >= 0 ? e.slice(i) : '');
+  return `<div class="xed-err"><b>${path}</b>${rest}</div>`;
+}
+
 function h(html: string): HTMLElement {
   const d = document.createElement('div');
   d.innerHTML = html.trim();
@@ -165,10 +186,7 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     tabWarns = {};
     for (const t of TABS) tabWarns[t] = 0;
     if (!v.ok) {
-      errBox.innerHTML = v.errors.slice(0, 12).map((e) => {
-        const i = e.indexOf(':');
-        return `<div class="xed-err"><b>${e.slice(0, i)}</b>${e.slice(i)}</div>`;
-      }).join('');
+      errBox.innerHTML = v.errors.slice(0, 12).map(errorRowHtml).join('');
       errBox.classList.add('show');
       okLine.style.display = 'none';
       for (const e of v.errors) {
@@ -656,7 +674,9 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       const spec = await cb.loadProject(f);
       panel.setSpec(spec);
     } catch (e) {
-      errBox.innerHTML = `<div class="xed-err"><b>load</b>: ${String(e instanceof Error ? e.message : e).replace(/\n/g, '<br/>')}</div>`;
+      // The message echoes project-file content (spec strings) — escape it.
+      const msg = escapeHtml(e instanceof Error ? e.message : String(e)).replace(/\n/g, '<br/>');
+      errBox.innerHTML = `<div class="xed-err"><b>load</b>: ${msg}</div>`;
       errBox.classList.add('show');
     }
   });

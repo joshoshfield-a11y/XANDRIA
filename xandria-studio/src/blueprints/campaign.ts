@@ -12,7 +12,7 @@ import { Objectives } from '../engine/game/Objectives';
 import { Progression, type UpgradeDef, type UpgradeId } from '../engine/game/Progression';
 import { AssetRegistry, rigsOfKind } from '../engine/game/Assets';
 import type { EnemyManager } from '../engine/game/EnemyAI';
-import type { Pickups } from '../engine/game/Pickups';
+import type { Pickups, Pickup } from '../engine/game/Pickups';
 import type { PlayerAvatar } from './common';
 import { effectOf } from './fx';
 import type { VariantDirector, EnemyVariant } from './enemies';
@@ -114,6 +114,35 @@ export function hasBossStage(spec: GameSpec): boolean {
   return !!spec.objective.stages?.some((s: ObjectiveStage) => s.type === 'boss');
 }
 
+/**
+ * True when the run needs a reach goal flag: legacy 'reach' objective, or any
+ * 'reach' stage inside a quest chain. (B2 — gating the flag on the legacy
+ * type alone left staged beacon stages with goalPos === null, unwinnable.)
+ */
+export function needsReachGoal(spec: GameSpec): boolean {
+  if (spec.objective.type === 'reach') return true;
+  return spec.objective.stages?.some((s) => s.type === 'reach') ?? false;
+}
+
+/**
+ * Brutes the current stage still needs spawned. Boss stages (e.g. the
+ * fps-arena 'ruin' branch) require their quota spawned during the stage
+ * itself — a brute spent on an earlier stage doesn't count. Returns 0 when
+ * the stage isn't a boss stage, is already satisfied (choice modal open), or
+ * a brute is already alive. (M4)
+ */
+export function bossQuotaDeficit(
+  stage: ObjectiveStage | undefined,
+  progress: number,
+  brutesSpawnedForStage: number,
+  aliveBrutes: number,
+): number {
+  if (!stage || stage.type !== 'boss') return 0;
+  if (progress >= stage.count) return 0;
+  if (aliveBrutes > 0) return 0;
+  return Math.max(0, stage.count - brutesSpawnedForStage);
+}
+
 /** ObjectiveType import re-export for blueprint convenience. */
 export type { ObjectiveType };
 
@@ -131,35 +160,29 @@ export function registerWorldAssets(assets: AssetRegistry, engine: Engine): void
   if (engine.scene.fog) assets.register('world.fog', { kind: 'world', fog: engine.scene.fog as THREE.Fog });
 }
 
-/** Collect the distinct shared materials used by one pickup mesh. */
-function pickupMaterials(mesh: THREE.Object3D): THREE.Material[] {
-  const mats: THREE.Material[] = [];
-  mesh.traverse((o) => {
-    const m = o as THREE.Mesh;
-    if (!m.isMesh) return;
-    const list = Array.isArray(m.material) ? m.material : [m.material];
-    for (const mm of list) {
-      const mat = mm as THREE.Material | undefined;
-      if (mat && !mats.includes(mat)) mats.push(mat);
-    }
-  });
-  return mats;
-}
-
 /**
  * Pickup assets from the live pickup list — vanilla kinds (coin/health/ammo/
- * powerup) plus timed effect kinds (shield/rapid/score/magnet). Registers the
- * shared cached materials, so pickups dropped later in the run inherit
- * overrides automatically.
+ * powerup) plus timed effect kinds (shield/rapid/score/magnet).
+ *
+ * Registered as dynamic live roots (re-resolved on every applyOverrides, so
+ * pickups dropped mid-run are reskinned too). The roots path swaps each
+ * mesh's material for a per-entry clone, so MaterialLibrary-cached shared
+ * materials are never mutated — no cross-asset recolor (M6).
  */
 export function registerPickupAssets(assets: AssetRegistry, pickups: Pickups): void {
   const seen = new Set<string>();
-  for (const p of pickups.list) {
+  const idOf = (p: Pickup): string => {
     const eff = effectOf(p);
-    const id = eff ? `pickup.${eff === 'mult' ? 'score' : eff}` : `pickup.${p.kind}`;
+    return eff ? `pickup.${eff === 'mult' ? 'score' : eff}` : `pickup.${p.kind}`;
+  };
+  for (const p of pickups.list) {
+    const id = idOf(p);
     if (seen.has(id)) continue;
     seen.add(id);
-    assets.register(id, { kind: 'pickup', materials: pickupMaterials(p.mesh) });
+    assets.register(id, {
+      kind: 'pickup',
+      roots: () => pickups.list.filter((q) => !q.taken && idOf(q) === id).map((q) => q.mesh),
+    });
   }
 }
 

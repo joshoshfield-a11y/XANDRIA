@@ -85,6 +85,9 @@ export class Engine {
   private persistentHooks = new Set<(dt: number) => void>();
   private pauseReason: 'menu' | 'modal' | null = null;
   private sceneBaseline = 0;
+
+  /** window audio-unlock listeners (added in the constructor, removed in dispose()). */
+  private audioUnlockHandler!: () => void;
   private physicsBodiesBaseline = 0;
   private physicsConstraintsBaseline = 0;
   private shakeVec = new THREE.Vector3();
@@ -139,10 +142,10 @@ export class Engine {
       });
     }
 
-    // audio unlock on first gesture
-    const unlock = () => { if (!this.testMode) this.audio.unlock(); };
-    addEventListener('pointerdown', unlock, { once: false });
-    addEventListener('keydown', unlock, { once: false });
+    // audio unlock on first gesture (removed again in dispose())
+    this.audioUnlockHandler = () => { if (!this.testMode) this.audio.unlock(); };
+    addEventListener('pointerdown', this.audioUnlockHandler);
+    addEventListener('keydown', this.audioUnlockHandler);
 
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(container);
@@ -341,6 +344,11 @@ export class Engine {
     this.hud.clearOverlays();
     this.audio.unlock();
     this.audio.play('click');
+    // cross-run progression: the equipped modifier loadout applies from the
+    // very first run, not just after an in-place restart (M1). applyLoadout()
+    // is idempotent (restores pristine base values before re-applying), so
+    // the resetRun() call below stays valid.
+    applyLoadout(this.spec, loadProfile());
     this.state = 'playing';
     this.last = performance.now();
   }
@@ -354,6 +362,7 @@ export class Engine {
     else this.hud.clearOverlays();
     this.audio.setIntensity(0.5);
     this.audio.setEngine(0, false);
+    this.audio.resumeMusic(); // title screen is interactive — music resumes here too
     this.showTitle();
   }
 
@@ -388,9 +397,13 @@ export class Engine {
         this.elapsed += dt;
         this.physics.step(dt);
         for (const f of this.updateHooks) f(dt);
-        // edge-triggered input is consumed by the first substep only
-        if (s === 0 && substeps > 1) this.input.endFrame();
       }
+      // NB: edge-triggered input is NOT cleared inside the substep loop —
+      // the `just`/`released` sets must survive until every consumer (the
+      // update hooks above AND the pause/confirm checks below) has run.
+      // They are cleared once per rendered frame by the trailing endFrame().
+      // For production (substeps=1) the loop runs exactly once, so the check
+      // ordering is unchanged (M9).
       this.particles.update(dt * substeps);
       this.hud.update(dt);
       this.hooks.emit('onTick', { dt, t: this.elapsed });
@@ -417,6 +430,7 @@ export class Engine {
       this.state = 'paused';
       this.pauseReason = reason;
       this.audio.setEngine(0, false);
+      this.audio.pauseMusic(); // generative music must not play under the pause menu (M3)
       this.last = performance.now();
     }
   }
@@ -426,6 +440,7 @@ export class Engine {
     if (this.state === 'paused') {
       this.state = 'playing';
       this.pauseReason = null;
+      this.audio.resumeMusic();
       this.last = performance.now();
     }
   }
@@ -439,6 +454,7 @@ export class Engine {
     if (this.state !== 'playing') return;
     this.state = 'won';
     this.audio.setEngine(0, false);
+    this.audio.pauseMusic(); // combat music must not play under the victory screen (M3)
     this.audio.play('win');
     this.hooks.emit('onWin', { stats });
     this.hud.showEnd(true, {
@@ -455,6 +471,7 @@ export class Engine {
     if (this.state !== 'playing') return;
     this.state = 'lost';
     this.audio.setEngine(0, false);
+    this.audio.pauseMusic(); // combat music must not play under the defeat screen (M3)
     this.audio.play('lose');
     this.hooks.emit('onLose', { reason, stats });
     this.hud.showEnd(false, {
@@ -492,13 +509,26 @@ export class Engine {
   private resetRun() {
     // drop blueprint update hooks, keep persistent bootstrap hooks
     this.updateHooks = this.updateHooks.filter((h) => this.persistentHooks.has(h));
-    // remove blueprint scene objects (dispose their geometries)
+    // remove blueprint scene objects (dispose their geometries, plus
+    // blueprint-created materials/textures — but never shared MaterialLibrary
+    // cache entries, which other blueprints may still reference)
     for (let i = this.scene.children.length - 1; i >= this.sceneBaseline; i--) {
       const o = this.scene.children[i];
       this.scene.remove(o);
       o.traverse((c: THREE.Object3D) => {
-        const g = (c as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+        const mesh = c as THREE.Mesh;
+        const g = mesh.geometry as THREE.BufferGeometry | undefined;
         g?.dispose();
+        const m = mesh.material as THREE.Material | THREE.Material[] | undefined;
+        const list = Array.isArray(m) ? m : m ? [m] : [];
+        for (const mat of list) {
+          if (this.mats.ownsMaterial(mat)) continue;
+          for (const k of Object.keys(mat)) {
+            const v = (mat as unknown as Record<string, unknown>)[k];
+            if (v instanceof THREE.Texture && !this.mats.ownsTexture(v)) v.dispose();
+          }
+          mat.dispose();
+        }
       });
     }
     // physics back to baseline
@@ -514,6 +544,7 @@ export class Engine {
     // audio
     this.audio.setEngine(0, false);
     this.audio.setIntensity(0.5);
+    this.audio.resumeMusic(); // a fresh run gets its music scheduler back (M3)
     // clocks
     this.time = 0;
     this.elapsed = 0;
@@ -541,6 +572,8 @@ export class Engine {
 
   dispose() {
     cancelAnimationFrame(this.rafId);
+    removeEventListener('pointerdown', this.audioUnlockHandler);
+    removeEventListener('keydown', this.audioUnlockHandler);
     this.resizeObs.disconnect();
     this.input.dispose();
     this.touch.dispose();

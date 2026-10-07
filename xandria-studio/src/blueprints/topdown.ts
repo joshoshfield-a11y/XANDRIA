@@ -23,6 +23,8 @@ import {
   registerEnemyAssets,
 } from './campaign';
 import { AssetRegistry } from '../engine/game/Assets';
+import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { isTouchDevice } from '../engine/game/TouchControls';
 import {
   VariantDirector,
   planSpawns,
@@ -47,6 +49,11 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(404);
   const arenaR = Math.min(40, terrain.size / 2 - 10);
+
+  // M2: snapshot the pristine run config before any run-time mutation.
+  snapshotLoadoutBase(spec);
+  // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
+  engine.assetBridge.dispose();
 
   // campaign layer: intro card + XP progression (non-blocking at boot)
   showIntroCard(engine, spec);
@@ -83,7 +90,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
-      objectives.addProgress(1);
+      objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
       grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
@@ -123,7 +130,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     } else {
       if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
       if (p.kind === 'ammo') { avatar.addAmmo(30); engine.audio.play('pickup'); }
-      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); hud.setScore(engine.score); }
+      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); hud.setScore(engine.score); objectives.addProgress(1, 'collect'); }
     }
     grantPickupXp(prog, notifyLevelUp);
   };
@@ -132,7 +139,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     ['shield', 'rapid', 'mult', 'magnet'], [{ x: 0, z: 0, r: 8 }]);
 
   const objectives = makeCampaignObjectives(engine, spec, undefined, () => prog.level);
-  hud.setHint('WASD move · mouse aim · LMB fire · Esc pause');
+  // N1: touch-aware hint bar (right stick aims on touch)
+  hud.setHint(isTouchDevice()
+    ? 'Left stick move · right stick aim (auto-fire)'
+    : 'WASD move · mouse aim · LMB fire · Esc pause');
 
   const camRig = makeCameraRig('top-down', engine.camera, input, (x, z) => terrain.heightAt(x, z));
 
@@ -176,6 +186,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
   assets.register('world.arena', { kind: 'world', roots: [structures.group] });
   assets.applyOverrides(spec);
+  // M6: wire the (cloned, never the shared cache entry) tracer material into
+  // the projectile pool so the override actually reaches pixels
+  const tracerMat = assets.currentMaterial('weapon.projectile');
+  if (tracerMat) projectiles.setTracerMaterial(tracerMat);
 
   // chapter-0 arena dressing
   dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half: arenaR - 8, yAt: (x, z) => terrain.heightAt(x, z) });

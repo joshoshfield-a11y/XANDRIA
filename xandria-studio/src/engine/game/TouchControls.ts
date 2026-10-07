@@ -98,6 +98,8 @@ export function layoutForGenre(genre: string): TouchLayout {
         buttons: [
           { label: 'BOOST', action: 'boost', kind: 'hold', right: 24, bottom: 96, size: 88 },
           { label: 'BRAKE', action: 'brake', kind: 'hold', right: 128, bottom: 44, size: 64 },
+          // N3: desktop has R — a beached-but-upright car was unrecoverable on touch
+          { label: 'RESET', action: 'reset', kind: 'tap', right: 208, bottom: 100, size: 64 },
         ],
       };
     case 'platformer':

@@ -20,7 +20,6 @@ export class Projectiles {
   pool: Projectile[] = [];
   onHit: (p: Projectile, hitBody: CANNON.Body | null, point: THREE.Vector3) => void = () => {};
   private matCache = new Map<string, THREE.Material>();
-
   constructor(private engine: Engine, private color = '#7af7ff') {
     const geo = new THREE.SphereGeometry(0.14, 6, 6);
     const mat = engine.mats.glow(color, 2.5);
@@ -36,6 +35,19 @@ export class Projectiles {
       });
       body.allowSleep = false;
       this.pool.push({ active: false, mesh, body, life: 0, damage: 10, friendly: true, color });
+    }
+  }
+
+  /**
+   * Reskin hook: swap the pool's base tracer material (e.g. the
+   * AssetRegistry's override clone for 'weapon.projectile'). Updates the
+   * cache and every pooled mesh, so fire() keeps dealing the overridden
+   * material instead of the shared MaterialLibrary entry (M6).
+   */
+  setTracerMaterial(mat: THREE.Material): void {
+    this.matCache.set(this.color, mat);
+    for (const p of this.pool) {
+      if (p.color === this.color) p.mesh.material = mat;
     }
   }
 

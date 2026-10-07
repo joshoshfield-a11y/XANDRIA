@@ -37,18 +37,26 @@ export class EffectState {
   timers = new Map<EffectKind, number>();
   /** remaining absorb pool for the shield effect */
   shieldPool = 0;
-  /** weaponMods.rateOfFire value to restore when rapid expires */
-  savedRof: number | null = null;
+  /**
+   * Rapid-fire is a ×2 multiplier on weaponMods.rateOfFire while active
+   * (M8): applied by multiplying on collect, removed by dividing on expiry —
+   * never an absolute save/restore, so a firerate upgrade taken mid-rapid
+   * survives the expiry instead of being clobbered back to the pre-rapid value.
+   */
+  static readonly RAPID_FACTOR = 2;
+  /** true when the rapid ×2 is currently folded into weaponMods.rateOfFire */
+  rapidApplied = false;
 
   tick(dt: number, spec?: GameSpec): void {
     for (const [k, t] of [...this.timers]) {
       const nt = t - dt;
       if (nt <= 0) {
         this.timers.delete(k);
-        if (k === 'rapid' && spec && this.savedRof !== null) {
+        if (k === 'rapid' && spec && this.rapidApplied) {
+          // remove only the rapid bonus: divide out the multiplier
           const wm = spec.custom?.weaponMods;
-          if (wm) wm.rateOfFire = this.savedRof;
-          this.savedRof = null;
+          if (wm && wm.rateOfFire !== undefined) wm.rateOfFire /= EffectState.RAPID_FACTOR;
+          this.rapidApplied = false;
         }
         if (k === 'shield') this.shieldPool = 0;
       } else {
@@ -68,9 +76,10 @@ export class EffectState {
 export interface EffectFlavor { name?: string; hint?: string; }
 
 /**
- * Apply a collected effect. Rapid-fire doubles weaponMods.rateOfFire (the
- * value PlayerAvatar.shoot() reads per shot) and restores it on expiry;
- * racing passes avatar=null and reads boostMult() for pad charging instead.
+ * Apply a collected effect. Rapid-fire multiplies weaponMods.rateOfFire ×2
+ * (the value PlayerAvatar.shoot() reads per shot) and divides it back out on
+ * expiry; racing passes avatar=null and reads boostMult() for pad charging
+ * instead.
  */
 export function applyPickupEffect(
   engine: Engine,
@@ -90,12 +99,15 @@ export function applyPickupEffect(
       if (avatar) wrapShieldDamage(engine, avatar, fx);
       break;
     case 'rapid': {
+      // refresh the timer; only fold the ×2 in once (re-collecting mid-rapid
+      // must not stack the multiplier)
+      const wasActive = fx.isActive('rapid');
       fx.timers.set('rapid', def.duration);
-      if (avatar) {
+      if (avatar && !wasActive) {
         const custom = spec.custom ?? (spec.custom = {});
         const wm = custom.weaponMods ?? (custom.weaponMods = {});
-        if (fx.savedRof === null) fx.savedRof = wm.rateOfFire ?? 1;
-        wm.rateOfFire = fx.savedRof * 2;
+        wm.rateOfFire = (wm.rateOfFire ?? 1) * EffectState.RAPID_FACTOR;
+        fx.rapidApplied = true;
       }
       break;
     }
@@ -142,6 +154,8 @@ export function spawnEffectPickup(pickups: Pickups, engine: Engine, kind: Effect
   const p = pickups.list[pickups.list.length - 1];
   effectTags.set(p, kind);
   engine.scene.remove(p.mesh);
+  // the throwaway shell was just spawned — free its (unshared) geometry (M7)
+  p.mesh.traverse((o) => { (o as THREE.Mesh).geometry?.dispose(); });
   const mesh = makeEffectMesh(engine, kind);
   mesh.position.copy(p.pos);
   mesh.traverse((o) => { if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).castShadow = true; });
@@ -213,7 +227,14 @@ export class EffectHud {
     try {
       const doc = (globalThis as unknown as { document?: any }).document;
       if (!doc || typeof doc.createElement !== 'function' || !doc.body?.appendChild) return;
+      // M7: blueprints (and their EffectHuds) are rebuilt on every in-place
+      // restart with no teardown hook, so dispose() is never called — drop any
+      // overlay div left behind by the previous run before appending ours.
+      try {
+        doc.querySelectorAll?.('.xana-fx-hud').forEach((el: { remove?: () => void }) => el.remove?.());
+      } catch { /* selector unavailable — dispose() still cleans up */ }
       const root = doc.createElement('div');
+      root.className = 'xana-fx-hud';
       const s = root.style;
       s.position = 'fixed';
       s.top = '76px';

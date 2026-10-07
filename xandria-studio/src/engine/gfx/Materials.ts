@@ -142,7 +142,16 @@ export class MaterialLibrary {
     const key = `flat:${hex}:${JSON.stringify(opts)}`;
     const hit = this.matCache.get(key);
     if (hit) return hit as THREE.MeshStandardMaterial;
-    const m = new THREE.MeshStandardMaterial({ color: hex, roughness: opts.roughness ?? 0.7, metalness: opts.metalness ?? 0.1, transparent: opts.transparent, opacity: opts.opacity });
+    // NB: never pass undefined transparent/opacity — three warns
+    // "THREE.Material: parameter 'transparent'/'opacity' has value of undefined" (N2).
+    const params: THREE.MeshStandardMaterialParameters = {
+      color: hex,
+      roughness: opts.roughness ?? 0.7,
+      metalness: opts.metalness ?? 0.1,
+    };
+    if (opts.transparent !== undefined) params.transparent = opts.transparent;
+    if (opts.opacity !== undefined) params.opacity = opts.opacity;
+    const m = new THREE.MeshStandardMaterial(params);
     if (opts.emissive) { m.emissive = new THREE.Color(opts.emissive); m.emissiveIntensity = opts.emissiveIntensity ?? 1; }
     this.matCache.set(key, m);
     return m;
@@ -165,6 +174,18 @@ export class MaterialLibrary {
       case 'dreamscape': return 'crystal';
       default: return 'ground';
     }
+  }
+
+  /** True when this material came from the library cache (shared — callers must not dispose it). */
+  ownsMaterial(m: THREE.Material): boolean {
+    for (const cached of this.matCache.values()) if (cached === m) return true;
+    return false;
+  }
+
+  /** True when this texture came from the library cache (shared — callers must not dispose it). */
+  ownsTexture(t: THREE.Texture): boolean {
+    for (const cached of this.cache.values()) if (cached === t) return true;
+    return false;
   }
 
   dispose() {

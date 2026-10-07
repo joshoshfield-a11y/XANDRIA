@@ -21,7 +21,7 @@ import {
   type VariantEnemy,
   type EnemyVariant,
 } from '../src/blueprints/enemies';
-import { EffectState, EFFECT_DEFS, effectOf, spawnEffectPickup } from '../src/blueprints/fx';
+import { EffectState, EFFECT_DEFS, effectOf, spawnEffectPickup, applyPickupEffect } from '../src/blueprints/fx';
 import { ENEMY_KINDS, type EnemySpec } from '../src/spec/schema';
 import { Rng } from '../src/engine/core/Rng';
 import type { Engine } from '../src/engine/Engine';
@@ -293,15 +293,30 @@ describe('EffectState', () => {
     expect(fx.remaining('mult')).toBeCloseTo(13, 10);
     expect(fx.isActive('mult')).toBe(true);
   });
-  it('restores weaponMods.rateOfFire when rapid expires', () => {
+  it('removes only the rapid bonus on expiry — a concurrent firerate upgrade survives (M8)', () => {
     const fx = new EffectState();
     const spec: any = { custom: { weaponMods: { rateOfFire: 1 } } };
-    fx.savedRof = 1;
+    // rapid collected: ×2 folded into weaponMods.rateOfFire
     fx.timers.set('rapid', 5);
-    spec.custom.weaponMods.rateOfFire = 2; // rapid active
+    fx.rapidApplied = true;
+    spec.custom.weaponMods.rateOfFire = 2;
+    // firerate level-up taken while rapid is active
+    spec.custom.weaponMods.rateOfFire *= 1.2; // 2.4
     fx.tick(6, spec);
+    // expiry divides the rapid bonus back out; the upgrade is retained
+    expect(spec.custom.weaponMods.rateOfFire).toBeCloseTo(1.2, 10);
+    expect(fx.rapidApplied).toBe(false);
+  });
+  it('re-collecting rapid mid-rapid refreshes the timer without re-stacking the multiplier', () => {
+    const fx = new EffectState();
+    const spec: any = { custom: {} };
+    const engine: any = { audio: { play() {} }, hud: { toast() {} } };
+    applyPickupEffect(engine, fx, {} as any, spec, 'rapid');
+    expect(spec.custom.weaponMods.rateOfFire).toBe(2);
+    applyPickupEffect(engine, fx, {} as any, spec, 'rapid'); // still active
+    expect(spec.custom.weaponMods.rateOfFire).toBe(2); // not ×4
+    fx.tick(EFFECT_DEFS.rapid.duration + 1, spec);
     expect(spec.custom.weaponMods.rateOfFire).toBe(1);
-    expect(fx.savedRof).toBeNull();
   });
   it('drains the shield pool on shield expiry', () => {
     const fx = new EffectState();

@@ -18,11 +18,14 @@ import {
   grantKillXp,
   grantPickupXp,
   bossPhaseBanner,
+  needsReachGoal,
   registerWorldAssets,
   registerPickupAssets,
   registerEnemyAssets,
 } from './campaign';
 import { AssetRegistry } from '../engine/game/Assets';
+import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { isTouchDevice } from '../engine/game/TouchControls';
 import {
   VariantDirector,
   planSpawns,
@@ -47,6 +50,13 @@ import { PlayerAvatar } from './common';
 export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud } = engine;
   const rng = engine.rng.fork(101);
+
+  // M2: snapshot the pristine run config before any run-time mutation, so
+  // restarts restore the true base (not a mutated one).
+  snapshotLoadoutBase(spec);
+  // M7: in-place restarts tear down the scene but never cleared the asset
+  // bridge's roots — drop the stale refs (no-op at boot).
+  engine.assetBridge.dispose();
 
   // campaign layer: intro card + XP progression (non-blocking at boot)
   showIntroCard(engine, spec);
@@ -84,7 +94,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
-      objectives.addProgress(1);
+      objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
       grantKillXp(prog, notifyLevelUp);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
@@ -148,7 +158,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     if (eff) {
       applyPickupEffect(engine, fx, avatar, spec, eff);
     } else {
-      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); if (spec.objective.type === 'collect') objectives.addProgress(1); }
+      if (p.kind === 'coin') { engine.score += Math.round(50 * fx.scoreMult()); engine.audio.play('coin'); objectives.addProgress(1, 'collect'); }
       if (p.kind === 'health') { avatar.heal(30); engine.audio.play('pickup'); }
       if (p.kind === 'ammo') { avatar.addAmmo(24); engine.audio.play('pickup'); }
       if (p.kind === 'powerup') { avatar.ctrl.speedBoostT = 6; engine.audio.play('powerup'); hud.toast('SPEED SURGE'); }
@@ -166,10 +176,11 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   scatterEffects(pickups, engine, rng.fork(913), (x, z) => terrain.heightAt(x, z), half,
     ['shield', 'rapid', 'mult', 'magnet'], [{ x: 0, z: 0, r: 8 }]);
 
-  // --- reach objective marker
+  // --- reach objective marker (B2): legacy 'reach' OR any 'reach' stage in a
+  // quest chain — staged beacon stages had goalPos === null and could never complete
   let goal: THREE.Group | null = null;
   let goalPos: THREE.Vector3 | null = null;
-  if (spec.objective.type === 'reach') {
+  if (needsReachGoal(spec)) {
     const gx = rng.range(-half * 0.7, half * 0.7), gz = rng.range(-half * 0.7, half * 0.7);
     goalPos = new THREE.Vector3(gx, terrain.heightAt(gx, gz), gz);
     goal = makeGoalFlag(engine.mats, spec.theme.palette.accent);
@@ -185,8 +196,16 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   assets.register('weapon.projectile', { kind: 'weapon', materials: [engine.mats.glow(spec.theme.palette.accent, 2.5)] });
   assets.register('world.arena', { kind: 'world', roots: [structures.group] });
   assets.applyOverrides(spec);
-  hud.setHint('WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
-  if (spec.player.weapon !== 'none') hud.setCrosshair(false);
+  // M6: wire the (cloned, never the shared cache entry) tracer material into
+  // the projectile pool so the override actually reaches pixels
+  const tracerMat = assets.currentMaterial('weapon.projectile');
+  if (tracerMat) projectiles.setTracerMaterial(tracerMat);
+  // N1: touch-aware hint bar (title screen already detects touch)
+  hud.setHint(isTouchDevice()
+    ? 'Left stick move · ATK attack · JUMP jump · DASH dash'
+    : 'WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
+  // N7: crosshair belongs to guns, not melee
+  hud.setCrosshair(spec.player.weapon !== 'none');
 
   // chapter-0 world dressing
   dresser.dress(spec, 0, rng.fork(5000), { cx: 0, cz: 0, half, yAt: (x, z) => terrain.heightAt(x, z) });

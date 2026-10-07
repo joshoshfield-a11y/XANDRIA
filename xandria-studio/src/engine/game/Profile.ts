@@ -253,13 +253,37 @@ interface BaseSnapshot {
   health: number;
   speed: number;
   lives: number;
+  /** pristine custom.weaponMods.rateOfFire (undefined when the spec ships without one) */
+  rateOfFire: number | undefined;
 }
 const baseSnapshots = new WeakMap<object, BaseSnapshot>();
 
 /**
+ * Capture the pristine run config for a spec. Idempotent — the first call
+ * wins. Blueprints call this at build time, BEFORE any run-time mutation
+ * (level-up 'speed' upgrades do `spec.player.speed *= 1.12`, 'firerate'
+ * upgrades stack `custom.weaponMods.rateOfFire`), so applyLoadout() always
+ * restores the true base instead of a polluted one (M2).
+ */
+export function snapshotLoadoutBase(spec: GameSpec): void {
+  if (baseSnapshots.has(spec)) return;
+  baseSnapshots.set(spec, {
+    health: spec.player.health,
+    speed: spec.player.speed,
+    lives: spec.rules.lives,
+    rateOfFire: spec.custom?.weaponMods?.rateOfFire,
+  });
+}
+
+/**
  * Apply the equipped loadout to a run's spec. Idempotent: pristine base
- * values are snapshotted on first call and restored before every apply, so
- * repeated calls (restarts, title->run cycles) never compound bonuses.
+ * values are snapshotted (see snapshotLoadoutBase — blueprints capture them
+ * at build, before any run-time mutation) and restored before every apply,
+ * so repeated calls (restarts, title->run cycles) never compound bonuses.
+ *
+ * Restores every run-mutated stat: health/speed/lives AND
+ * custom.weaponMods.rateOfFire (firerate upgrades used to stack permanently
+ * across restarts while Progression counts reset — M2).
  *
  * Effects:
  *   vitality   -> player.health = base + 25
@@ -268,25 +292,28 @@ const baseSnapshots = new WeakMap<object, BaseSnapshot>();
  *   power      -> custom.profileDamageMult = 1.10 (read by Progression.damageMult)
  */
 export function applyLoadout(spec: GameSpec, p: ProfileData): void {
-  let base = baseSnapshots.get(spec);
-  if (!base) {
-    base = {
-      health: spec.player.health,
-      speed: spec.player.speed,
-      lives: spec.rules.lives,
-    };
-    baseSnapshots.set(spec, base);
-  }
+  // Safety net: if no blueprint snapshotted yet (e.g. direct calls in tests),
+  // capture now. In-game the blueprint build always snapshots first, so this
+  // never bakes run-time mutations into the base.
+  snapshotLoadoutBase(spec);
+  const base = baseSnapshots.get(spec)!;
   spec.player.health = base.health;
   spec.player.speed = base.speed;
   spec.rules.lives = base.lives;
+  // run-mutated weapon mods: restore the pristine value (or remove the key
+  // when the spec shipped without one) so firerate upgrades can't compound
+  const custom = spec.custom ?? (spec.custom = {});
+  if (base.rateOfFire === undefined) {
+    if (custom.weaponMods) delete custom.weaponMods.rateOfFire;
+  } else {
+    (custom.weaponMods ?? (custom.weaponMods = {})).rateOfFire = base.rateOfFire;
+  }
 
   const equipped = new Set(p.loadout.filter((id) => p.owned.includes(id)));
   if (equipped.has('vitality')) spec.player.health = Math.round(base.health + 25);
   if (equipped.has('swift')) spec.player.speed = base.speed * 1.08;
   if (equipped.has('secondwind')) spec.rules.lives = base.lives + 1;
 
-  const custom = spec.custom ?? (spec.custom = {});
   if (equipped.has('power')) custom.profileDamageMult = 1.1;
   else delete custom.profileDamageMult;
 }

@@ -21,6 +21,23 @@ export type StageCompleteHandler = (
   next: ObjectiveStage | null,
 ) => void;
 
+/**
+ * Progress event kinds. Blueprints tag each addProgress call with the event
+ * that produced it so kills never inflate collect stages (and coin pickups
+ * never inflate eliminate stages). Untagged calls keep the legacy
+ * unconditional behavior (backward compatible).
+ */
+export type ProgressEvent = 'kill' | 'collect' | 'lap';
+
+/** True when this event kind can advance a stage of the given type. */
+function eventMatchesStage(event: ProgressEvent, type: ObjectiveType): boolean {
+  switch (event) {
+    case 'kill': return type === 'eliminate' || type === 'boss';
+    case 'collect': return type === 'collect';
+    case 'lap': return type === 'race';
+  }
+}
+
 export class Objectives {
   progress = 0;
   /** total eliminate/boss kills across all stages (for end-of-run stats) */
@@ -116,12 +133,18 @@ export class Objectives {
     }
   }
 
-  /** collect/eliminate/race-lap progress */
-  addProgress(n = 1) {
+  /**
+   * collect/eliminate/race-lap progress. When `event` is given, the progress
+   * only counts toward the current stage when the event kind matches the
+   * stage type (M5: no kill/collect cross-talk between stage types).
+   * Untagged calls behave exactly as before.
+   */
+  addProgress(n = 1, event?: ProgressEvent) {
     if (this.done) return;
     const o = this.cur();
+    if (event && !eventMatchesStage(event, o.type)) return;
     this.progress += n;
-    if (o.type === 'eliminate' || o.type === 'boss') this.kills += n;
+    if (event === 'kill' || (!event && (o.type === 'eliminate' || o.type === 'boss'))) this.kills += n;
     this.updateHud();
     if (
       (o.type === 'collect' || o.type === 'eliminate' || o.type === 'boss') &&

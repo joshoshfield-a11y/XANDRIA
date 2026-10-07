@@ -223,6 +223,7 @@ export class Input {
     this.released.clear();
     this.injected.clear();
     this.injectedAxes = null;
+    this.touchAxes = null; // a held touch stick must not survive a restart (M7)
     this.look.x = 0;
     this.look.y = 0;
     this.wheel = 0;

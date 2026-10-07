@@ -1,7 +1,7 @@
 {
   "name": "xandria-studio",
   "version": "1.5.0",
-  "description": "XANDRIA Studio \u2014 deterministic intent-to-game engine. Type a prompt, get a playable PS2-era 3D game.",
+  "description": "XANDRIA Studio — deterministic intent-to-game engine. Type a prompt, get a playable PS2-era 3D game.",
   "author": "joshoshfield-a11y",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "vite build --mode player && vite build --mode studio",
     "build:player": "vite build --mode player",
+    "clean": "node -e \"import('node:fs').then(m => m.rmSync('dist', { recursive: true, force: true }))\"",
     "export": "tsx scripts/export.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

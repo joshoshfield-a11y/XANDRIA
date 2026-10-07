@@ -29,17 +29,24 @@ interface Entry {
   offset: number;
 }
 
-function dosTime(): number {
-  const d = new Date();
-  return (
-    ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) >>> 0
-  );
-}
-function dosDate(): number {
-  const d = new Date();
-  return (
-    (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) >>> 0
-  );
+/**
+ * Entry timestamp for reproducible builds. Honors SOURCE_DATE_EPOCH when set
+ * (reproducible-builds convention); otherwise stamps a fixed constant so
+ * repeated builds are byte-identical (QA X2). UTC getters keep the stamp
+ * timezone-independent.
+ */
+const FIXED_DOS_TIME = 0x0000; // 00:00:00
+const FIXED_DOS_DATE = (((2020 - 1980) << 9) | (1 << 5) | 1) >>> 0; // 2020-01-01
+function zipTimestamp(): { time: number; date: number } {
+  const sde = process.env.SOURCE_DATE_EPOCH;
+  if (sde && /^\d+$/.test(sde)) {
+    const d = new Date(Number(sde) * 1000);
+    return {
+      time: (((d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | (d.getUTCSeconds() >> 1)) >>> 0),
+      date: ((((d.getUTCFullYear() - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate()) >>> 0),
+    };
+  }
+  return { time: FIXED_DOS_TIME, date: FIXED_DOS_DATE };
 }
 
 export class ZipBuilder {
@@ -60,6 +67,9 @@ export class ZipBuilder {
     const chunks: Uint8Array[] = [];
     const enc = new TextEncoder();
     const push = (b: Uint8Array) => chunks.push(b);
+    // One stamp for the whole archive (not per-entry "now") — keeps every
+    // entry consistent and the build reproducible.
+    const ts = zipTimestamp();
 
     let offset = 0;
     const central: Uint8Array[] = [];
@@ -73,8 +83,8 @@ export class ZipBuilder {
       dv.setUint16(4, 20, true); // version needed
       dv.setUint16(6, 0x0800, true); // UTF-8 filename flag
       dv.setUint16(8, 8, true); // deflate
-      dv.setUint16(10, dosTime(), true);
-      dv.setUint16(12, dosDate(), true);
+      dv.setUint16(10, ts.time, true);
+      dv.setUint16(12, ts.date, true);
       dv.setUint32(14, e.crc, true);
       dv.setUint32(18, e.compressed.length, true);
       dv.setUint32(22, e.data.length, true);
@@ -93,8 +103,8 @@ export class ZipBuilder {
       cd.setUint16(6, 20, true); // version needed
       cd.setUint16(8, 0x0800, true);
       cd.setUint16(10, 8, true);
-      cd.setUint16(12, dosTime(), true);
-      cd.setUint16(14, dosDate(), true);
+      cd.setUint16(12, ts.time, true);
+      cd.setUint16(14, ts.date, true);
       cd.setUint32(16, e.crc, true);
       cd.setUint32(20, e.compressed.length, true);
       cd.setUint32(24, e.data.length, true);

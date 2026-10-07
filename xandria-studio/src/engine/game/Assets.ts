@@ -21,8 +21,11 @@
  * ids are applied in sorted order, sets are idempotent.
  *
  * How overrides reach the pixels:
- * - `materials`: base/owned materials, mutated in place. Future instances
- *   cloned from these bases (enemy waves, pickup drops) inherit the override.
+ * - `materials`: base/owned materials. applyOverrides clones each one before
+ *   applying the override and swaps the entry over to the clone — the
+ *   registered (possibly MaterialLibrary-cached and shared) instance is
+ *   never mutated, so one asset's recolor can't leak into another (M6).
+ *   Read the effective material back via currentMaterial(id).
  * - `roots`: live object roots. Each mesh material is swapped for a
  *   per-entry cached clone carrying the override, so shared
  *   MaterialLibrary-cached materials are never mutated (no cross-talk
@@ -114,7 +117,12 @@ export interface AssetListEntry {
 
 interface RegisterOpts {
   kind: AssetKind;
-  /** base/owned materials — mutated in place (future clones inherit) */
+  /**
+   * base/owned materials — cloned before any override is applied (the
+   * registered instance is never mutated, so MaterialLibrary-cached shared
+   * materials can't leak a recolor into other assets; M6). The override
+   * lives on the per-entry clone, which replaces the entry's reference.
+   */
   materials?: THREE.Material[];
   /** live roots — materials swapped for per-entry clones (existing instances update) */
   roots?: THREE.Object3D[] | (() => THREE.Object3D[]);
@@ -193,6 +201,16 @@ export class AssetRegistry {
     return this.entries.has(id);
   }
 
+  /**
+   * The entry's current effective base material (the override clone when an
+   * override was applied, else the registered material). Lets callers wire
+   * the overridden material into systems that re-assign materials themselves
+   * (e.g. the projectile pool) without ever touching the shared cache.
+   */
+  currentMaterial(id: string): THREE.Material | undefined {
+    return this.entries.get(id)?.materials[0];
+  }
+
   /** Collected warnings (unknown ids, invalid values). Also logged via console.warn. */
   getWarnings(): string[] {
     return [...this.warnings];
@@ -266,12 +284,21 @@ export class AssetRegistry {
       }
     }
 
-    // base materials: mutate in place (future clones inherit)
-    for (const m of entry.materials) {
-      const s = m as THREE.MeshStandardMaterial;
-      if (color && 'color' in s && s.color) s.color.copy(color);
-      if (emissive && 'emissive' in s && s.emissive) s.emissive.copy(emissive);
-      if (emissiveIntensity !== null && 'emissiveIntensity' in s) s.emissiveIntensity = emissiveIntensity;
+    // base materials: CLONE before overriding. The registered instance may be
+    // a MaterialLibrary-cached shared material — mutating it would recolor
+    // every mesh sharing that cache entry (M6). The override lands on the
+    // per-entry clone, which replaces the entry's reference (idempotent:
+    // re-applying re-clones and re-applies the same absolute values).
+    const needClone = color !== null || emissive !== null || emissiveIntensity !== null;
+    if (needClone) {
+      entry.materials = entry.materials.map((m) => {
+        const clone = m.clone();
+        const s = clone as THREE.MeshStandardMaterial;
+        if (color && 'color' in s && s.color) s.color.copy(color);
+        if (emissive && 'emissive' in s && s.emissive) s.emissive.copy(emissive);
+        if (emissiveIntensity !== null && 'emissiveIntensity' in s) s.emissiveIntensity = emissiveIntensity;
+        return clone;
+      });
     }
 
     // live roots: swap each mesh material for a per-entry cached clone

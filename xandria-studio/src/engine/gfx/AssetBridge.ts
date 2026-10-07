@@ -7,7 +7,8 @@
  * or offline session silently leaves the procedural fallback in place.
  *
  * Security/robustness notes:
- *  - https URLs only (http://localhost allowed for local dev packs)
+ *  - https URLs only — the spec schema rejects anything else, including
+ *    http://localhost (serve local dev packs over https instead)
  *  - per-pack timeout (default 15s), total pack count capped by schema validation
  *  - loaded graphs are sanitized: scale-capped, grounded on terrain, shadows on
  */
