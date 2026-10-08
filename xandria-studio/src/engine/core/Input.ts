@@ -187,7 +187,15 @@ export class Input {
     });
   }
 
-  /** For automated tests: hold a set of actions and optional movement axes until changed. */
+  /**
+   * For automated tests: hold a set of actions and optional movement axes until changed.
+   *
+   * Edge semantics mirror a physical key: `justPressed` fires only for actions
+   * that are NEWLY added relative to the previously injected set. Re-injecting
+   * an already-held action produces no new edge — release first with
+   * `inject([])` (or `input.reset()`) to re-arm it, e.g. to simulate a second
+   * key press. Use `tap(a)` for a one-shot edge with no hold.
+   */
   inject(actions: Action[], axes?: { lx: number; ly: number } | null) {
     for (const a of actions) if (!this.injected.has(a)) this.just.add(a);
     this.injected = new Set(actions);

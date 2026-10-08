@@ -28,6 +28,12 @@ const MAX_FOOTPRINT = 60; // meters — clamp absurdly large models
 
 export class AssetBridge {
   private roots: THREE.Group[] = [];
+  /**
+   * Generation token for the restart/dispose race (R2-N3). load() captures
+   * ++generation at entry; a fetch that resolves after the generation moved on
+   * belongs to a dead run and must not touch scene/roots.
+   */
+  private generation = 0;
 
   constructor(
     private spec: GameSpec,
@@ -43,6 +49,7 @@ export class AssetBridge {
   async load(): Promise<AssetBridgeResult> {
     const result: AssetBridgeResult = { loaded: [], failed: [] };
     if (!this.enabled) return result;
+    const gen = ++this.generation;
     const packs = this.spec.custom!.assets!.packs ?? {};
     const loader = new GLTFLoader();
     const rng = new Rng(this.spec.meta.seed ^ 0xb21d6e);
@@ -50,6 +57,10 @@ export class AssetBridge {
     await Promise.all(Object.entries(packs).map(async ([name, url]) => {
       try {
         const gltf = await withTimeout(loader.loadAsync(url), 15000);
+        // R2-N3: restart()/dispose() happened mid-fetch — this graph belongs
+        // to a dead run. Drop it instead of injecting duplicate props into
+        // the new run's scene/roots (or repopulating after Engine.dispose()).
+        if (gen !== this.generation) return;
         const model = gltf.scene;
         // normalize footprint
         const box = new THREE.Box3().setFromObject(model);
@@ -85,6 +96,10 @@ export class AssetBridge {
   }
 
   dispose() {
+    // R2-N3: invalidate in-flight loads FIRST — a fetch that resolves after
+    // this point must not repopulate roots/scene (restart race, or a late
+    // load landing after Engine.dispose()).
+    this.generation++;
     for (const r of this.roots) {
       this.scene.remove(r);
       r.traverse((o) => {

@@ -137,6 +137,14 @@ interface AssetEntry {
   roots: THREE.Object3D[] | (() => THREE.Object3D[]);
   fog: THREE.Fog | null;
   baseScale: Map<THREE.Object3D, THREE.Vector3>;
+  /**
+   * Registry-created clones of `materials` (the materials path of
+   * applyOverrides). Empty until an override needing a clone is applied.
+   * These are the only materials the registry may dispose: the originally
+   * registered instances may be shared MaterialLibrary-cached materials
+   * and must NEVER be disposed or mutated (M6, R2-N4).
+   */
+  ownedClones: THREE.Material[];
 }
 
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -182,6 +190,14 @@ export class AssetRegistry {
 
   /** Register a named asset. One line per asset, right after the blueprint creates it. */
   register(id: string, opts: RegisterOpts): void {
+    const prev = this.entries.get(id);
+    if (prev) {
+      // R2-N4: a re-registered entry supersedes its registry-created clones —
+      // dispose them so they don't leak. Only ownedClones are disposed here;
+      // the originally registered (possibly shared) materials are never
+      // disposed by the registry.
+      for (const c of prev.ownedClones) c.dispose();
+    }
     const roots = opts.roots ?? [];
     const entry: AssetEntry = {
       id,
@@ -190,6 +206,7 @@ export class AssetRegistry {
       roots,
       fog: opts.fog ?? null,
       baseScale: new Map(),
+      ownedClones: [],
     };
     // capture base scales now so `scale` overrides stay multiplicative + idempotent
     const resolve = typeof roots === 'function' ? roots() : roots;
@@ -287,18 +304,31 @@ export class AssetRegistry {
     // base materials: CLONE before overriding. The registered instance may be
     // a MaterialLibrary-cached shared material — mutating it would recolor
     // every mesh sharing that cache entry (M6). The override lands on the
-    // per-entry clone, which replaces the entry's reference (idempotent:
-    // re-applying re-clones and re-applies the same absolute values).
+    // per-entry clone, which replaces the entry's reference.
+    //
+    // R2-N4: the clone is created ONCE per entry and reused across
+    // re-applies (overrides are absolute values, so re-applying is
+    // value-identical). The old code cloned again on every applyOverrides —
+    // called per wave by spawn-wave blueprints — and orphaned the previous
+    // clone: a GPU material leak per wave in long survive runs. Reuse also
+    // keeps the clone wired into external systems stable (e.g. the
+    // projectile pool holds the first clone via setTracerMaterial — a
+    // disposed-and-replaced clone would leave the pool pointing at a dead
+    // material). Only registry-created ownedClones are ever disposed;
+    // the originally registered shared materials are never disposed here.
     const needClone = color !== null || emissive !== null || emissiveIntensity !== null;
     if (needClone) {
-      entry.materials = entry.materials.map((m) => {
-        const clone = m.clone();
-        const s = clone as THREE.MeshStandardMaterial;
+      if (entry.ownedClones.length !== entry.materials.length) {
+        for (const c of entry.ownedClones) c.dispose();
+        entry.ownedClones = entry.materials.map((m) => m.clone());
+        entry.materials = [...entry.ownedClones];
+      }
+      for (const m of entry.materials) {
+        const s = m as THREE.MeshStandardMaterial;
         if (color && 'color' in s && s.color) s.color.copy(color);
         if (emissive && 'emissive' in s && s.emissive) s.emissive.copy(emissive);
         if (emissiveIntensity !== null && 'emissiveIntensity' in s) s.emissiveIntensity = emissiveIntensity;
-        return clone;
-      });
+      }
     }
 
     // live roots: swap each mesh material for a per-entry cached clone

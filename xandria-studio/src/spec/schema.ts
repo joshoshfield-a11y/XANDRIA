@@ -464,11 +464,26 @@ function validateStageGraph(
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
 const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators', 'profileDamageMult'];
 
+/** Options for validateSpec. */
+export interface ValidateSpecOptions {
+  /**
+   * Enemy kind ids registered via engine.hooks.registerEnemyKind (pass
+   * `engine.hooks.enemyKinds.keys()` at engine call sites). An enemy whose
+   * kind is in this set passes the kind check; every other kind must be in
+   * ENEMY_KINDS. Lets legitimately registered custom kinds validate (R2-M4)
+   * without weakening validation for unregistered kinds — a bogus kind that
+   * was never registered still fails.
+   */
+  customEnemyKinds?: Iterable<string>;
+}
+
 /** Strict structural validation. Returns every problem found. */
-export function validateSpec(spec: unknown): ValidationResult {
+export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const err = (p: string, m: string) => errors.push(`${p}: ${m}`);
+  // registered custom kinds (R2-M4): accepted at the kind check, nothing else
+  const customKinds = new Set<string>(opts?.customEnemyKinds ?? []);
 
   if (!isObj(spec)) return { ok: false, errors: ['spec: not an object'], warnings: [] };
 
@@ -538,7 +553,8 @@ export function validateSpec(spec: unknown): ValidationResult {
   else spec.enemies.forEach((e, i) => {
     const p = `enemies[${i}]`;
     if (!isObj(e)) return err(p, 'must be an object');
-    if (!inEnum(e.kind, ENEMY_KINDS)) err(`${p}.kind`, `must be one of ${ENEMY_KINDS.join('|')}`);
+    if (!inEnum(e.kind, ENEMY_KINDS) && !(typeof e.kind === 'string' && customKinds.has(e.kind)))
+      err(`${p}.kind`, `must be one of ${ENEMY_KINDS.join('|')}` + (customKinds.size ? ` or a registered custom kind (${[...customKinds].sort().join('|')})` : ''));
     if (!num(e.count, 0, 200)) err(`${p}.count`, 'must be 0..200');
     if (!num(e.health, 1, 100000)) err(`${p}.health`, 'must be 1..100000');
     if (!num(e.speed, 0, 60)) err(`${p}.speed`, 'must be 0..60');

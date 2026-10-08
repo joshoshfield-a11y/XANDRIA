@@ -14,8 +14,8 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateSpec } from '../src/generator/generate';
-import { normalizeSpec, validateSpec } from '../src/spec/schema';
 import type { GameSpec } from '../src/spec/schema';
+import { resolveSpecArg } from './specArg';
 import { ZipBuilder } from './zip';
 import { generateCover } from './cover';
 import { injectSpecScript } from './specInject';
@@ -47,9 +47,15 @@ if (!intent && !specJson) {
 
 let spec: GameSpec;
 if (specJson) {
-  const raw = JSON.parse(specJson);
-  const v = validateSpec(raw);
-  spec = v.ok ? raw : normalizeSpec(raw);
+  // R3-N3: an unfixable --spec used to throw an unhandled exception (raw
+  // stack trace, no output file). Fail with a readable message instead,
+  // mirroring how export-source.ts handles a bad --seed.
+  try {
+    spec = resolveSpecArg(specJson);
+  } catch (e) {
+    console.error(`Invalid --spec: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
 } else {
   spec = generateSpec(intent!);
 }

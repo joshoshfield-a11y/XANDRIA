@@ -13,6 +13,28 @@
               pointer-events: none; animation: pulse 1.2s ease-in-out infinite; }
       @keyframes pulse { 50% { opacity: .35; } }
     </style>
+    <script>
+      // Pre-boot modding API (R3-M1). The player bundle below is a deferred ES
+      // module, so NO page script can run between the bundle's evaluation and
+      // boot(). This tiny inline classic script runs at parse time, BEFORE the
+      // bundle, and queues custom enemy-kind registrations for the bundle to
+      // drain into its registry at module load (before it validates any
+      // injected spec). A modder's page script just needs to be a classic
+      // <script> anywhere in the page — all classic scripts run before the
+      // deferred bundle module — e.g. (in your own classic script tag placed
+      // after this one):
+      //   window.__XANDRIA__.registerEnemyKind('stalker', { base: 'walker', name: 'Stalker' });
+      //   window.__XANDRIA_SPEC__ = specUsingStalkerKind;
+      // (Their relative order doesn't matter; both precede the bundle.)
+      // Queued defs are validated by the bundle on drain; a bad def fails
+      // loudly into window.__XANDRIA_ERRORS, not silently.
+      window.__XANDRIA__ = window.__XANDRIA__ || {};
+      window.__XANDRIA__.errors = window.__XANDRIA__.errors || [];
+      window.__XANDRIA__._preBootKinds = window.__XANDRIA__._preBootKinds || [];
+      window.__XANDRIA__.registerEnemyKind = function (id, def) {
+        window.__XANDRIA__._preBootKinds.push([id, def]);
+      };
+    </script>
   </head>
   <body>
     <div id="app"></div>

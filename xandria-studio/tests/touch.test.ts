@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { isTouchDevice, stickVector, layoutForGenre } from '../src/engine/game/TouchControls';
+import { isTouchDevice, stickVector, layoutForGenre, pauseButtonTop, PAUSE_BUTTON_GAP } from '../src/engine/game/TouchControls';
 
 describe('isTouchDevice', () => {
   const g = globalThis as Record<string, unknown>;
@@ -62,6 +62,28 @@ describe('stickVector', () => {
   it('keeps screen-space sign convention (y down+)', () => {
     const v = stickVector(0, 28, 56);
     expect(v.y).toBeGreaterThan(0);
+  });
+});
+
+describe('pauseButtonTop', () => {
+  // R3-T1: pause button top is computed from the score panel's measured
+  // bottom edge (+ gap), not hard-coded — regression guard for the
+  // ~5 px overlap seen on 390×844 (panel bottom 113 → button top must be ≥121).
+  it('clears the tallest observed score panel (bottom 113)', () => {
+    expect(pauseButtonTop(113, 0)).toBe(113 + PAUSE_BUTTON_GAP);
+  });
+
+  it('converts viewport-space panel bottom to overlay-relative top', () => {
+    // overlay starts 50px below the viewport top (scrolled/offset container)
+    expect(pauseButtonTop(163, 50)).toBe(163 - 50 + PAUSE_BUTTON_GAP);
+  });
+
+  it('rounds fractional rect values up so the gap is never violated', () => {
+    expect(pauseButtonTop(112.4, 0)).toBe(121);
+  });
+
+  it('honors an explicit gap override', () => {
+    expect(pauseButtonTop(100, 0, 12)).toBe(112);
   });
 });
 

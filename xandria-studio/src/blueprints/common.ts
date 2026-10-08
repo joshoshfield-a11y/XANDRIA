@@ -51,6 +51,26 @@ export class PlayerAvatar {
     });
     engine.hud.setLives(this.lives);
     engine.hud.showBoostBar(false);
+    // R5-M1: the avatar snapshots loadout-dependent values at construction,
+    // but the loadout can change in the title shop after boot(). Register
+    // with the engine so beginPlay() can re-sync after applyLoadout().
+    engine.setPlayerAvatar(this);
+  }
+
+  /**
+   * R5-M1: re-copy the construction-time loadout values from the spec.
+   * Called by Engine.beginPlay() after applyLoadout(), so a fresh run always
+   * starts with the currently equipped modifiers — even when they were
+   * bought/equipped in the title shop after boot() built this avatar.
+   * Only maxHealth/health/lives are construction-time copies; per-frame
+   * values (swift/power) already read the live spec.
+   */
+  resyncLoadout(): void {
+    this.maxHealth = this.spec.player.health;
+    this.health = this.maxHealth;
+    this.lives = this.spec.rules.lives;
+    this.engine.hud.setHealth(1);
+    this.engine.hud.setLives(this.lives);
   }
 
   damage(amount: number, from?: THREE.Vector3) {

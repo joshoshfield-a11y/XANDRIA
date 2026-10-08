@@ -21,6 +21,8 @@ import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
 import { TouchControls, isTouchDevice } from './game/TouchControls';
+import { showIntroCard } from '../blueprints/campaign';
+import type { PlayerAvatar } from '../blueprints/common';
 import {
   applyLoadout,
   dailySeed,
@@ -81,6 +83,7 @@ export class Engine {
   private resizeObs: ResizeObserver;
   /** blueprint rebuild fn, registered by the runtime bootstrap (enables in-place restart) */
   private runBuilder: ((e: Engine) => unknown) | null = null;
+  private playerAvatar: PlayerAvatar | null = null;
   /** hooks that survive restart() (runtime bootstrap); blueprint hooks are torn down */
   private persistentHooks = new Set<(dt: number) => void>();
   private pauseReason: 'menu' | 'modal' | null = null;
@@ -95,6 +98,10 @@ export class Engine {
   private baseSeed: number;
   /** YYYY-MM-DD while a daily-challenge run is active; null otherwise */
   private dailyDate: string | null = null;
+  /** terrain construction options, kept so terrain can be rebuilt from a new seed (R2-M1) */
+  private terrainOpts: { flatCenters?: THREE.Vector3[]; flatRadius?: number; noTerrain?: boolean };
+  /** the seed the live terrain was generated from */
+  private terrainSeed: number;
 
   constructor(container: HTMLElement, spec: GameSpec, opts: EngineOptions = {}) {
     this.container = container;
@@ -135,12 +142,14 @@ export class Engine {
 
     this.sky = createSky(spec, this.scene);
     this.renderer.toneMappingExposure = this.sky.exposure;
+    this.terrainOpts = { flatCenters: opts.flatCenters, flatRadius: opts.flatRadius, noTerrain: opts.noTerrain };
     if (!opts.noTerrain) {
       this.terrain = new Terrain(spec, this.physics, this.mats, this.scene, {
         flatCenters: opts.flatCenters,
         flatRadius: opts.flatRadius,
       });
     }
+    this.terrainSeed = spec.meta.seed;
 
     // audio unlock on first gesture (removed again in dispose())
     this.audioUnlockHandler = () => { if (!this.testMode) this.audio.unlock(); };
@@ -198,6 +207,39 @@ export class Engine {
    */
   setRunBuilder(fn: (e: Engine) => unknown) {
     this.runBuilder = fn;
+  }
+
+  /**
+   * R5-M1: the live player avatar, self-registered by PlayerAvatar on
+   * construction (re-registered on every rebuild). beginPlay() re-syncs its
+   * construction-time loadout copies after applyLoadout(), so title-shop
+   * purchases made after boot() still take effect on the run.
+   */
+  setPlayerAvatar(a: PlayerAvatar | null) {
+    this.playerAvatar = a;
+  }
+
+  /**
+   * Rebuild the heightfield terrain from the current spec.meta.seed (R2-M1).
+   * The daily challenge overrides the seed *after* construction; without a
+   * rebuild every daily run would play on the base game's terrain, and an
+   * in-place restart would silently change the world between attempts.
+   * Rebuilds only when the seed actually changed, so the normal flow (and
+   * in-place restarts, which keep the same seed) never pay for it.
+   */
+  private syncTerrainToSeed() {
+    if (this.terrainOpts.noTerrain || !this.terrain) return;
+    if (this.terrainSeed === this.spec.meta.seed) return;
+    this.terrain.dispose(this.scene, this.physics);
+    this.terrain = new Terrain(this.spec, this.physics, this.mats, this.scene, {
+      flatCenters: this.terrainOpts.flatCenters,
+      flatRadius: this.terrainOpts.flatRadius,
+    });
+    this.terrainSeed = this.spec.meta.seed;
+    // The opt-in asset packs ground their props on engine terrain — keep the
+    // bridge's reference fresh (private field, so set from here rather than
+    // touching AssetBridge.ts).
+    (this.assetBridge as unknown as { terrain?: Terrain }).terrain = this.terrain;
   }
 
   /** Effective render quality: settings override, else the spec hint. */
@@ -326,17 +368,25 @@ export class Engine {
     if (this.state !== 'title') return;
     this.dailyDate = null;
     this.spec.meta.seed = this.baseSeed;
+    this.syncTerrainToSeed(); // no-op in the normal flow; restores base terrain after a daily run
     this.beginPlay();
   }
 
   /**
    * Daily challenge: the seed is derived deterministically from the calendar
    * date, so everyone gets the same run today. Local best tracked per day.
+   *
+   * R2-M1: the seed must drive the WORLD, not just the spawns. The terrain is
+   * rebuilt from the daily seed and the run itself is rebuilt too (via
+   * resetRun), so attempt 1 and every in-place restart play the identical
+   * world: same seed → same terrain + same spawns, every time.
    */
   startDailyRun() {
     if (this.state !== 'title') return;
     this.dailyDate = todayLocalDate();
     this.spec.meta.seed = dailySeed(this.dailyDate);
+    this.syncTerrainToSeed();
+    if (this.runBuilder) this.resetRun();
     this.beginPlay();
   }
 
@@ -349,6 +399,17 @@ export class Engine {
     // is idempotent (restores pristine base values before re-applying), so
     // the resetRun() call below stays valid.
     applyLoadout(this.spec, loadProfile());
+    // R5-M1: the avatar snapshots loadout values at construction (boot), but
+    // the player may have bought/equipped modifiers in the title shop after
+    // that. Re-sync its construction-time copies now that the spec carries
+    // the current loadout. (Per-frame values like swift/power read live.)
+    this.playerAvatar?.resyncLoadout();
+    // R4-N2: the intro story card belongs here, after clearOverlays — the
+    // blueprints used to show it at build time, so a fresh run's beginPlay
+    // wiped it (card never visible) while in-place restarts (which rebuild
+    // without beginPlay) showed it. Now it shows on every fresh run start
+    // and never on restarts.
+    showIntroCard(this, this.spec);
     this.state = 'playing';
     this.last = performance.now();
   }
@@ -358,6 +419,7 @@ export class Engine {
     // leave any daily run behind: the title background is always the base game
     this.dailyDate = null;
     this.spec.meta.seed = this.baseSeed;
+    this.syncTerrainToSeed(); // R2-M1: restore the base-game terrain after a daily run
     if (this.runBuilder) this.resetRun();
     else this.hud.clearOverlays();
     this.audio.setIntensity(0.5);
@@ -388,6 +450,12 @@ export class Engine {
   step(dt: number) {
     this.frame++;
     this.input.beginFrame();
+    // R2-N1: snapshot the engine-level edges BEFORE the substep loop. Update
+    // hooks consume edges on substep 0 only (see below), so the pause/confirm
+    // checks after the loop must read the snapshot — this keeps the M9 fix
+    // (an Escape/P edge still pauses in ?test=1) working.
+    const pauseEdge = this.input.justPressed('pause');
+    const confirmEdge = this.input.justPressed('confirm');
     if (this.state === 'playing' && !this.juice.hitStopActive()) {
       // testMode: advance many sim steps per rendered frame so headless/SwiftShader
       // runs at full simulation speed regardless of render rate.
@@ -397,19 +465,19 @@ export class Engine {
         this.elapsed += dt;
         this.physics.step(dt);
         for (const f of this.updateHooks) f(dt);
+        // edge-triggered input is consumed by the first substep only: a single
+        // injected edge fires exactly once per rendered frame in testMode.
+        // For production (substeps=1) the guard never fires, so the frame
+        // ordering is identical to the M9 behavior (restores the pre-M9
+        // clear for hooks; pause/confirm read the snapshot above).
+        if (s === 0 && substeps > 1) this.input.endFrame();
       }
-      // NB: edge-triggered input is NOT cleared inside the substep loop —
-      // the `just`/`released` sets must survive until every consumer (the
-      // update hooks above AND the pause/confirm checks below) has run.
-      // They are cleared once per rendered frame by the trailing endFrame().
-      // For production (substeps=1) the loop runs exactly once, so the check
-      // ordering is unchanged (M9).
       this.particles.update(dt * substeps);
       this.hud.update(dt);
       this.hooks.emit('onTick', { dt, t: this.elapsed });
     }
-    if (this.state === 'title' && this.input.justPressed('confirm')) this.startRun();
-    if (this.input.justPressed('pause')) this.togglePause();
+    if (this.state === 'title' && confirmEdge) this.startRun();
+    if (pauseEdge) this.togglePause();
     this.touch.setVisible(this.state === 'playing');
     this.juice.update(dt, this.camera);
     this.sky.update(dt, this.camera.getWorldPosition(new THREE.Vector3()));
@@ -492,7 +560,10 @@ export class Engine {
    */
   restart() {
     if (!this.runBuilder) {
-      try { sessionStorage.setItem('xandria.restart', '1'); } catch { /* ignore */ }
+      // No blueprint builder was registered (runtime bootstrap skipped it):
+      // the only option is a plain page reload. (R2-N12: the old
+      // 'xandria.restart' sessionStorage flag was write-only — nothing ever
+      // read it — so it was removed rather than left as dead state.)
       location.reload();
       return;
     }

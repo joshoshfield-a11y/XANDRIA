@@ -210,8 +210,10 @@ export class VariantDirector {
 
   /**
    * Stage scaling for ALL tracked enemies (variant or plain): HP +15%/stage,
-   * speed +8%/stage, applied incrementally and only upward. Call when the
-   * chapter index changes.
+   * speed +8%/stage, applied incrementally and only upward. Call with the
+   * number of chapters cleared (branch-aware, R4-N1) — NOT the quest-graph
+   * array index, which would make branch B systematically harder than
+   * branch A on the same chapter.
    */
   applyStageScaling(stage: number): void {
     if (stage <= 0) return;

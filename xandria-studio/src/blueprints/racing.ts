@@ -12,7 +12,6 @@ import { Scatter } from '../engine/world/Scatter';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
 import {
-  showIntroCard,
   makeCampaignObjectives,
   roman,
   registerWorldAssets,
@@ -43,6 +42,22 @@ interface AiCar {
   color: string;
 }
 
+/**
+ * R2-M3: minimum credible lap time for a track of `trackLenM` meters.
+ *
+ * The old code used a fixed 10s wall-clock debounce against bad start/finish
+ * wraps, which silently discarded legitimate sub-10s laps on short tracks (or
+ * with a fast, upgraded car) — potentially unwinnable. A real lap cannot beat
+ * trackLen / 70 (measured top speed 70.2 m/s with boost held), while spurious
+ * wraps from nearestT jitter last a frame or two, so the threshold is set to
+ * trackLen / 100 — a ~30% safety margin under the physical minimum — floored
+ * at 2s to separate the two regimes.
+ */
+export function minLapTimeForTrack(trackLenM: number): number {
+  const REF_SPEED = 50; // m/s — half of the effective divisor (see above); NOT a top-speed estimate
+  return Math.max(2, (trackLenM / REF_SPEED) * 0.5);
+}
+
 export function buildRacing(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
   const rng = engine.rng.fork(303);
@@ -52,10 +67,9 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
   engine.assetBridge.dispose();
 
-  // campaign layer: intro card + XP progression (non-blocking at boot).
+  // campaign layer: XP progression (the intro card is shown by Engine.beginPlay)
   // Racing has no avatar/kills: XP comes from laps + checkpoints, and the
   // 'speed' upgrade auto-applies as faster boost-pad charging.
-  showIntroCard(engine, spec);
   const prog = new Progression(engine);
   // content depth: timed pickup effects + roadside dressing/crowd
   const fx = new EffectState();
@@ -181,6 +195,10 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     return best;
   };
 
+  const trackLenApprox = track.curve.getLength();
+  // R2-M3: lap debounce scales with track length (see minLapTimeForTrack).
+  const minLapTime = minLapTimeForTrack(trackLenApprox);
+
   engine.onUpdate((dt) => {
     raceTime += dt;
     car.update(dt, {
@@ -205,7 +223,10 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     }
     if (lastT > 0.92 && playerT < 0.08) {
       const lapTime = raceTime - lapStart;
-      if (lapTime > 10) { // debounce bad wraps
+      // R2-M3: track-length-aware debounce — the old fixed 10s gate silently
+      // ate legitimate fast laps on short tracks. A discarded lap is never
+      // silent: the player gets a toast saying it didn't count.
+      if (lapTime >= minLapTime) { // debounce bad wraps
         if (lapTime < bestLap) bestLap = lapTime;
         engine.audio.play('checkpoint');
         hud.toast(playerLap >= lapsNeeded ? 'FINISH!' : `LAP ${playerLap + 1} — ${lapTime.toFixed(1)}s`);
@@ -216,6 +237,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
         playerLap++;
         lapStart = raceTime;
         nextCp = 0;
+      } else {
+        hud.toast(`LAP ${lapTime.toFixed(1)}s — NOT COUNTED`);
       }
     }
     lastT = playerT;
@@ -255,7 +278,5 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     camRig.update(dt, car.position, toV3(car.chassis.velocity), car.heading);
   });
 
-  const trackLenApprox = track.curve.getLength();
-
-  return { car, aiCars, objectives, assets };
+  return { car, aiCars, objectives, assets, track };
 }

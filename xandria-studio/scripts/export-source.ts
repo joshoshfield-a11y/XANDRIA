@@ -31,13 +31,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
-const get = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
+const get = (k: string): string | undefined => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
 
 const outDir = path.resolve(get('--out') ?? get('-o') ?? './xandria-game-src');
 const genreArg = get('--genre');
 const intentArg = get('--intent');
 const seedArg = get('--seed');
-const seed = seedArg !== null ? parseInt(seedArg, 10) : (Math.floor(Math.random() * 0xffffffff) >>> 0);
+// R2-N11: a non-numeric --seed used to become 0 silently (NaN >>> 0). Fail
+// loudly instead — or omit the flag to get a random seed.
+let seed: number;
+if (seedArg === undefined && args.includes('--seed')) {
+  console.error('Invalid --seed: no value given; expected a non-negative integer (0–4294967295).');
+  process.exit(1);
+} else if (seedArg === undefined) {
+  seed = Math.floor(Math.random() * 0xffffffff) >>> 0;
+} else if (!/^\d+$/.test(seedArg)) {
+  console.error(`Invalid --seed "${seedArg}": expected a non-negative integer (0–4294967295).`);
+  process.exit(1);
+} else if (Number(seedArg) > 0xffffffff) {
+  console.error(`Invalid --seed "${seedArg}": out of range (max 4294967295).`);
+  process.exit(1);
+} else {
+  seed = Number(seedArg) >>> 0;
+}
 
 if (!genreArg && !intentArg) {
   console.error('Usage: export-source.ts --out ./my-game (--genre fps-arena [--seed 123] | --intent "...")');

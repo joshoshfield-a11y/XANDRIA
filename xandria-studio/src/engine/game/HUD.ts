@@ -76,6 +76,9 @@ const CSS = `
 .xhud .title-screen .mod .ma { font-size:10px; letter-spacing:.08em; color:#ffd23f; }
 .xhud .title-screen .mod.equipped { border-color:#ffd23f; background:rgba(60,48,16,.6); }
 .xhud .title-screen .mod.locked { opacity:.55; cursor:pointer; }
+/* N10: unaffordable purchase attempt — shake + red flash on the mod card */
+.xhud .title-screen .mod.denied { border-color:#ff6a7a; animation:deny-shake .45s ease; }
+@keyframes deny-shake { 0%,100% { transform:translateX(0); } 20% { transform:translateX(-6px); } 40% { transform:translateX(5px); } 60% { transform:translateX(-4px); } 80% { transform:translateX(3px); } }
 .xhud .title-screen .daily-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:18px; }
 .xhud .title-screen .daily-btn { font-size:14px; padding:10px 26px; }
 .xhud .title-screen .daily-best { font-size:12px; opacity:.7; }
@@ -105,6 +108,26 @@ const CSS = `
 }
 `;
 
+/**
+ * N5: a live level-up / branch-choice modal tracked by the HUD so teardown
+ * can dismiss it — removes the element AND the document keydown listener,
+ * then settles the promise (no stale modal callbacks after restart).
+ */
+interface ActiveModal {
+  el: HTMLDivElement;
+  onKey: ((e: KeyboardEvent) => void) | null;
+  /** resolve/abandon the modal's promise after teardown detached it */
+  settle: () => void;
+}
+
+/**
+ * R4-M1: sentinel resolving a branch-choice promise when its modal is torn
+ * down without a player pick (restart / clearOverlays). Objectives releases
+ * `awaitingChoice` on this value instead of advancing — the run is being
+ * rebuilt or is dead, so there is nothing to advance to.
+ */
+export const CHOICE_ABANDONED = -1;
+
 export class HUD {
   private root: HTMLDivElement;
   private hpFill: HTMLDivElement;
@@ -121,6 +144,21 @@ export class HUD {
   private overlay: HTMLDivElement | null = null;
   /** live story card from showCard (tracked so restarts can dismiss it) */
   private card: HTMLDivElement | null = null;
+  /**
+   * N5: live level-up / branch-choice modal, tracked so clearOverlays() can
+   * dismiss it on teardown/restart — removes the element AND the document
+   * keydown listener, then settles the promise (no stale modal callbacks).
+   */
+  private activeModal: ActiveModal | null = null;
+  /**
+   * R4-M1: queue of modal-show closures waiting behind the active blocking
+   * modal. A level-up earned on the same tick as a branch choice must not
+   * preempt the choice modal (preemption used to abandon the choice, resume
+   * the game, and leave Objectives.awaitingChoice true forever — a run
+   * soft-lock). Queued modals show in order as each modal closes normally;
+   * the queue is dropped on clearOverlays (teardown/restart).
+   */
+  private modalQueue: Array<() => void> = [];
   private boostBar: HTMLDivElement;
   private vignetteT = 0;
   private toastT = 0;
@@ -220,6 +258,50 @@ export class HUD {
   }
 
   /**
+   * N5: modal bookkeeping. trackModal registers a newly opened modal
+   * (abandoning any previous one first — double-opens shouldn't happen, but
+   * must never leak). detachModal removes the element + document keydown
+   * listener without settling (the normal pick path settles itself).
+   * abandonModal is the teardown path: detach, then settle the promise.
+   */
+  private trackModal(m: ActiveModal) {
+    // R5-N1: only abandon when something is actually tracked. pumpModalQueue
+    // surfaces queued modals through trackModal, and the old unconditional
+    // abandon wiped the rest of the queue (dropped promises never settled).
+    if (this.activeModal) this.abandonModal();
+    this.activeModal = m;
+  }
+
+  private detachModal() {
+    const m = this.activeModal;
+    this.activeModal = null;
+    if (!m) return;
+    if (m.onKey) document.removeEventListener('keydown', m.onKey);
+    m.el.remove();
+  }
+
+  private abandonModal() {
+    const m = this.activeModal;
+    // R4-M1: an abandoned modal's context is dead — queued modals from that
+    // context must not surface afterwards.
+    this.modalQueue.length = 0;
+    this.detachModal();
+    m?.settle();
+  }
+
+  /**
+   * R4-M1: show the next queued modal, if any, after a modal closes normally.
+   * Never called from abandon/teardown paths — those drop the queue instead
+   * (see clearOverlays), so a level-up earned in a dead run can't pop over
+   * the new run's UI.
+   */
+  private pumpModalQueue() {
+    if (this.activeModal) return;
+    const next = this.modalQueue.shift();
+    next?.();
+  }
+
+  /**
    * Touch mode: shifts HUD panels clear of the touch overlay (joystick bottom-left,
    * buttons bottom-right) and applies small-screen compaction.
    */
@@ -272,9 +354,37 @@ export class HUD {
    */
   showLevelUp(choices: UpgradeDef[]): Promise<string> {
     const eng = this.eng;
-    const wasPlaying = eng?.state === 'playing';
-    if (wasPlaying) eng!.pause();
-    return new Promise<string>((resolve) => {
+    // N6: the kill that levels up may also win/lose the run (grantKillXp runs
+    // before addProgress now, and the notify chain is async) — never pop the
+    // modal over the end screen; grant the first upgrade silently instead.
+    if (eng && (eng.state === 'won' || eng.state === 'lost')) {
+      return Promise.resolve(choices[0]?.id ?? '');
+    }
+    // R4-M1: never preempt a live blocking modal. A level-up earned on the
+    // same tick as a branch choice queues behind the choice modal and shows
+    // once the player picks a path (pumpModalQueue). Preemption used to
+    // abandon the choice, resume the game, and freeze quest progress forever.
+    if (this.activeModal) {
+      return new Promise<string>((resolve) => {
+        this.modalQueue.push(() => this.showLevelUpNow(choices, resolve));
+      });
+    }
+    return new Promise<string>((resolve) => this.showLevelUpNow(choices, resolve));
+  }
+
+  /** The actual level-up modal. Separated so queued level-ups show later. */
+  private showLevelUpNow(choices: UpgradeDef[], resolve: (id: string) => void): void {
+    const eng = this.eng;
+    // A queued level-up can surface after the run ended — grant silently.
+    if (eng && (eng.state === 'won' || eng.state === 'lost')) {
+      resolve(choices[0]?.id ?? '');
+      this.pumpModalQueue();
+      return;
+    }
+    const pausing = eng?.state === 'playing';
+    if (pausing) eng!.pause();
+    {
+      let done = false;
       const el = document.createElement('div');
       el.className = 'overlay';
       const h = document.createElement('h1');
@@ -285,6 +395,15 @@ export class HUD {
       sub.textContent = 'Choose an upgrade';
       const opts = document.createElement('div');
       opts.className = 'lvlopts';
+      const finish = (id: string) => {
+        if (done) return;
+        done = true;
+        this.detachModal();
+        if (pausing) eng!.resume();
+        resolve(id);
+        // R4-M1: a further level-up may be queued behind this one.
+        this.pumpModalQueue();
+      };
       for (const c of choices) {
         const b = document.createElement('button');
         b.className = 'lvlopt';
@@ -295,16 +414,17 @@ export class HUD {
         ds.className = 'ds';
         ds.textContent = c.desc;
         b.append(nm, ds);
-        b.addEventListener('click', () => {
-          el.remove();
-          if (wasPlaying) eng!.resume();
-          resolve(c.id);
-        });
+        b.addEventListener('click', () => finish(c.id));
         opts.appendChild(b);
       }
       el.append(h, sub, opts);
       this.root.appendChild(el);
-    });
+      // N5: track the modal so clearOverlays() can dismiss + settle it on
+      // teardown/restart. Settling with '' abandons the pending upgrade —
+      // applyUpgrade('') is a harmless no-op, so no stale click can mutate
+      // the (shared) spec after the run is gone.
+      this.trackModal({ el, onKey: null, settle: () => finish('') });
+    }
   }
 
   /**
@@ -333,10 +453,22 @@ export class HUD {
       const pick = (i: number) => {
         if (done) return;
         done = true;
-        document.removeEventListener('keydown', onKey);
-        el.remove();
+        this.detachModal();
         if (wasPlaying) eng!.resume();
         resolve(i);
+        // R4-M1: a level-up earned on the branch-completing tick queues
+        // behind this modal — show it now that the path is chosen.
+        this.pumpModalQueue();
+      };
+      const abandon = () => {
+        if (done) return;
+        done = true;
+        this.detachModal();
+        if (wasPlaying) eng?.resume();
+        // R4-M1: settle with the abandoned sentinel instead of leaving the
+        // promise pending forever — Objectives releases awaitingChoice on
+        // CHOICE_ABANDONED without advancing (the run is being torn down).
+        resolve(CHOICE_ABANDONED);
       };
       const onKey = (e: KeyboardEvent) => {
         const n = parseInt(e.key, 10);
@@ -355,6 +487,12 @@ export class HUD {
       el.append(h, sub, hint, opts);
       this.root.appendChild(el);
       document.addEventListener('keydown', onKey);
+      // N5: track the element + keydown listener so clearOverlays() removes
+      // them on teardown/restart. R4-M1: the settle resolves with
+      // CHOICE_ABANDONED (see abandon above) — Objectives releases
+      // awaitingChoice on the sentinel instead of advancing, so a torn-down
+      // choice can never freeze the quest sequencer.
+      this.trackModal({ el, onKey, settle: abandon });
     });
   }
 
@@ -447,10 +585,28 @@ export class HUD {
         ac.className = 'ma';
         ac.textContent = m.equipped ? 'EQUIPPED' : m.owned ? 'EQUIP' : `BUY ◆${m.cost}`;
         d.append(nm, ds, ac);
+        let denyTimer: ReturnType<typeof setTimeout> | undefined;
         d.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (m.equipped || m.owned) opts.onToggleModifier?.(m.id);
-          else opts.onBuyModifier?.(m.id);
+          if (m.equipped || m.owned) { opts.onToggleModifier?.(m.id); return; }
+          if ((opts.merit ?? 0) < m.cost) {
+            // N10: insufficient merit — visible feedback instead of a silent
+            // no-op. purchaseModifier would reject this too, so don't call
+            // through (avoids a pointless title re-render). Toast can't be
+            // used here: hud.update doesn't run on the title screen, so a
+            // toast would freeze on screen — shake + label flash instead.
+            d.classList.remove('denied');
+            void d.offsetWidth; // restart the CSS shake on repeat clicks
+            d.classList.add('denied');
+            ac.textContent = `NEED ◆${m.cost - (opts.merit ?? 0)} MORE`;
+            clearTimeout(denyTimer);
+            denyTimer = setTimeout(() => {
+              d.classList.remove('denied');
+              ac.textContent = `BUY ◆${m.cost}`;
+            }, 900);
+            return;
+          }
+          opts.onBuyModifier?.(m.id);
         });
         mods.appendChild(d);
       }
@@ -661,5 +817,12 @@ export class HUD {
     // N8: story cards are appended straight to root (non-blocking) — a card
     // shown just before a restart must not survive into the new run
     this.card?.remove(); this.card = null;
+    // R4-M1: drop queued modals first — a level-up queued in a dying run must
+    // never pop over the new run's UI. Then dismiss the live modal (N5).
+    this.modalQueue.length = 0;
+    // N5: dismiss any live level-up/choice modal — removes the element and
+    // its document keydown listener, then settles the promise so no stale
+    // modal callback survives teardown/restart
+    this.abandonModal();
   }
 }

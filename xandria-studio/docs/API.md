@@ -192,6 +192,38 @@ spec: `{ kind: 'stalker' as EnemyKind, count: 3, health: 60, speed: 6, damage: 1
 Custom upgrades join the 3-choice level-up pool immediately and apply through
 `Progression.applyUpgrade(id, avatar)` like built-ins. Duplicate registration throws.
 
+### Pre-boot registration in a real browser page (R3-M1)
+
+The per-engine API above runs after boot. A spec *injected* via
+`window.__XANDRIA_SPEC__` is validated before any engine exists, so its
+custom kinds must be registered even earlier. The player bundle is a deferred
+ES module — no page script can run between the bundle's evaluation and
+`boot()`. Instead, `player.html` carries a tiny inline classic `<script>`
+(ahead of the bundle) that installs `window.__XANDRIA__.registerEnemyKind`
+as a queue; the bundle drains the queue into the module-level registry at
+module load, before validation. A modder's own classic `<script>` placed
+anywhere in the page automatically runs in between:
+
+```html
+<script>
+  window.__XANDRIA__.registerEnemyKind('stalker', {
+    base: 'walker', name: 'Stalker',
+    tint: { shirt: '#1a0a2e', pants: '#0a0a12', accent: '#c97aff' },
+  });
+</script>
+<script>
+  window.__XANDRIA_SPEC__ = /* GameSpec using { kind: 'stalker' } */;
+</script>
+```
+
+Exported standalone games (`xandria-game.html`, via `scripts/export.ts` or the
+Studio Export button) carry the inline script automatically — open the file,
+add the two scripts above, and the custom kind validates and spawns. A bad
+queued def fails loudly (into `window.__XANDRIA_ERRORS`, never silent). If an
+injected spec is still invalid, boot falls back to the default game and now
+shows a dismissible on-screen banner in addition to the console warning
+(R3-N1).
+
 ---
 
 ## 10. GameSpec schema — `spec/schema.ts`

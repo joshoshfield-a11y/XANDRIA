@@ -678,6 +678,11 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       const msg = escapeHtml(e instanceof Error ? e.message : String(e)).replace(/\n/g, '<br/>');
       errBox.innerHTML = `<div class="xed-err"><b>load</b>: ${msg}</div>`;
       errBox.classList.add('show');
+      // R3-N2: the working spec is stale after a failed load — never leave
+      // PLAY armed on it. It re-arms on the next successful load (setSpec ->
+      // refreshValidation) or once the user edits the spec back to validity.
+      playBtn.disabled = true;
+      okLine.style.display = 'none';
     }
   });
 

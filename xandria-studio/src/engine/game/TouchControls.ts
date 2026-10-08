@@ -133,19 +133,39 @@ const CSS = `
   background:rgba(20,30,44,.55); color:#e8ecf1; font-weight:800; font-size:26px;
   display:flex; align-items:center; justify-content:center; touch-action:none; font-family:'Segoe UI',system-ui,sans-serif; }
 .xtouch .dpad.held { background:rgba(255,210,63,.45); border-color:#ffd23f; }
-.xtouch .pausebtn { position:absolute; top:76px; right:16px; width:42px; height:42px; border-radius:10px;
+/* R3-T1: the old hard-coded top offset overlapped the HUD score panel on
+   narrow viewports (the panel is 81–101 px tall depending on genre).
+   The CSS value below is now only a FALLBACK — the real offset is computed
+   from the score panel's measured height at layout time (see
+   positionPauseButton()), keeping an 8 px gap below the panel's bottom edge. */
+.xtouch .pausebtn { position:absolute; top:calc(max(12px, env(safe-area-inset-top)) + 96px); right:16px; width:42px; height:42px; border-radius:10px;
   border:1px solid rgba(140,180,220,.4); background:rgba(20,30,44,.55); color:#e8ecf1; font-size:17px;
   display:flex; align-items:center; justify-content:center; touch-action:none; }
 `;
 
 const STICK_R = 56; // px travel radius for stickVector
 
+/** Gap kept between the HUD score panel's bottom edge and the pause button. */
+export const PAUSE_BUTTON_GAP = 8;
+
+/**
+ * R3-T1: top offset (px, relative to the touch overlay) for the pause button,
+ * computed from the score panel's measured bottom edge rather than hard-coded.
+ * `scoreBottom` and `overlayTop` are both viewport-space (getBoundingClientRect)
+ * values; the subtraction converts to overlay-relative space. Pure — unit-tested.
+ */
+export function pauseButtonTop(scoreBottom: number, overlayTop: number, gap: number = PAUSE_BUTTON_GAP): number {
+  return Math.ceil(scoreBottom - overlayTop + gap);
+}
+
 export class TouchControls {
   /** False on desktop: no DOM is built and every method is a no-op. */
   readonly active: boolean;
   private input: Input;
   private layout: TouchLayout;
+  private container: HTMLElement;
   private root: HTMLElement | null = null;
+  private pauseBtn: HTMLElement | null = null;
   private visible = false;
   private held = new Set<Action>();
   private moveId: number | null = null;
@@ -163,6 +183,7 @@ export class TouchControls {
   constructor(container: HTMLElement, input: Input, genre: string) {
     this.input = input;
     this.layout = layoutForGenre(genre);
+    this.container = container;
     this.active = isTouchDevice() && typeof document !== 'undefined';
     if (!this.active) return;
     input.touchManaged = true; // Input's built-in canvas touch handlers stand down
@@ -193,21 +214,81 @@ export class TouchControls {
     pb.textContent = '⏸';
     const onPb = (e: PointerEvent) => { e.preventDefault(); e.stopPropagation(); this.input.tap('pause'); };
     pb.addEventListener('pointerdown', onPb);
+    // R3-T2: cancel touchstart (non-passive) so the browser never synthesizes
+    // the compatibility mousedown/mouseup/click at the tap point. That click
+    // landed on the PAUSED overlay's RESUME and instantly un-paused, so the
+    // first tap usually failed. Canceling touchstart does NOT suppress pointer
+    // events, so the pointerdown → tap('pause') above still fires.
+    const onPbTs = (e: TouchEvent) => { e.preventDefault(); };
+    pb.addEventListener('touchstart', onPbTs, { passive: false });
     root.appendChild(pb);
-    this.disposers.push(() => pb.removeEventListener('pointerdown', onPb));
+    this.pauseBtn = pb;
+    this.disposers.push(() => {
+      pb.removeEventListener('pointerdown', onPb);
+      pb.removeEventListener('touchstart', onPbTs);
+    });
+    // R3-T1: the score panel's height varies by genre / CSS breakpoint — keep
+    // the pause button clear of it on resize/orientation change while visible.
+    const onResize = () => { if (this.visible) this.positionPauseButton(); };
+    window.addEventListener('resize', onResize);
+    this.disposers.push(() => window.removeEventListener('resize', onResize));
   }
 
   // ----- public API -----
 
   /** Show/hide the overlay (Engine calls this with state === 'playing'). */
   setVisible(v: boolean) {
-    if (!this.active || v === this.visible) return;
+    if (!this.active) return;
+    if (v === this.visible) {
+      // R2-N13: engine.restart() resets Input while the overlay stays visible,
+      // leaving `held` stale — racing's auto-forward 'forward' is the visible
+      // case: the overlay believes gas is held while the car gets none.
+      // Re-apply anything held that the input lost so the two stay consistent.
+      if (v) this.resyncHeld();
+      return;
+    }
     this.visible = v;
     this.root!.classList.toggle('hidden', !v);
     if (v) {
+      // R3-T1: measure the score panel now that the overlay is laid out (the
+      // CSS `top` on .pausebtn is only a fallback). Runs on every transition
+      // to playing so orientation changes re-clear the panel.
+      this.positionPauseButton();
       if (this.layout.autoForward) this.hold('forward');
     } else {
       this.releaseAll();
+    }
+  }
+
+  /**
+   * R3-T1: place the pause button below the HUD score panel's measured bottom
+   * edge (+ PAUSE_BUTTON_GAP). The panel is 81–101 px tall depending on genre
+   * and CSS breakpoint, so a hard-coded offset can't clear it everywhere.
+   * No-ops (keeping the CSS fallback) when there is no HUD score panel in the
+   * container or it isn't laid out yet.
+   */
+  private positionPauseButton() {
+    const pb = this.pauseBtn;
+    if (!pb || !this.root) return;
+    const score = this.container.querySelector('.xhud .score');
+    if (!score) return; // no HUD score panel — keep the CSS fallback
+    const sr = score.getBoundingClientRect();
+    if (sr.height <= 0) return; // not laid out yet — keep the CSS fallback
+    const rr = this.root.getBoundingClientRect();
+    pb.style.top = `${pauseButtonTop(sr.bottom, rr.top)}px`;
+  }
+
+  /**
+   * R2-N13: re-press every held action the Input no longer has. In-place
+   * restart clears Input (pressAction state) without touching this.held; this
+   * closes the gap so held-state is consistent across restarts. Idempotent —
+   * pressAction() is a no-op for actions already down. Public so automation
+   * hooks (and a future engine restart path) can invoke it directly.
+   */
+  resyncHeld() {
+    if (!this.active) return;
+    for (const a of this.held) {
+      if (!this.input.pressed(a)) this.input.pressAction(a);
     }
   }
 
@@ -219,6 +300,7 @@ export class TouchControls {
     this.input.touchManaged = false;
     this.root?.remove();
     this.root = null;
+    this.pauseBtn = null;
   }
 
   // ----- internals -----

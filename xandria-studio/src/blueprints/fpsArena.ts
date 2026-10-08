@@ -13,7 +13,6 @@ import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
 import { AssetRegistry } from '../engine/game/Assets';
 import {
-  showIntroCard,
   makeCampaignObjectives,
   makeLevelUpFlow,
   grantKillXp,
@@ -55,8 +54,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
   engine.assetBridge.dispose();
 
-  // campaign layer: intro card + XP progression (non-blocking at boot)
-  showIntroCard(engine, spec);
+  // campaign layer: XP progression (the intro card is shown by Engine.beginPlay)
   const prog = new Progression(engine);
   let notifyLevelUp: () => void = () => {};
   // content depth: enemy variants, timed pickup effects, chapter dressing
@@ -98,8 +96,10 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
-      objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
+      // N6: grant XP before recording the kill — addProgress may end the run
+      // (engine.win), and the level-up modal must never open over the end screen
       grantKillXp(prog, notifyLevelUp);
+      objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
@@ -297,7 +297,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       lastStage = stageIdx;
       brutesSpawnedForStage = 0; // M4: boss quota is per-stage
       dresser.dress(spec, stageIdx, rng.fork(5000 + stageIdx), { cx: 0, cz: 0, half: arenaR - 4, yAt: (x, z) => terrain.heightAt(x, z) });
-      variants.applyStageScaling(stageIdx);
+      // R4-N1: difficulty keys off chapters cleared (branch-aware), not the quest-graph array index.
+      variants.applyStageScaling(objectives.stagesCleared);
       variants.notifyStage(stageIdx, isBossStageActive(spec, objectives));
     }
 

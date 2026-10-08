@@ -5,14 +5,18 @@
  * Stage mode: when spec.objective.stages is present (quest chain), stages form
  * a small directed graph. A stage with `choices` pauses the game and asks the
  * player to pick the next stage; a stage with `next` jumps to the named stage;
- * otherwise the next stage in array order runs. A stage with no successors is
- * terminal and wins the run (using its `winText` when set).
+ * otherwise the next stage in array order runs (schema.ts: "Default: the next
+ * stage in array order"). Only an explicit `next: []` — or the last stage in
+ * the array — is terminal and wins the run (using its `winText` when set);
+ * a branch-terminal stage without `next: []` falls through to the next array
+ * element, so hand-written specs must declare it explicitly.
  * Legacy single-objective behavior is unchanged when stages is absent, and a
  * plain linear stages array (no ids/next/choices) walks in order as before.
  */
 import type { Engine } from '../Engine';
 import type { ObjectiveSpec, ObjectiveStage, ObjectiveType } from '@spec';
 import type { RunStats } from './HUD';
+import { CHOICE_ABANDONED } from './HUD';
 
 export type StageCompleteHandler = (
   index: number,
@@ -182,6 +186,10 @@ export class Objectives {
         .then((picked) => {
           this.awaitingChoice = false;
           if (this.done) return;
+          // R4-M1: the choice modal was torn down without a pick (restart /
+          // clearOverlays). Release the sequencer without advancing — the run
+          // is being rebuilt or is dead; advancing here would corrupt it.
+          if (picked === CHOICE_ABANDONED) return;
           const targetId = choices[picked]?.next;
           const idx = typeof targetId === 'string' ? this.idToIndex.get(targetId) : undefined;
           if (idx === undefined) {

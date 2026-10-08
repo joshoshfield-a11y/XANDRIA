@@ -11,7 +11,6 @@ import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
 import {
-  showIntroCard,
   makeCampaignObjectives,
   makeLevelUpFlow,
   grantKillXp,
@@ -47,8 +46,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // M7: drop stale asset-bridge roots left by the previous run (no-op at boot).
   engine.assetBridge.dispose();
 
-  // campaign layer: intro card + XP progression (non-blocking at boot)
-  showIntroCard(engine, spec);
+  // campaign layer: XP progression (the intro card is shown by Engine.beginPlay)
   const prog = new Progression(engine);
   let notifyLevelUp: () => void = () => {};
   // content depth: enemy variants, timed pickup effects, chapter dressing
@@ -114,8 +112,10 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
       variants.onEnemyDeath(e);
       engine.score += Math.round(100 * fx.scoreMult());
       hud.setScore(engine.score);
-      objectives.addProgress(1, 'kill');
+      // N6: grant XP before recording the kill — addProgress may end the run
+      // (engine.win), and the level-up modal must never open over the end screen
       grantKillXp(prog, notifyLevelUp);
+      objectives.addProgress(1, 'kill');
     },
   });
   // enemy variants: spikeballs (never stomp) + skyrays (sine patrol)
@@ -236,7 +236,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
         cx: courseCx, cz: 0, half: 70,
         yAt: () => startY,
       }, { floating: true });
-      variants.applyStageScaling(stageIdx);
+      // R4-N1: difficulty keys off chapters cleared (branch-aware), not the quest-graph array index.
+      variants.applyStageScaling(objectives.stagesCleared);
     }
 
     const pp = avatar.ctrl.position;
