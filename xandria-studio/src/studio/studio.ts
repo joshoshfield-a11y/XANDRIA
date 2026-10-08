@@ -12,6 +12,22 @@ import type { XandriaSpecInspector } from './inspector/inspectorPanel';
 import { createEditorPanel, readProjectFile, escapeHtml, type EditorPanel } from './editor/editorPanel';
 import { projectToJson } from './editor/specOps';
 import { injectSpecScript } from '../../scripts/specInject';
+import { isBillingEnabled } from './auth';
+import {
+  apiGate,
+  createBillingState,
+  exportGate,
+  gateGeneration,
+  handleCheckoutReturn,
+  mountAccountChip,
+  mountPricing,
+  recordGeneration,
+  steamGate,
+  studioSplashEnabled,
+  type BillingState,
+  type Notify,
+} from './billing';
+import { SIGNIN_NUDGE, upgradeNudge } from './tierGate';
 
 declare global {
   interface Window { xandria?: { saveFile(name: string, content: string): Promise<string | null> } }
@@ -71,14 +87,20 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
+  // Billing is purely additive: when the supabase env vars are absent the
+  // account chip, pricing tab and gates are omitted and the studio behaves
+  // exactly as the launch build did.
+  const billingOn = isBillingEnabled();
 
   root.innerHTML = `
     <div id="layout">
       <div id="side">
         <h1>XANDRIA STUDIO<small>INTENT → PLAYABLE GAME</small></h1>
+        ${billingOn ? '<div id="acct-host"></div>' : ''}
         <div class="row" id="viewtabs" style="gap:6px">
           <button id="tab-generate" class="primary" style="flex:1">✨ GENERATE</button>
           <button id="tab-editor" style="flex:1">🛠 EDITOR</button>
+          ${billingOn ? '<button id="tab-pricing" style="flex:1">💎 PRICING</button>' : ''}
         </div>
         <div id="view-generate" style="display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow-y:auto">
         <div><div class="lbl">DESCRIBE YOUR GAME</div><textarea id="prompt" placeholder="a dark knight questing through volcanic ruins, brutal difficulty…"></textarea></div>
@@ -101,9 +123,17 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
         </details>
         <button class="primary" id="generate">⚡ GENERATE &amp; PLAY</button>
         <div class="row"><button id="export" style="flex:1">⬇ EXPORT .HTML</button><button id="copy" style="flex:1">🔗 SHARE LINK</button></div>
+        ${billingOn ? `<div id="export-extra" style="display:flex;flex-direction:column;gap:8px">
+          <div class="row">
+            <button id="steam-export" style="flex:1" title="Steam-ready export (Pro tier)">📦 STEAM <span class="badge">PRO</span></button>
+            <button id="api-access" style="flex:1" title="Programmatic generation API (Pro tier)">🔌 API <span class="badge">PRO</span></button>
+          </div>
+          <div id="splash-row" style="font-size:11px;color:#5a6a85"></div>
+        </div>` : ''}
         <div id="meta"></div>
         </div><!-- /view-generate -->
         <div id="view-editor" style="display:none;flex:1;min-height:0;overflow:hidden"></div>
+        ${billingOn ? '<div id="view-pricing" style="display:none;flex:1;min-height:0;overflow-y:auto"></div>' : ''}
       </div>
       <div id="frame-wrap"><div id="empty">✦<br/>GENERATE A GAME TO PLAY IT HERE</div><iframe id="game" style="display:none"></iframe></div>
     </div>`;
@@ -152,6 +182,38 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   let lastSpec = '';
   const playerBase = opts.playerUrl ?? 'player.html';
 
+  // ---- Billing (subscription checkout). Additive and hook-based: when the
+  // ---- supabase env vars are unset, `billing.enabled` is false and every
+  // ---- gate below passes through, leaving launch behavior untouched.
+  const notifyMeta: Notify = (html) => { meta.innerHTML += `<br/>${html}`; };
+  let renderAcct: () => void = () => {};
+  const billing: BillingState = createBillingState(() => { renderAcct(); renderExportRow(); });
+  const acctHost = root.querySelector<HTMLElement>('#acct-host');
+  if (billing.enabled && acctHost) {
+    renderAcct = mountAccountChip(acctHost, billing, notifyMeta);
+  }
+  const renderExportRow = () => {
+    const row = root.querySelector<HTMLElement>('#splash-row');
+    if (!row || !billing.enabled) return;
+    const tier = billing.me?.tier ?? null;
+    if (!billing.email) {
+      row.innerHTML = '<i>sign in to manage the splash credit</i>';
+    } else if (tier === 'free' || tier === null) {
+      row.innerHTML = '✦ splash credit: <b style="color:#8fa5c8">always on</b> <span style="opacity:.7">(free tier)</span>';
+    } else {
+      row.innerHTML = `<label style="cursor:pointer;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="splash-toggle"${billing.splashOn ? ' checked' : ''} style="width:auto"/>
+        ✦ show &ldquo;Made with XANDRIA&rdquo; splash on my games</label>`;
+      const cb = row.querySelector<HTMLInputElement>('#splash-toggle')!;
+      cb.addEventListener('change', () => { billing.splashOn = cb.checked; });
+    }
+  };
+  renderExportRow();
+  if (billing.enabled) void handleCheckoutReturn(billing, notifyMeta);
+
+  /** ?splash= flag for preview iframe URLs, from the viewer's tier. */
+  const splashQuery = () => (billing.enabled ? `&splash=${studioSplashEnabled(billing) ? 1 : 0}` : '');
+
   // Spec inspector (v1 edit loop): mounted next to the preview; patches are
   // applied via specInspector and the preview iframe reloads with the new spec.
   const frameWrap = root.querySelector<HTMLElement>('#frame-wrap')!;
@@ -160,7 +222,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
 
   const reloadPreview = () => {
     if (!lastSpec) return;
-    frame.src = `${playerBase}?spec=${b64url(lastSpec)}`;
+    frame.src = `${playerBase}?spec=${b64url(lastSpec)}${splashQuery()}`;
     frame.style.display = 'block';
     empty.style.display = 'none';
   };
@@ -186,7 +248,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       if (!v.ok) { meta.textContent = 'SPEC INVALID:\n' + v.errors.join('\n'); return; }
       lastSpec = JSON.stringify(spec);
       inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
-      frame.src = `${playerBase}?spec=${b64url(lastSpec)}&autostart=1`;
+      frame.src = `${playerBase}?spec=${b64url(lastSpec)}&autostart=1${splashQuery()}`;
       frame.style.display = 'block';
       empty.style.display = 'none';
     },
@@ -220,18 +282,23 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
 
   const tabGen = root.querySelector<HTMLButtonElement>('#tab-generate')!;
   const tabEd = root.querySelector<HTMLButtonElement>('#tab-editor')!;
+  const tabPricing = root.querySelector<HTMLButtonElement>('#tab-pricing');
   const viewGen = root.querySelector<HTMLElement>('#view-generate')!;
   const viewEd = root.querySelector<HTMLElement>('#view-editor')!;
-  const showTab = (which: 'generate' | 'editor') => {
-    const isGen = which === 'generate';
-    viewGen.style.display = isGen ? 'flex' : 'none';
-    viewEd.style.display = isGen ? 'none' : 'flex';
-    tabGen.classList.toggle('primary', isGen);
-    tabEd.classList.toggle('primary', !isGen);
-    if (!isGen) editor.setSpec(editorHost.getSpec());
+  const viewPricing = root.querySelector<HTMLElement>('#view-pricing');
+  const showTab = (which: 'generate' | 'editor' | 'pricing') => {
+    viewGen.style.display = which === 'generate' ? 'flex' : 'none';
+    viewEd.style.display = which === 'editor' ? 'flex' : 'none';
+    if (viewPricing) viewPricing.style.display = which === 'pricing' ? 'flex' : 'none';
+    tabGen.classList.toggle('primary', which === 'generate');
+    tabEd.classList.toggle('primary', which === 'editor');
+    if (tabPricing) tabPricing.classList.toggle('primary', which === 'pricing');
+    if (which === 'editor') editor.setSpec(editorHost.getSpec());
+    if (which === 'pricing' && viewPricing) mountPricing(viewPricing, billing, notifyMeta);
   };
   tabGen.addEventListener('click', () => showTab('generate'));
   tabEd.addEventListener('click', () => showTab('editor'));
+  if (tabPricing) tabPricing.addEventListener('click', () => showTab('pricing'));
 
   const applyOnline = (spec: GameSpec): GameSpec => {
     const next = JSON.parse(JSON.stringify(spec)) as GameSpec;
@@ -255,6 +322,23 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   };
 
   const generate = async () => {
+    // ---- Billing gate: sign-in required, quota enforced. A backend outage
+    // ---- warns and proceeds (a down backend must not brick generation).
+    if (billing.enabled) {
+      const gate = await gateGeneration(billing);
+      if (!gate.ok) {
+        if (gate.reason === 'signin') {
+          notifyMeta(`<i>${SIGNIN_NUDGE}</i>`);
+          root.querySelector<HTMLInputElement>('#acct-email')?.focus();
+        } else if (gate.reason === 'limit') {
+          notifyMeta(`<i>${upgradeNudge('generate', billing.me?.tier ?? null)}</i>`);
+          showTab('pricing');
+        } else {
+          notifyMeta('<i>billing service unreachable — generating anyway (not counted).</i>');
+        }
+        if (gate.reason !== 'unavailable') return;
+      }
+    }
     const intent = prompt.value.trim() || 'a heroic adventure in the forest';
     const genOpts = {
       genre: (genreSel.value || undefined) as Genre | undefined,
@@ -281,7 +365,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     lastSpec = JSON.stringify(spec);
     inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
     editor.setSpec(spec);
-    const url = `${playerBase}?spec=${b64url(lastSpec)}`;
+    const url = `${playerBase}?spec=${b64url(lastSpec)}${splashQuery()}`;
     frame.src = url;
     frame.style.display = 'block';
     empty.style.display = 'none';
@@ -289,6 +373,11 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       `<span class="badge">${GENRE_LABELS[spec.meta.genre]}</span><span class="badge">${spec.theme.environment}</span>` +
       `<span class="badge">${spec.theme.timeOfDay}</span><span class="badge">${spec.rules.difficulty}</span>` +
       `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b style="color:#8fa5c8">${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}`;
+    // Record the COMPLETED generation against the monthly quota. This line is
+    // only reached on success — failed builds don't count.
+    if (billing.enabled) {
+      void recordGeneration().then(() => billing.refresh());
+    }
   };
 
   root.querySelector('#generate')!.addEventListener('click', generate);
@@ -296,7 +385,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
 
   root.querySelector('#copy')!.addEventListener('click', async () => {
     if (!lastSpec) return;
-    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}${playerBase}?spec=${b64url(lastSpec)}`;
+    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}${playerBase}?spec=${b64url(lastSpec)}${splashQuery()}`;
     await navigator.clipboard.writeText(url).catch(() => {});
     meta.innerHTML += '<br/><i>link copied</i>';
   });
@@ -304,23 +393,36 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   // Exporting from `vite dev` serves the dev module graph, not the singlefile
   // bundle — the result is a broken file. Disable in dev with an explanation.
   const exportBtn = root.querySelector<HTMLButtonElement>('#export')!;
+  const steamBtn = root.querySelector<HTMLButtonElement>('#steam-export');
   if (import.meta.env.DEV) {
     exportBtn.disabled = true;
     exportBtn.title = 'Export needs a production build: run npm run build, then export from dist/index.html';
+    if (steamBtn) {
+      steamBtn.disabled = true;
+      steamBtn.title = exportBtn.title;
+    }
   }
 
-  root.querySelector('#export')!.addEventListener('click', async () => {
-    if (!lastSpec) return;
+  // Shared export flow. itch.io HTML export needs hobby+; Steam-ready export
+  // needs pro. The splash flag is baked per the exporter's tier (free →
+  // forced on; paid → the studio splash toggle, default off).
+  const doExport = async (kind: 'itch' | 'steam') => {
+    if (!lastSpec) { meta.innerHTML += '<br/><i>generate a game first</i>'; return; }
+    if (billing.enabled) {
+      const g = kind === 'itch' ? exportGate(billing) : steamGate(billing);
+      if (!g.ok) { meta.innerHTML += `<br/><i>${g.nudge}</i>`; return; }
+    }
     try {
       // fetch the built single-file player and inject the spec
       const res = await fetch(`${playerBase}?export-template`);
       let html = await res.text();
       // Escape </script inside the spec so it can't break out of the injection block
       const specSafe = lastSpec.replace(/<\/script/gi, '<\\/script');
+      const splashFlag = studioSplashEnabled(billing);
       // Throws (loudly) if the bundle has no <head> tag — never silently
       // ship the default spec instead of the user's game.
-      html = injectSpecScript(html, `<script>window.__XANDRIA_SPEC__=${specSafe};</script>`);
-      const name = 'xandria-game.html';
+      html = injectSpecScript(html, `<script>window.__XANDRIA_SPEC__=${specSafe};window.__XANDRIA_SPLASH__=${splashFlag};</script>`);
+      const name = kind === 'steam' ? 'xandria-game-steam.html' : 'xandria-game.html';
       if (window.xandria?.saveFile) {
         await window.xandria.saveFile(name, html);
       } else {
@@ -329,10 +431,21 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
         a.download = name;
         a.click();
       }
-      meta.innerHTML += '<br/><i>exported xandria-game.html — double-click to play offline</i>';
+      meta.innerHTML += kind === 'steam'
+        ? `<br/><i>exported ${name} — Steam-ready single-file build; drop it into your Steam depot wrapper</i>`
+        : `<br/><i>exported ${name} — double-click to play offline</i>`;
     } catch (e) {
       meta.innerHTML += `<br/><i>export failed: ${escapeHtml(e instanceof Error ? e.message : String(e))}</i>`;
     }
+  };
+
+  root.querySelector('#export')!.addEventListener('click', () => void doExport('itch'));
+  if (steamBtn) steamBtn.addEventListener('click', () => void doExport('steam'));
+  const apiBtn = root.querySelector<HTMLButtonElement>('#api-access');
+  if (apiBtn) apiBtn.addEventListener('click', () => {
+    const g = apiGate(billing);
+    if (!g.ok) { meta.innerHTML += `<br/><i>${g.nudge}</i>`; return; }
+    meta.innerHTML += '<br/><i>API access ships with the backend — your key will appear here when it does.</i>';
   });
 }
 

@@ -16,10 +16,17 @@ import {
   type CustomEnemyKindDef,
 } from '../engine/game/Modding';
 import { applyLoadout, loadProfile } from '../engine/game/Profile';
+import { resolveSplash, showSplash } from './splash';
 
 declare global {
   interface Window {
     __XANDRIA_SPEC__?: GameSpec;
+    /**
+     * Splash credit flag. Baked into standalone exports by the studio
+     * (free tier → true, paid tiers → the user's toggle, default false);
+     * also settable via ?splash=0|1. Defaults to true (shown).
+     */
+    __XANDRIA_SPLASH__?: boolean;
     __XANDRIA__?: {
       /** Set at boot(); absent on the pre-boot object below. */
       engine?: Engine;
@@ -156,6 +163,12 @@ function resolveSpec(): GameSpec {
 function boot() {
   const spec = resolveSpec();
   document.title = `${spec.meta.name} — XANDRIA`;
+  // "Made with XANDRIA" splash credit: unskippable ~3s overlay, forced on for
+  // the free tier, removable for paid tiers. Non-blocking — the engine boots
+  // underneath while the overlay covers the screen.
+  if (resolveSplash(location.search, window.__XANDRIA_SPLASH__)) {
+    showSplash();
+  }
   const container = document.getElementById('app')!;
   const engine = new Engine(container, spec);
   const build = BLUEPRINTS[spec.meta.genre];
