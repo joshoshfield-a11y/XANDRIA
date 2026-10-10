@@ -16,6 +16,7 @@ import { isBillingEnabled } from './auth';
 import {
   apiGate,
   createBillingState,
+  decideGateAction,
   exportGate,
   gateGeneration,
   handleCheckoutReturn,
@@ -27,7 +28,6 @@ import {
   type BillingState,
   type Notify,
 } from './billing';
-import { SIGNIN_NUDGE, upgradeNudge } from './tierGate';
 
 declare global {
   interface Window { xandria?: { saveFile(name: string, content: string): Promise<string | null> } }
@@ -322,21 +322,17 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   };
 
   const generate = async () => {
-    // ---- Billing gate: sign-in required, quota enforced. A backend outage
-    // ---- warns and proceeds (a down backend must not brick generation).
+    // ---- Billing gate: sign-in required, quota enforced server-side.
+    // ---- Fail-closed (M-1): every gate failure blocks generation — a
+    // ---- backend outage must not become a quota bypass.
     if (billing.enabled) {
       const gate = await gateGeneration(billing);
-      if (!gate.ok) {
-        if (gate.reason === 'signin') {
-          notifyMeta(`<i>${SIGNIN_NUDGE}</i>`);
-          root.querySelector<HTMLInputElement>('#acct-email')?.focus();
-        } else if (gate.reason === 'limit') {
-          notifyMeta(`<i>${upgradeNudge('generate', billing.me?.tier ?? null)}</i>`);
-          showTab('pricing');
-        } else {
-          notifyMeta('<i>billing service unreachable — generating anyway (not counted).</i>');
-        }
-        if (gate.reason !== 'unavailable') return;
+      const action = decideGateAction(gate, billing.me?.tier ?? null);
+      if (!action.proceed) {
+        notifyMeta(`<i>${action.nudge}</i>`);
+        if (action.focusSignin) root.querySelector<HTMLInputElement>('#acct-email')?.focus();
+        if (action.showPricing) showTab('pricing');
+        return;
       }
     }
     const intent = prompt.value.trim() || 'a heroic adventure in the forest';

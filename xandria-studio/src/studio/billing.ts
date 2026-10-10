@@ -161,8 +161,8 @@ export type GateResult = { ok: true } | { ok: false; reason: 'signin' | 'limit' 
 /**
  * Should this generation be allowed to run? Pure w.r.t. the caller's quota:
  * no session → 'signin'; quota exhausted → 'limit'; backend unreachable →
- * 'unavailable' (caller decides; the studio warns and proceeds so a backend
- * outage doesn't brick generation).
+ * 'unavailable'. The studio maps the result through decideGateAction, which
+ * is fail-closed: every failure blocks generation.
  */
 export async function gateGeneration(state: BillingState): Promise<GateResult> {
   if (!state.enabled) return { ok: true };
@@ -172,6 +172,44 @@ export async function gateGeneration(state: BillingState): Promise<GateResult> {
   state.me = me;
   if (me.generations_remaining <= 0) return { ok: false, reason: 'limit' };
   return { ok: true };
+}
+
+/** What the studio does with a gate result. */
+export interface GateAction {
+  proceed: boolean;
+  /** HTML nudge shown when blocked; null when proceeding. */
+  nudge: string | null;
+  focusSignin: boolean;
+  showPricing: boolean;
+}
+
+/**
+ * Fail-closed gate policy (M-1 fix). Every gate failure blocks generation:
+ * - 'signin' → nudge to sign in (focus the email field)
+ * - 'limit' → upgrade nudge (show the pricing tab)
+ * - 'unavailable' → BLOCKED with a connection-error nudge.
+ *
+ * Deliberate product-behavior change (2026-10-09): with server-side quota
+ * enforcement in POST /api/generations, the old warn-and-proceed on
+ * 'unavailable' was a one-click quota bypass (DevTools → block /api/* →
+ * generate freely, nothing counted). A signed-in user whose quota cannot
+ * be verified now does not generate. A backend outage therefore blocks
+ * generation until the backend is reachable again.
+ */
+export function decideGateAction(gate: GateResult, tier: GateTier | null): GateAction {
+  if (gate.ok) return { proceed: true, nudge: null, focusSignin: false, showPricing: false };
+  if (gate.reason === 'signin') {
+    return { proceed: false, nudge: SIGNIN_NUDGE, focusSignin: true, showPricing: false };
+  }
+  if (gate.reason === 'limit') {
+    return { proceed: false, nudge: upgradeNudge('generate', tier), focusSignin: false, showPricing: true };
+  }
+  return {
+    proceed: false,
+    nudge: 'Billing service unreachable — your quota could not be verified, so generation is blocked. Check your connection and try again.',
+    focusSignin: false,
+    showPricing: false,
+  };
 }
 
 const chipCss = `

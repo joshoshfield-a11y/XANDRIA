@@ -212,12 +212,24 @@ export class SupabaseBillingStore implements BillingStore {
   }
 }
 
-/** Look up a user's subscription row by user id. */
+/**
+ * Look up a user's subscription row by user id.
+ *
+ * A user can legitimately own MULTIPLE rows: every new Stripe subscription
+ * inserts a fresh row (upserts key on stripe_subscription_id), and canceled
+ * rows are kept for history. So we return the most recently updated row —
+ * never .maybeSingle(), which throws PGRST116 the moment a second row
+ * exists and would 500 /api/me and /api/generations for that user
+ * permanently (H-2: subscribe → cancel → resubscribe hits this in normal
+ * use, no malice required).
+ */
 export async function getSubscriptionByUserId(userId: string): Promise<SubscriptionRow | null> {
   const { data, error } = await getServerClient()
     .from("subscriptions")
     .select("*")
     .eq("user_id", userId)
+    .order("updated_at", { ascending: false })
+    .limit(1)
     .maybeSingle();
   if (error) throw error;
   return (data as SubscriptionRow | null) ?? null;
