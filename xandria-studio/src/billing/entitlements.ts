@@ -32,6 +32,11 @@ export interface SubscriptionLike {
 /** Statuses Stripe uses that still grant paid access. */
 const PAID_ACTIVE_STATUSES = new Set(["active", "trialing"]);
 
+/** True when a subscription status grants paid access (shared with the api/ layer). */
+export function isPaidActive(status: string): boolean {
+  return PAID_ACTIVE_STATUSES.has(status);
+}
+
 /**
  * Resolve the effective tier from a subscription row (or null when the user
  * has none). Paid tiers only apply while the subscription is active/trialing;

@@ -40,7 +40,17 @@ export class PostFX {
     this.camera = camera;
     const quality = spec.custom?.quality ?? 'retro';
     try {
-      this.composer = new EffectComposer(renderer);
+      // T1-1: MSAA inside the composer. three 0.182's EffectComposer builds its
+      // default render target with samples: 0, so without an explicit
+      // multisampled target every non-retro game shipped with ZERO
+      // antialiasing (the renderer's antialias:true only affects the default
+      // framebuffer, which the composer bypasses).
+      const samples = quality === 'retro' ? 2 : 4;
+      const target = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+        type: THREE.HalfFloatType,
+        samples,
+      });
+      this.composer = new EffectComposer(renderer, target);
       this.composer.addPass(new RenderPass(scene, camera));
       if (spec.theme.bloom) {
         const bloom = new UnrealBloomPass(

@@ -112,7 +112,7 @@ export class Engine {
 
     this.renderer = new THREE.WebGLRenderer({ antialias: !(spec.theme.retroFilter && (spec.custom?.quality ?? 'retro') === 'retro'), powerPreference: 'high-performance' });
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     const quality = this.effectiveQuality();
@@ -140,7 +140,7 @@ export class Engine {
     this.hud.setTouchMode(this.touch.active);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
 
-    this.sky = createSky(spec, this.scene);
+    this.sky = createSky(spec, this.scene, this.effectiveQuality());
     this.renderer.toneMappingExposure = this.sky.exposure;
     this.terrainOpts = { flatCenters: opts.flatCenters, flatRadius: opts.flatRadius, noTerrain: opts.noTerrain };
     if (!opts.noTerrain) {
@@ -260,6 +260,14 @@ export class Engine {
       : this.spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
       : Math.min(devicePixelRatio, 2);
     this.renderer.setPixelRatio(pr);
+    // T1-4: keep the shadow map resolution in step with quality changes from
+    // the pause menu (resizing a shadow map requires dropping the old one).
+    const shadowRes = quality === 'high' ? 2048 : 1024;
+    const sun = this.sky?.sun;
+    if (sun && sun.shadow.mapSize.x !== shadowRes) {
+      sun.shadow.mapSize.set(shadowRes, shadowRes);
+      if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+    }
     this.resize();
   }
 

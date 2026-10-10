@@ -1,6 +1,7 @@
 import type { Stripe } from "stripe";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Tier } from "../../src/billing/entitlements.js";
+import { isPaidActive } from "../../src/billing/entitlements.js";
 import { getServerClient } from "./supabase.js";
 
 /** Shape of a row in the `subscriptions` table. */
@@ -217,20 +218,24 @@ export class SupabaseBillingStore implements BillingStore {
  *
  * A user can legitimately own MULTIPLE rows: every new Stripe subscription
  * inserts a fresh row (upserts key on stripe_subscription_id), and canceled
- * rows are kept for history. So we return the most recently updated row —
- * never .maybeSingle(), which throws PGRST116 the moment a second row
+ * rows are kept for history. So we return the most recently updated ACTIVE
+ * row — never .maybeSingle(), which throws PGRST116 the moment a second row
  * exists and would 500 /api/me and /api/generations for that user
  * permanently (H-2: subscribe → cancel → resubscribe hits this in normal
  * use, no malice required).
+ *
+ * M-2: a newer CANCELED row must not shadow an older still-active one
+ * (Hobby active → buy Pro → cancel Pro would otherwise resolve the user to
+ * free while Hobby is still paid). Fall back to the latest row overall only
+ * when nothing is active.
  */
 export async function getSubscriptionByUserId(userId: string): Promise<SubscriptionRow | null> {
   const { data, error } = await getServerClient()
     .from("subscriptions")
     .select("*")
     .eq("user_id", userId)
-    .order("updated_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order("updated_at", { ascending: false });
   if (error) throw error;
-  return (data as SubscriptionRow | null) ?? null;
+  const rows = (data as SubscriptionRow[] | null) ?? [];
+  return rows.find((r) => isPaidActive(r.status)) ?? rows[0] ?? null;
 }

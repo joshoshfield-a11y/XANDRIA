@@ -31,14 +31,13 @@ function row(overrides: Partial<SubscriptionRow>): SubscriptionRow {
 
 /**
  * Fake query builder that honors .order("updated_at", {ascending:false})
- * and .limit(1) the way PostgREST would, and records the call sequence so
- * the test can assert the query shape (latest-row selection).
+ * the way PostgREST would. The builder is thenable (awaiting it executes
+ * the query, as in the real supabase-js client).
  */
 function makeClient(rows: SubscriptionRow[]): { calls: string[] } {
   const calls: string[] = [];
   let orderCol: string | null = null;
   let orderAsc = true;
-  let limit: number | null = null;
   const chain: Record<string, unknown> = {};
   chain.eq = () => chain;
   (chain as { order: (c: string, o: { ascending: boolean }) => unknown }).order = (
@@ -50,12 +49,7 @@ function makeClient(rows: SubscriptionRow[]): { calls: string[] } {
     orderAsc = opts.ascending;
     return chain;
   };
-  (chain as { limit: (n: number) => unknown }).limit = (n: number) => {
-    calls.push(`limit:${n}`);
-    limit = n;
-    return chain;
-  };
-  (chain as { maybeSingle: () => Promise<unknown> }).maybeSingle = async () => {
+  (chain as { then: (resolve: (v: unknown) => void) => void }).then = (resolve) => {
     let out = [...rows];
     if (orderCol === "updated_at") {
       out.sort((a, b) =>
@@ -64,8 +58,7 @@ function makeClient(rows: SubscriptionRow[]): { calls: string[] } {
           : b.updated_at.localeCompare(a.updated_at),
       );
     }
-    if (limit !== null) out = out.slice(0, limit);
-    return { data: out[0] ?? null, error: null };
+    resolve({ data: out, error: null });
   };
   mockGetServerClient.mockReturnValue({
     from: (table: string) => {
@@ -100,9 +93,10 @@ describe("getSubscriptionByUserId latest-row selection (H-2)", () => {
     expect(result).not.toBeNull();
     expect(result!.stripe_subscription_id).toBe("sub_new");
     expect(result!.status).toBe("active");
-    // Latest-row query shape (not .maybeSingle() on an unordered multi-row result).
+    // Newest-first query shape (M-2: selection now happens in JS over the
+    // ordered rows — no .maybeSingle() on a multi-row result, no .limit(1)).
     expect(calls).toContain("order:updated_at:false");
-    expect(calls).toContain("limit:1");
+    expect(calls).not.toContain("limit:1");
   });
 
   it("returns the single row when only one exists", async () => {
@@ -116,5 +110,70 @@ describe("getSubscriptionByUserId latest-row selection (H-2)", () => {
     makeClient([]);
     const result = await getSubscriptionByUserId("user-1");
     expect(result).toBeNull();
+  });
+});
+
+describe("getSubscriptionByUserId active-row preference (M-2)", () => {
+  it("prefers the newest ACTIVE row over a newer canceled row", async () => {
+    // Hobby active (older) → bought Pro (newer) → canceled Pro.
+    // The canceled Pro must not shadow the still-active Hobby.
+    const hobby = row({
+      stripe_subscription_id: "sub_hobby",
+      tier: "hobby",
+      status: "active",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
+    const proCanceled = row({
+      stripe_subscription_id: "sub_pro",
+      tier: "pro",
+      status: "canceled",
+      updated_at: "2026-10-05T00:00:00.000Z",
+    });
+    makeClient([proCanceled, hobby]); // deliberately unsorted input
+
+    const result = await getSubscriptionByUserId("user-1");
+
+    expect(result).not.toBeNull();
+    expect(result!.stripe_subscription_id).toBe("sub_hobby");
+    expect(result!.tier).toBe("hobby");
+    expect(result!.status).toBe("active");
+  });
+
+  it("falls back to the latest row when nothing is active", async () => {
+    const oldCanceled = row({
+      stripe_subscription_id: "sub_old",
+      status: "canceled",
+      updated_at: "2026-08-01T00:00:00.000Z",
+    });
+    const newCanceled = row({
+      stripe_subscription_id: "sub_new",
+      status: "canceled",
+      updated_at: "2026-10-05T00:00:00.000Z",
+    });
+    makeClient([oldCanceled, newCanceled]);
+
+    const result = await getSubscriptionByUserId("user-1");
+
+    expect(result).not.toBeNull();
+    expect(result!.stripe_subscription_id).toBe("sub_new");
+  });
+
+  it("treats trialing as active", async () => {
+    const canceled = row({
+      stripe_subscription_id: "sub_old",
+      status: "canceled",
+      updated_at: "2026-10-05T00:00:00.000Z",
+    });
+    const trialing = row({
+      stripe_subscription_id: "sub_trial",
+      tier: "pro",
+      status: "trialing",
+      updated_at: "2026-09-01T00:00:00.000Z",
+    });
+    makeClient([canceled, trialing]);
+
+    const result = await getSubscriptionByUserId("user-1");
+
+    expect(result!.stripe_subscription_id).toBe("sub_trial");
   });
 });

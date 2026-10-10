@@ -15,7 +15,7 @@ export interface SkyRig {
   dispose(): void;
 }
 
-export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
+export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' | 'standard' | 'high' = 'retro'): SkyRig {
   const { palette, timeOfDay, weather, environment } = spec.theme;
   const group = new THREE.Group();
   const top = new THREE.Color(palette.sky);
@@ -85,7 +85,10 @@ export function createSky(spec: GameSpec, scene: THREE.Scene): SkyRig {
   const sunDir = sunDirPhys ? sunDirPhys.clone() : new THREE.Vector3(0.45, dusk ? 0.35 : 0.75, 0.35).normalize();
   sun.position.copy(sunDir).multiplyScalar(140);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  // T1-4: shadow resolution scales with quality — retro was paying for a
+  // 2048px shadow map on a 0.66x pixel-ratio pipeline.
+  const shadowRes = quality === 'high' ? 2048 : 1024;
+  sun.shadow.mapSize.set(shadowRes, shadowRes);
   sun.shadow.camera.near = 10; sun.shadow.camera.far = 400;
   const sh = 90;
   sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh; sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;

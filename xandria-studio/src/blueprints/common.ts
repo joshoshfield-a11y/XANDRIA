@@ -45,7 +45,15 @@ export class PlayerAvatar {
       accent: spec.theme.palette.accent,
     }, {
       onJump: () => engine.audio.play('jump'),
-      onLand: (impact) => { if (impact > 6) engine.audio.play('land'); },
+      onLand: (impact) => {
+        if (impact > 6) engine.audio.play('land');
+        // T1-2: landing dust + shake scaled by impact velocity.
+        // (The onLand event existed but nothing subscribed to it.)
+        if (impact > 4) {
+          engine.particles.dust(this.ctrl.position, Math.min(18, Math.round(impact)));
+          engine.juice.shake(Math.min(0.35, impact * 0.02));
+        }
+      },
       onDash: () => { engine.audio.play('dash'); engine.particles.dust(this.ctrl.position, 8); },
       onStep: () => engine.audio.play('step', { vol: 0.5 }),
     });
@@ -124,9 +132,15 @@ export class PlayerAvatar {
       to.normalize();
       if (to.dot(fwd) < Math.cos(arc)) continue;
       e.damage(damage, origin);
+      // T1-2: melee hit feedback — floating damage number per enemy hit.
+      this.engine.juice.damageNumber(this.engine.camera, e.position, String(Math.round(damage)));
       hitAny = true;
     }
-    if (hitAny) this.engine.audio.play('hit');
+    if (hitAny) {
+      this.engine.audio.play('hit');
+      // T1-2: hit-stop on melee connect (60–90ms freeze sells the impact).
+      this.engine.juice.hitStop(75);
+    }
     return true;
   }
 
@@ -161,6 +175,10 @@ export class PlayerAvatar {
     }
     if (this.ammo !== Infinity) this.ammo--;
     this.engine.audio.play(w === 'blaster' ? 'laser' : 'shoot');
+    // T1-2: muzzle flash — the shot previously had zero visual feedback
+    // beyond the tracer. Small burst + tiny camera kick.
+    this.engine.juice.burst(from, { count: 10, color: '#ffdd66', color2: '#ff8833', speed: 5, life: 0.14, size: 1.8, gravity: 0 });
+    this.engine.juice.shake(0.06);
     return true;
   }
 

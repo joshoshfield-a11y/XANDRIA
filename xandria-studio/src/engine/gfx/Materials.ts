@@ -38,6 +38,9 @@ export class MaterialLibrary {
     const n = this.noise;
     const put = (i: number, c: THREE.Color) => { d[i] = c.r * 255; d[i + 1] = c.g * 255; d[i + 2] = c.b * 255; d[i + 3] = 255; };
     const tmp = new THREE.Color();
+    // T1-3: keep the fbm mix factor as a height field — the Sobel pass below
+    // turns it into a tangent-space normal map (deterministic, same seed).
+    const heights = new Float32Array(size * size);
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const i = (y * size + x) * 4;
@@ -105,6 +108,7 @@ export class MaterialLibrary {
           }
         }
         tmp.copy(base).lerp(alt, t).offsetHSL(0, 0, extra);
+        heights[y * size + x] = t;
         // Canvas ImageData is sRGB: convert out of the linear working space.
         // (Writing linear values here double-darkened every texture ~10x once
         // the renderer re-converted the sRGB-marked texture — structures
@@ -121,7 +125,51 @@ export class MaterialLibrary {
     if (this.pixelated) { tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipMapNearestFilter; }
     if (opts.repeat) tex.repeat.set(opts.repeat, opts.repeat);
     this.cache.set(key, tex);
+
+    // T1-3: tangent-space normal map from the height field via a Sobel
+    // filter with wraparound sampling (textures tile). Canvas row 0 uploads
+    // to v=1 (flipY), so the canvas-space Y gradient is negated to land in
+    // GL tangent space. Normal maps stay linear — never sRGB.
+    const nrmKey = `nrm:${key}`;
+    if (!this.cache.has(nrmKey)) {
+      const nc = document.createElement('canvas');
+      nc.width = size; nc.height = size;
+      const nctx = nc.getContext('2d')!;
+      const nimg = nctx.createImageData(size, size);
+      const nd = nimg.data;
+      const hgt = (x: number, y: number) => heights[((y + size) % size) * size + ((x + size) % size)];
+      const STRENGTH = 2.0;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const dx = (hgt(x - 1, y) - hgt(x + 1, y)) * STRENGTH;
+          const dy = (hgt(x, y - 1) - hgt(x, y + 1)) * STRENGTH;
+          const inv = 1 / Math.hypot(dx, dy, 1);
+          const i = (y * size + x) * 4;
+          nd[i] = (dx * inv * 0.5 + 0.5) * 255;
+          nd[i + 1] = (-dy * inv * 0.5 + 0.5) * 255;
+          nd[i + 2] = (inv * 0.5 + 0.5) * 255;
+          nd[i + 3] = 255;
+        }
+      }
+      nctx.putImageData(nimg, 0, 0);
+      const nrm = new THREE.CanvasTexture(nc);
+      nrm.wrapS = nrm.wrapT = THREE.RepeatWrapping;
+      nrm.anisotropy = 4;
+      if (this.pixelated) { nrm.magFilter = THREE.NearestFilter; nrm.minFilter = THREE.NearestMipMapNearestFilter; }
+      if (opts.repeat) nrm.repeat.set(opts.repeat, opts.repeat);
+      this.cache.set(nrmKey, nrm);
+    }
     return tex;
+  }
+
+  /**
+   * Tangent-space normal map generated alongside texture() from the same
+   * seeded fbm height field. Linear space, cached the same way.
+   */
+  normalMap(kind: TexKind, baseHex: string, opts: { size?: number; alt?: string; repeat?: number } = {}): THREE.Texture {
+    const key = `nrm:${kind}:${baseHex}:${opts.alt ?? ''}:${opts.size ?? 256}`;
+    this.texture(kind, baseHex, opts); // ensures the normal twin is built
+    return this.cache.get(key)!;
   }
 
   standard(kind: TexKind, hex: string, opts: { alt?: string; repeat?: number; roughness?: number; metalness?: number; emissive?: string; emissiveIntensity?: number } = {}): THREE.MeshStandardMaterial {
@@ -130,6 +178,7 @@ export class MaterialLibrary {
     if (hit) return hit as THREE.MeshStandardMaterial;
     const m = new THREE.MeshStandardMaterial({
       map: this.texture(kind, hex, { alt: opts.alt, repeat: opts.repeat }),
+      normalMap: this.normalMap(kind, hex, { alt: opts.alt, repeat: opts.repeat }),
       roughness: opts.roughness ?? (kind === 'metal' || kind === 'panel' ? 0.45 : 0.9),
       metalness: opts.metalness ?? (kind === 'metal' || kind === 'panel' ? 0.5 : 0),
     });
