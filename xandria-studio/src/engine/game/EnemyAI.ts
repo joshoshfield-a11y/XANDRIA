@@ -182,11 +182,18 @@ export class Enemy {
     return this.deathPos ? this.deathPos.clone() : this.home.clone();
   }
   private deathPos: THREE.Vector3 | null = null;
+  /** ragdoll-lite corpse timer (polish wave): the rig keeps animating its death
+   *  tumble for ~1.5s after the sim body is gone; EnemyManager sweeps it when done */
+  private corpseT = 0;
+  corpseDone = false;
+  private deathVel = new THREE.Vector3();
 
   damage(amount: number, from?: THREE.Vector3) {
     if (!this.alive) return;
     this.health -= amount;
     this.rig?.flash();
+    // polish wave: every combat hit reads — sparks + smoke + small shake
+    this.engine.juice.combatHit(this.position, 0.9);
     if (this.turret) {
       const m = (this.turret.head.children[0] as THREE.Mesh).material as THREE.MeshStandardMaterial;
       m.emissive.setHex(0xff2222); m.emissiveIntensity = 0.8;
@@ -233,10 +240,39 @@ export class Enemy {
     this.alive = false;
     const p = this.position;
     this.deathPos = p.clone();
-    this.engine.particles.explosion(p, this.kind === 'brute' ? 1.8 : 1);
+    // polish wave: death reads — explosion + smoke column + shake + hit-stop
+    this.engine.juice.deathFX(p, this.kind === 'brute' ? 1.8 : 1);
     this.engine.audio.play('explosion', { vol: 0.7 });
-    this.dispose();
+    if (this.body && this.rig && (this.kind === 'walker' || this.kind === 'brute')) {
+      // ANIMATION wave: ragdoll-lite corpse — the body's momentum is captured,
+      // the sim body is pulled out of physics, and the rig stays in the scene
+      // while its procedural tumble carries it to rest. Sim bodies and the
+      // timestep are untouched; the tumble is visual-only.
+      this.deathVel.copy(toV3(this.body.velocity));
+      this.engine.physics.remove(this.body);
+      this.body = null;
+      this.corpseT = 1.5;
+      this.rig.setDead(true);
+    } else {
+      this.dispose();
+    }
     this.events.onDeath?.(this);
+  }
+
+  /**
+   * Post-mortem update: drive the rig's momentum tumble until it settles,
+   * then fully dispose (scene + GPU). Called from update() while the corpse
+   * is still in the EnemyManager roster.
+   */
+  private updateCorpse(dt: number, t: number) {
+    if (!this.rig) { this.corpseDone = true; return; } // disposed externally — sweep the roster entry
+    if (this.corpseT <= 0) return;
+    this.corpseT -= dt;
+    this.rig.animate(t, 0, { dead: true, deadVelocity: this.deathVel });
+    if (this.corpseT <= 0) {
+      this.dispose();
+      this.corpseDone = true;
+    }
   }
 
   /**
@@ -259,7 +295,7 @@ export class Enemy {
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
-    if (!this.alive) return;
+    if (!this.alive) { this.updateCorpse(dt, t); return; }
     const pos = this.position;
     // render-interpolated position for visual placements only — AI logic keeps raw `pos`
     const vpos = this.body ? this.engine.physics.interpolatedPosition(this.body, this.tmpV) : pos;
@@ -372,15 +408,18 @@ export class EnemyManager {
         const pos = spawnFor(spec.kind, i, spec.count);
         const e = new Enemy(this.engine, spec, pos, this.projectiles, {
           onPlayerHit: this.events.onPlayerHit,
-          // FIX: splice the dead enemy out of the roster so waves can't accumulate corpses forever
-          onDeath: (en) => { this.killed++; this.removeEnemy(en); this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
+          // ANIMATION wave: the kill is counted at death; the roster entry is
+          // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
+          // so waves can't accumulate corpses forever
+          onDeath: (en) => { this.killed++; this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
         }, this.engine.spec.meta.seed ^ (this.enemies.length * 7919));
         this.enemies.push(e);
       }
     }
   }
 
-  /** Remove a dead enemy from the roster (its scene/physics/GPU resources are already disposed by die()). */
+  /** Remove a dead enemy from the roster (scene/physics/GPU already freed — at die() for
+   *  instant deaths, at corpse-tumble end for walker/brute deaths). */
   private removeEnemy(e: Enemy) {
     const i = this.enemies.indexOf(e);
     if (i >= 0) this.enemies.splice(i, 1);
@@ -400,7 +439,9 @@ export class EnemyManager {
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
-    // iterate a copy: die() → onDeath → removeEnemy() splices the array mid-loop
+    // iterate a copy: the roster can change mid-loop (custom kinds, death)
     for (const e of [...this.enemies]) e.update(dt, playerPos, t);
+    // sweep finished corpses: their death tumble ran, scene + GPU freed
+    for (const e of this.enemies.filter((en) => en.corpseDone)) this.removeEnemy(e);
   }
 }

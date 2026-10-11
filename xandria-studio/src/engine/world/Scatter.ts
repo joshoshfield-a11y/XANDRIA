@@ -9,6 +9,7 @@ import type { Terrain } from './Terrain';
 import type { MaterialLibrary } from '../gfx/Materials';
 import { GROUP, type Physics } from '../core/Physics';
 import { Vegetation } from './Vegetation';
+import { Grass } from './Grass';
 import type { Engine } from '../Engine';
 
 export interface ScatterOptions {
@@ -32,6 +33,7 @@ export class Scatter {
   sets: InstanceSet[] = [];
   colliders: { x: number; z: number; r: number }[] = [];
   vegetation?: Vegetation;
+  grass?: Grass;
 
   constructor(spec: GameSpec, terrain: Terrain, mats: MaterialLibrary, physics: Physics, scene: THREE.Scene, opts: ScatterOptions = {}) {
     const rng = new Rng(spec.meta.seed ^ 0x5ca7);
@@ -133,6 +135,22 @@ export class Scatter {
           this.vegetation.update(dt, opts.engine!.camera.getWorldPosition(_camTmp));
         }
       });
+
+      // polish wave: instanced grass tufts (GPU wind) where the biome fits —
+      // counts scale with the quality tier; only when base scatter is on
+      this.grass = new Grass(spec, terrain, scene, {
+        quality,
+        exclusion: opts.exclusion,
+        maxSlope,
+      });
+      if (this.grass.count > 0) {
+        opts.engine?.onUpdate((dt) => this.grass?.update(dt));
+      }
+    }
+
+    // polish wave: animate the water plane's fake specular (one uniform/frame)
+    if (terrain.water) {
+      opts.engine?.onUpdate((dt) => terrain.updateWater(dt));
     }
 
     // rocks

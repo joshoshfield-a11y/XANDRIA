@@ -50,7 +50,8 @@ export class PlayerAvatar {
         // T1-2: landing dust + shake scaled by impact velocity.
         // (The onLand event existed but nothing subscribed to it.)
         if (impact > 4) {
-          engine.particles.dust(this.ctrl.position, Math.min(18, Math.round(impact)));
+          // polish wave: bigger landing dust (alpha-blended, grows + fades)
+          engine.particles.dust(this.ctrl.position, Math.min(26, Math.round(impact * 1.4)));
           engine.juice.shake(Math.min(0.35, impact * 0.02));
         }
       },
@@ -89,6 +90,8 @@ export class PlayerAvatar {
     this.engine.hud.setHealth(this.health / this.maxHealth);
     this.engine.audio.play('hurt');
     this.ctrl.rig.flash();
+    // polish wave: getting hit reads — sparks + shake on top of the HUD flash
+    this.engine.juice.combatHit(this.ctrl.position.clone().add(new THREE.Vector3(0, 1.2, 0)), 1.1);
     if (this.health <= 0) this.die();
   }
 
@@ -175,9 +178,8 @@ export class PlayerAvatar {
     }
     if (this.ammo !== Infinity) this.ammo--;
     this.engine.audio.play(w === 'blaster' ? 'laser' : 'shoot');
-    // T1-2: muzzle flash — the shot previously had zero visual feedback
-    // beyond the tracer. Small burst + tiny camera kick.
-    this.engine.juice.burst(from, { count: 10, color: '#ffdd66', color2: '#ff8833', speed: 5, life: 0.14, size: 1.8, gravity: 0 });
+    // polish wave: muzzle flash + a wisp of real (alpha-blended) gun smoke.
+    this.engine.juice.muzzle(from);
     this.engine.juice.shake(0.06);
     return true;
   }

@@ -34,6 +34,7 @@ import {
 import { ChapterDresser, ParallaxLayers } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
+import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
 import { Rng } from '../engine/core/Rng';
@@ -94,12 +95,19 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const hazardLight = new THREE.PointLight(spec.theme.environment === 'volcanic' ? '#ff5a2f' : '#7a4fe8', 1.4, 90);
   hazardLight.position.set(start.x + 40, hazardY + 8, 0);
   scene.add(hazardLight);
+  // polish (LOOK crew): living light — flickering hazard glow, pulsing lava
+  engine.sky.lightLife.flicker(hazardLight, 0.3, 2.6);
+  engine.sky.lightLife.pulse(hazard.material as THREE.MeshStandardMaterial, 0.18, 1.4);
+  engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 1.8), 0.14, 1.6); // crystal shards
+  engine.sky.lightLife.pulse(engine.mats.glow('#ffffff', 1.2), 0.2, 2.2); // wisps
 
   // beauty wave: per-genre hero props (floating shards + wisps along the course)
   new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     heroesOnly: true,
     quality: engine.effectiveQuality(),
   });
+  // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
+  attachLightShafts(engine);
 
   // goal at final platform
   const last = platforms[platforms.length - 1];

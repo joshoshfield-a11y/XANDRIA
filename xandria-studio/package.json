@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:beta": "playwright test tests/e2e/beta --config=playwright.config.ts",
     "cli": "tsx scripts/export.ts",
     "studio": "npm run build && electron .",
     "dist": "npm run build && electron-builder",

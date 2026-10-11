@@ -1,12 +1,30 @@
 /**
  * Pooled particle system on THREE.Points. Effects: explosion, sparks, smoke, muzzle, dust,
- * magic, weather (rain/snow/ash falling columns around the camera).
+ * magic, trail, weather (rain/snow/ash falling columns around the camera).
+ *
+ * Polish wave (particles & atmosphere crew): TWO blending paths — the original
+ * additive path (glow: sparks, magic, tracers) plus a NEW alpha-blended (normal)
+ * path so smoke/dust read as smoke, not glow (plan #9). Per-emission `blending`
+ * flag on burst(), default 'additive' — fully backward compatible (vehicle crew
+ * seam: drift smoke keeps calling plain burst()).
  */
 import * as THREE from 'three';
 import { Rng } from '../core/Rng';
-import type { Weather } from '@spec';
+import type { Weather, Genre } from '@spec';
 
-const MAX = 4096;
+export type BlendMode = 'additive' | 'normal';
+
+export interface BurstOpts {
+  count?: number; color?: string; color2?: string; speed?: number; life?: number;
+  size?: number; gravity?: number; up?: number;
+  /** 'additive' (default, glow) or 'normal' (alpha-blended smoke/dust) */
+  blending?: BlendMode;
+  /** smoke growth: particle size *= 1 + (1-k)*grow as life fades */
+  grow?: number;
+}
+
+const MAX_ADD = 3072; // additive glow path (sparks, magic, flashes)
+const MAX_SMK = 1024; // alpha-blended path (smoke, dust)
 
 interface Particle {
   alive: boolean;
@@ -18,17 +36,120 @@ interface Particle {
   color: THREE.Color;
   gravity: number;
   drag: number;
+  grow: number;
+}
+
+/** One THREE.Points pool bound to a single blending mode. */
+class PointPool {
+  readonly max: number;
+  readonly blending: BlendMode;
+  points: THREE.Points;
+  geo: THREE.BufferGeometry;
+  pool: Particle[] = [];
+  cursor = 0;
+  private positions: Float32Array;
+  private colors: Float32Array;
+  private sizes: Float32Array;
+  private alphas: Float32Array;
+
+  constructor(scene: THREE.Scene, max: number, blending: BlendMode) {
+    this.max = max;
+    this.blending = blending;
+    for (let i = 0; i < max; i++) {
+      this.pool.push({ alive: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, size: 1, color: new THREE.Color(), gravity: 0, drag: 0, grow: 0 });
+    }
+    this.positions = new Float32Array(max * 3);
+    this.colors = new Float32Array(max * 3);
+    this.sizes = new Float32Array(max);
+    this.alphas = new Float32Array(max);
+    for (let i = 0; i < max; i++) this.positions[i * 3 + 1] = -9999;
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
+    this.geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
+    this.geo.setAttribute('psize', new THREE.BufferAttribute(this.sizes, 1));
+    this.geo.setAttribute('palpha', new THREE.BufferAttribute(this.alphas, 1));
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: blending === 'additive' ? THREE.AdditiveBlending : THREE.NormalBlending,
+      vertexShader: `
+        attribute float psize; attribute vec3 color; attribute float palpha;
+        varying vec3 vColor; varying float vAlpha;
+        void main(){ vColor = color; vAlpha = palpha; vec4 mv = modelViewMatrix * vec4(position,1.0);
+          gl_PointSize = psize * (240.0 / max(1.0,-mv.z)); gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `
+        varying vec3 vColor; varying float vAlpha;
+        void main(){ vec2 c = gl_PointCoord - 0.5; float d = length(c);
+          if (d > 0.5) discard; float a = smoothstep(0.5, 0.1, d) * vAlpha;
+          gl_FragColor = vec4(vColor, a); }`,
+    });
+    this.points = new THREE.Points(this.geo, mat);
+    this.points.frustumCulled = false;
+    scene.add(this.points);
+  }
+
+  emit(pos: THREE.Vector3, vel: THREE.Vector3, life: number, size: number, color: THREE.Color, gravity: number, drag: number, grow: number) {
+    const p = this.pool[this.cursor];
+    this.cursor = (this.cursor + 1) % this.max;
+    p.alive = true; p.pos.copy(pos); p.vel.copy(vel);
+    p.life = life; p.maxLife = life; p.size = size; p.color.copy(color);
+    p.gravity = gravity; p.drag = drag; p.grow = grow;
+  }
+
+  aliveCount(): number {
+    let n = 0;
+    for (const p of this.pool) if (p.alive) n++;
+    return n;
+  }
+
+  clear() {
+    for (const p of this.pool) p.alive = false;
+    this.cursor = 0;
+    for (let i = 0; i < this.max; i++) {
+      this.positions[i * 3 + 1] = -9999;
+      this.sizes[i] = 0;
+      this.alphas[i] = 0;
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.psize.needsUpdate = true;
+    this.geo.attributes.palpha.needsUpdate = true;
+  }
+
+  update(dt: number) {
+    const normal = this.blending === 'normal';
+    for (let i = 0; i < this.max; i++) {
+      const p = this.pool[i];
+      if (!p.alive) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.alive = false; this.positions[i * 3 + 1] = -9999; this.sizes[i] = 0; this.alphas[i] = 0; continue; }
+      p.vel.y += p.gravity * dt;
+      p.vel.multiplyScalar(Math.pow(p.drag, dt * 60));
+      p.pos.addScaledVector(p.vel, dt);
+      const k = p.life / p.maxLife;
+      this.positions[i * 3] = p.pos.x; this.positions[i * 3 + 1] = p.pos.y; this.positions[i * 3 + 2] = p.pos.z;
+      if (normal) {
+        // smoke: hold color, fade alpha — rgb fade alone would fade toward
+        // black and keep a dark blob visible at end of life.
+        this.colors[i * 3] = p.color.r; this.colors[i * 3 + 1] = p.color.g; this.colors[i * 3 + 2] = p.color.b;
+        this.alphas[i] = Math.min(1, k * 2) * 0.75;
+      } else {
+        this.colors[i * 3] = p.color.r * k; this.colors[i * 3 + 1] = p.color.g * k; this.colors[i * 3 + 2] = p.color.b * k;
+        this.alphas[i] = 1;
+      }
+      this.sizes[i] = p.grow > 0 ? p.size * (1 + (1 - k) * p.grow) : p.size * (0.5 + k * 0.5);
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.color.needsUpdate = true;
+    this.geo.attributes.psize.needsUpdate = true;
+    this.geo.attributes.palpha.needsUpdate = true;
+  }
 }
 
 export class Particles {
-  private points: THREE.Points;
-  private geo: THREE.BufferGeometry;
-  private pool: Particle[] = [];
-  private positions = new Float32Array(MAX * 3);
-  private colors = new Float32Array(MAX * 3);
-  private sizes = new Float32Array(MAX);
+  private addPool: PointPool;
+  private smkPool: PointPool;
   private rng: Rng;
-  private cursor = 0;
+  private scene: THREE.Scene;
 
   // weather
   private weatherPoints: THREE.Points | null = null;
@@ -37,90 +158,90 @@ export class Particles {
   private weatherCount = 0;
 
   constructor(scene: THREE.Scene, seed: number) {
-    this.rng = new Rng(seed);
-    for (let i = 0; i < MAX; i++) {
-      this.pool.push({ alive: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, size: 1, color: new THREE.Color(), gravity: 0, drag: 0 });
-      this.positions[i * 3 + 1] = -9999;
-    }
-    this.geo = new THREE.BufferGeometry();
-    this.geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    this.geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
-    this.geo.setAttribute('psize', new THREE.BufferAttribute(this.sizes, 1));
-    const mat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      vertexShader: `
-        attribute float psize; attribute vec3 color; varying vec3 vColor;
-        void main(){ vColor = color; vec4 mv = modelViewMatrix * vec4(position,1.0);
-          gl_PointSize = psize * (240.0 / max(1.0,-mv.z)); gl_Position = projectionMatrix * mv; }`,
-      fragmentShader: `
-        varying vec3 vColor;
-        void main(){ vec2 c = gl_PointCoord - 0.5; float d = length(c);
-          if (d > 0.5) discard; float a = smoothstep(0.5, 0.1, d);
-          gl_FragColor = vec4(vColor, a); }`,
-    });
-    this.points = new THREE.Points(this.geo, mat);
-    this.points.frustumCulled = false;
-    scene.add(this.points);
     this.scene = scene;
-  }
-  private scene: THREE.Scene;
-
-  private emit(pos: THREE.Vector3, vel: THREE.Vector3, life: number, size: number, color: THREE.Color, gravity = 0, drag = 0) {
-    const p = this.pool[this.cursor];
-    this.cursor = (this.cursor + 1) % MAX;
-    p.alive = true; p.pos.copy(pos); p.vel.copy(vel);
-    p.life = life; p.maxLife = life; p.size = size; p.color.copy(color);
-    p.gravity = gravity; p.drag = drag;
+    this.rng = new Rng(seed);
+    this.addPool = new PointPool(scene, MAX_ADD, 'additive');
+    this.smkPool = new PointPool(scene, MAX_SMK, 'normal');
   }
 
-  burst(pos: THREE.Vector3, opts: { count?: number; color?: string; color2?: string; speed?: number; life?: number; size?: number; gravity?: number; up?: number } = {}) {
+  private emit(pos: THREE.Vector3, vel: THREE.Vector3, life: number, size: number, color: THREE.Color, gravity = 0, drag = 0, blending: BlendMode = 'additive', grow = 0) {
+    (blending === 'normal' ? this.smkPool : this.addPool).emit(pos, vel, life, size, color, gravity, drag, grow);
+  }
+
+  /**
+   * Radial burst. `blending` is optional — defaults to 'additive', so every
+   * existing call site (incl. the vehicle crew's drift-smoke call) behaves
+   * exactly as before. Pass blending:'normal' for smoke/dust.
+   */
+  burst(pos: THREE.Vector3, opts: BurstOpts = {}) {
     const count = opts.count ?? 20;
     const c1 = new THREE.Color(opts.color ?? '#ffcc55');
     const c2 = new THREE.Color(opts.color2 ?? opts.color ?? '#ff6622');
+    const blending = opts.blending ?? 'additive';
+    const grow = opts.grow ?? 0;
     const tmp = new THREE.Vector3();
     for (let i = 0; i < count; i++) {
       tmp.set(this.rng.gaussian(0, 1), this.rng.gaussian(0, 1), this.rng.gaussian(0, 1)).normalize()
         .multiplyScalar((opts.speed ?? 6) * (0.4 + this.rng.next() * 0.6));
       tmp.y += opts.up ?? 2;
       const c = c1.clone().lerp(c2, this.rng.next());
-      this.emit(pos, tmp, (opts.life ?? 0.7) * (0.5 + this.rng.next() * 0.5), (opts.size ?? 1.6) * (0.6 + this.rng.next() * 0.8), c, opts.gravity ?? -9, 0.98);
+      this.emit(pos, tmp, (opts.life ?? 0.7) * (0.5 + this.rng.next() * 0.5), (opts.size ?? 1.6) * (0.6 + this.rng.next() * 0.8), c, opts.gravity ?? -9, 0.98, blending, grow);
     }
   }
 
   explosion(pos: THREE.Vector3, scale = 1) {
     this.burst(pos, { count: 40, color: '#ffdd66', color2: '#ff3311', speed: 10 * scale, life: 0.8, size: 2.6 * scale, up: 4 });
-    this.burst(pos, { count: 18, color: '#333333', color2: '#666666', speed: 4 * scale, life: 1.6, size: 3.2 * scale, gravity: 2, up: 3 });
+    // smoke is alpha-blended now — reads as smoke, not glow
+    this.burst(pos, { count: 18, color: '#3a3a3a', color2: '#777777', speed: 4 * scale, life: 1.7, size: 3.4 * scale, gravity: 2, up: 3, blending: 'normal', grow: 1.4 });
   }
+
+  /** Punchier impact sparks: faster, bigger, longer-lived than before. */
   sparks(pos: THREE.Vector3, color = '#ffe08a', count = 10) {
-    this.burst(pos, { count, color, color2: '#ffffff', speed: 7, life: 0.35, size: 1.1, gravity: -18 });
+    this.burst(pos, { count, color, color2: '#ffffff', speed: 9, life: 0.45, size: 1.35, gravity: -18 });
   }
+
+  /** Landing/boost dust — alpha-blended, grows and fades. */
   dust(pos: THREE.Vector3, count = 6) {
-    this.burst(pos, { count, color: '#9a8f7a', color2: '#c9bfa8', speed: 1.6, life: 0.7, size: 1.6, gravity: 1.5, up: 0.8 });
+    this.burst(pos, { count, color: '#9a8f7a', color2: '#c9bfa8', speed: 1.8, life: 0.9, size: 1.9, gravity: 1.2, up: 0.8, blending: 'normal', grow: 1.0 });
   }
+
+  /** Soft gray smoke puff — the normal-blend primitive everything builds on. */
+  smokePuff(pos: THREE.Vector3, count = 8, color = '#8a8578') {
+    this.burst(pos, { count, color, color2: '#b5aa96', speed: 1.3, life: 1.4, size: 2.2, gravity: 1.4, up: 1.4, blending: 'normal', grow: 1.6 });
+  }
+
   magic(pos: THREE.Vector3, color = '#7af7ff', count = 14) {
     this.burst(pos, { count, color, color2: '#ffffff', speed: 3, life: 0.9, size: 1.4, gravity: 2, up: 2 });
   }
-  trail(pos: THREE.Vector3, color: string) {
-    this.emit(pos, new THREE.Vector3(this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4)), 0.4, 1.2, new THREE.Color(color), 0, 0.9);
+
+  trail(pos: THREE.Vector3, color: string, blending: BlendMode = 'additive') {
+    this.emit(pos, new THREE.Vector3(this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4), this.rng.gaussian(0, 0.4)), 0.4, 1.2, new THREE.Color(color), 0, 0.9, blending);
+  }
+
+  /** Combined combat hit: punchy sparks + quick smoke + white flash. */
+  impactFX(pos: THREE.Vector3, scale = 1, sparkColor = '#ffe08a') {
+    this.sparks(pos, sparkColor, Math.round(12 * scale));
+    this.smokePuff(pos, Math.round(5 * scale));
+    this.burst(pos, { count: Math.round(6 * scale), color: '#ffffff', color2: sparkColor, speed: 4 * scale, life: 0.18, size: 2.4 * scale, gravity: 0 });
+  }
+
+  /** Test hook: live particle counts per blending path. */
+  aliveCount(blending: BlendMode = 'additive'): number {
+    return (blending === 'normal' ? this.smkPool : this.addPool).aliveCount();
   }
 
   /** Clear all live particles and re-seed (used by in-place restart). */
   reset(seed: number) {
-    for (const p of this.pool) p.alive = false;
-    this.cursor = 0;
+    this.addPool.clear();
+    this.smkPool.clear();
     this.rng = new Rng(seed);
-    for (let i = 0; i < MAX; i++) {
-      this.positions[i * 3 + 1] = -9999;
-      this.sizes[i] = 0;
-    }
-    this.geo.attributes.position.needsUpdate = true;
-    this.geo.attributes.psize.needsUpdate = true;
   }
 
-  /** Ambient weather. Call once. Idempotent — replaces any previous weather. */
-  setWeather(kind: Weather, seed: number) {
+  /**
+   * Ambient weather. Call once. Idempotent — replaces any previous weather.
+   * Counts scale with quality tier; tint/density get a per-genre mood tweak.
+   */
+  setWeather(kind: Weather, seed: number, quality: 'retro' | 'standard' | 'high' = 'standard', genre?: Genre) {
     if (this.weatherPoints) {
       this.scene.remove(this.weatherPoints);
       this.weatherPoints.geometry.dispose();
@@ -130,7 +251,10 @@ export class Particles {
     }
     if (kind === 'clear' || kind === 'fog') return;
     this.weatherKind = kind;
-    this.weatherCount = kind === 'storm' ? 900 : kind === 'rain' ? 600 : kind === 'snow' ? 500 : 400;
+    const qScale = quality === 'high' ? 1 : quality === 'standard' ? 0.65 : 0.4;
+    const base = kind === 'storm' ? 900 : kind === 'rain' ? 600 : kind === 'snow' ? 500 : 400;
+    const mood = genre ? WEATHER_MOOD[genre]?.[kind] : undefined;
+    this.weatherCount = Math.round(base * qScale * (mood?.density ?? 1));
     const wgeo = new THREE.BufferGeometry();
     const wpos = new Float32Array(this.weatherCount * 3);
     const wrng = new Rng(seed ^ 4242);
@@ -143,11 +267,20 @@ export class Particles {
       this.weatherVel.push(new THREE.Vector3(kind === 'storm' ? -6 : wrng.range(-0.5, 0.5), -fall, wrng.range(-0.5, 0.5)));
     }
     wgeo.setAttribute('position', new THREE.BufferAttribute(wpos, 3));
-    const color = kind === 'snow' ? '#ffffff' : kind === 'ash' ? '#8a8578' : '#9db8d8';
-    const wmat = new THREE.PointsMaterial({ color, size: kind === 'snow' ? 0.35 : 0.22, transparent: true, opacity: kind === 'ash' ? 0.7 : 0.85, depthWrite: false });
+    const color = mood?.color ?? (kind === 'snow' ? '#ffffff' : kind === 'ash' ? '#8a8578' : '#9db8d8');
+    const wmat = new THREE.PointsMaterial({ color, size: (kind === 'snow' ? 0.35 : 0.22) * (mood?.size ?? 1), transparent: true, opacity: kind === 'ash' ? 0.7 : 0.85, depthWrite: false });
     this.weatherPoints = new THREE.Points(wgeo, wmat);
     this.weatherPoints.frustumCulled = false;
     this.scene.add(this.weatherPoints);
+  }
+
+  /** Test hook: active weather count after setWeather. */
+  weatherActiveCount(): number { return this.weatherCount; }
+
+  /** Test hook: current weather material color (after mood tint). */
+  weatherColor(): string | null {
+    const m = this.weatherPoints?.material as THREE.PointsMaterial | undefined;
+    return m ? `#${m.color.getHexString()}` : null;
   }
 
   /** Follow the camera so weather is always around the player. */
@@ -169,21 +302,19 @@ export class Particles {
   }
 
   update(dt: number) {
-    for (let i = 0; i < MAX; i++) {
-      const p = this.pool[i];
-      if (!p.alive) continue;
-      p.life -= dt;
-      if (p.life <= 0) { p.alive = false; this.positions[i * 3 + 1] = -9999; this.sizes[i] = 0; continue; }
-      p.vel.y += p.gravity * dt;
-      p.vel.multiplyScalar(Math.pow(p.drag, dt * 60));
-      p.pos.addScaledVector(p.vel, dt);
-      const k = p.life / p.maxLife;
-      this.positions[i * 3] = p.pos.x; this.positions[i * 3 + 1] = p.pos.y; this.positions[i * 3 + 2] = p.pos.z;
-      this.colors[i * 3] = p.color.r * k; this.colors[i * 3 + 1] = p.color.g * k; this.colors[i * 3 + 2] = p.color.b * k;
-      this.sizes[i] = p.size * (0.5 + k * 0.5);
-    }
-    this.geo.attributes.position.needsUpdate = true;
-    this.geo.attributes.color.needsUpdate = true;
-    this.geo.attributes.psize.needsUpdate = true;
+    this.addPool.update(dt);
+    this.smkPool.update(dt);
   }
 }
+
+/**
+ * Per-genre weather mood: subtle tint/density/size tweaks so weather reads
+ * with the genre's atmosphere. Density multiplies the quality-scaled count.
+ */
+const WEATHER_MOOD: Record<Genre, Partial<Record<Weather, { density?: number; color?: string; size?: number }>>> = {
+  'fps-arena': { rain: { density: 1.3, color: '#8fb8e8' }, storm: { density: 1.2, color: '#7f9fc8' } },
+  racing: { storm: { density: 1.2, color: '#c8b89a' }, rain: { density: 0.8 } },
+  platformer: { snow: { density: 1.1, color: '#eaf6ff', size: 1.5 } },
+  'top-down-shooter': { ash: { density: 1.25 } },
+  'third-person-action': {},
+};

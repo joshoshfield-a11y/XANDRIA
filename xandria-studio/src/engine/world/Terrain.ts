@@ -14,6 +14,7 @@ export class Terrain {
   private heights: number[][];
   private cell: number;
   water?: THREE.Mesh;
+  private waterMat?: THREE.MeshStandardMaterial;
   readonly maxHeight: number;
   walls: CANNON.Body[] = [];
 
@@ -140,14 +141,35 @@ export class Terrain {
       mk(-half - wt / 2, 0, wt, this.size); mk(half + wt / 2, 0, wt, this.size);
     }
 
-    // ---- water plane
+    // ---- water plane (polish wave: animated fake specular — a time-driven
+    // normal ripple in onBeforeCompile; no planar reflections, one uniform)
     if (t.water) {
       const wm = new THREE.MeshStandardMaterial({ color: spec.theme.environment === 'volcanic' ? '#ff5a1f' : '#2a6fb0', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3, emissive: spec.theme.environment === 'volcanic' ? '#ff3300' : '#000000', emissiveIntensity: 0.8 });
+      wm.userData.uTime = { value: 0 };
+      wm.customProgramCacheKey = () => 'xandria-water-v1';
+      wm.onBeforeCompile = (shader) => {
+        shader.uniforms.uTime = wm.userData.uTime;
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
+          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;');
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
+          .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+            float wv1 = sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
+            float wv2 = sin((vUvW.x + vUvW.y) * 34.0 - uTime * 2.2);
+            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`);
+      };
+      this.waterMat = wm;
       this.water = new THREE.Mesh(new THREE.PlaneGeometry(this.size * 3, this.size * 3), wm);
       this.water.rotation.x = -Math.PI / 2;
       this.water.position.y = t.waterLevel + (bio?.waterBias ?? 0);
       scene.add(this.water);
     }
+  }
+
+  /** Advance the water ripple clock. Called per frame only when water exists. */
+  updateWater(dt: number) {
+    if (this.waterMat) (this.waterMat.userData.uTime as { value: number }).value += dt;
   }
 
   /** Bilinear height sample at world (x,z). */

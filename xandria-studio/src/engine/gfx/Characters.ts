@@ -9,6 +9,18 @@ import type { MaterialLibrary } from './Materials';
 import { forgeHumanoidPlan, forgeDronePlan, forgeVehiclePlan, type HumanoidPlan, type BodyArchetype } from './ModelForge';
 import type { ForgeCustom } from '@spec';
 
+/** Per-frame animation options (all optional — every field added after wave C is backward compatible). */
+export interface AnimateOpts {
+  /** 0..1 melee swing progress (externally driven) */
+  attacking?: number;
+  /** corpse mode — the momentum tumble owns the pose instead of locomotion */
+  dead?: boolean;
+  /** body velocity at the moment of death; seeds the tumble on the first dead frame */
+  deadVelocity?: THREE.Vector3;
+  /** landing squash: 1→0 progress, pre-scaled by impact (CharacterController sets it from onLand) */
+  land?: number;
+}
+
 export interface CharacterRig {
   group: THREE.Group;
   /** limbs keyed for animation — the six legacy pivots (shoulder/hip positions unchanged) */
@@ -21,9 +33,12 @@ export interface CharacterRig {
     kneeL?: THREE.Object3D; kneeR?: THREE.Object3D;
     /** same four joints as a map, for code that prefers keyed access */
     joints?: { elbowL: THREE.Object3D; elbowR: THREE.Object3D; kneeL: THREE.Object3D; kneeR: THREE.Object3D };
+    /** OPTIONAL segmented cape cloth (polish wave): chained pivots, same pattern as limb
+     *  pivots — animate() drives them from speed + noise. Absent when the plan has no cape. */
+    cape?: THREE.Object3D[];
   };
   /** call every frame with planar speed (m/s) */
-  animate(t: number, speed: number, opts?: { attacking?: number; dead?: boolean }): void;
+  animate(t: number, speed: number, opts?: AnimateOpts): void;
   /** trigger a melee swing animation (self-advancing) */
   swing(): void;
   setDead(dead: boolean): void;
@@ -155,12 +170,13 @@ function dressHead(head: THREE.Mesh, plan: HumanoidPlan, skin: THREE.Material, a
 
 /** Attach forged armor + extras to the torso. Torso is a tapered cylinder (top r≈0.30·b,
  *  bottom r≈0.22·b, h=0.72); children use torso-local coords, top at +0.36. No boxes —
- *  shells, caps, bands, cones, draped cloth. accentDS = double-sided owned accent (cape). */
+ *  shells, caps, bands, cones, draped cloth. accentDS = double-sided owned accent (cape).
+ *  Returns the segmented cape pivots (empty when the plan has no cape). */
 function dressTorso(
   torso: THREE.Object3D, group: THREE.Group, plan: HumanoidPlan,
   tex: { accent: THREE.Material; shirt: THREE.Material; accentDS: THREE.Material },
   mats: MaterialLibrary,
-) {
+): { cape: THREE.Object3D[] } {
   const b = plan.bulk;
   const arch = ARCH_SCALE[plan.archetype];
   const { accent, shirt, accentDS } = tex;
@@ -189,21 +205,29 @@ function dressTorso(
     case 'none':
       break;
   }
+  const capeSegs: THREE.Object3D[] = [];
   for (const e of plan.extras) {
     if (e === 'cape') {
-      const capeGeo = new THREE.PlaneGeometry(0.55 * b, 0.95, 1, 6);
-      const pos = capeGeo.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        const y = pos.getY(i);
-        const d = (0.475 - y) / 0.95; // 0 top → 1 bottom
-        pos.setZ(i, -0.3 * d * d * b);
-        pos.setX(i, pos.getX(i) * (1 - 0.3 * d));
+      // Polish wave: the cape is a chain of pivots (same pattern as limb pivots),
+      // not one rigid plane — animate() flutters the segments from speed + noise.
+      const root = new THREE.Group();
+      root.position.set(0, -0.12, -0.26 * b);
+      root.rotation.x = 0.08;
+      torso.add(root);
+      let parent: THREE.Object3D = root;
+      const n = 3, segH = 0.95 / n;
+      for (let i = 0; i < n; i++) {
+        const pivot = new THREE.Group();
+        pivot.position.set(0, i === 0 ? 0 : -segH, 0);
+        const w = 0.55 * b * (1 - 0.12 * i); // taper toward the hem, like the old baked drape
+        const cloth = new THREE.Mesh(faceted(new THREE.PlaneGeometry(w, segH * 1.06, 1, 1)), accentDS);
+        cloth.castShadow = true;
+        cloth.position.y = -segH / 2;
+        pivot.add(cloth);
+        parent.add(pivot);
+        parent = pivot;
+        capeSegs.push(pivot);
       }
-      const cape = new THREE.Mesh(faceted(capeGeo), accentDS);
-      cape.castShadow = true;
-      cape.position.set(0, -0.12, -0.26 * b);
-      cape.rotation.x = 0.08;
-      torso.add(cape);
     } else if (e === 'backpack') {
       torso.add(part(new THREE.CapsuleGeometry(0.15 * b, 0.28, 4, 8), mats.flat('#4a4640', { roughness: 0.9 }), 0, 0.06, -(0.24 * b + 0.13)));
     } else if (e === 'spikes') {
@@ -220,6 +244,7 @@ function dressTorso(
       torso.add(part(new THREE.SphereGeometry(0.17 * b, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), accent, shoulderX, 0.32, 0));
     }
   }
+  return { cape: capeSegs };
 }
 
 /** Forged articulated humanoid, ~1.8m tall before plan scaling. Origin at feet.
@@ -263,7 +288,7 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   const hips = part(new THREE.SphereGeometry(0.20 * b * arch.torso, 8, 6), pants, 0, -0.3, 0);
   hips.scale.set(1.15, 0.75, 0.9);
   torso.add(hips);
-  dressTorso(torso, group, plan, { accent, shirt, accentDS }, mats);
+  const { cape: capeSegs } = dressTorso(torso, group, plan, { accent, shirt, accentDS }, mats);
 
   // head: sphere + forged headgear
   const hr = 0.17 * plan.headSize;
@@ -312,6 +337,11 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   let flashTime = 0;
   let atkT = -1; // self-advancing swing timer (1 → 0)
   const joints = { elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee };
+  /** ragdoll-lite corpse state (polish wave): the body's death velocity becomes
+   *  angular tumble + a visual-only slide/bounce. Sim bodies are never touched. */
+  let deadTumble: { vel: THREE.Vector3; ang: THREE.Vector3; lastT: number } | null = null;
+  /** lazy snapshot of group.scale so the landing squash restores exactly (enemies re-scale post-build) */
+  let squashBase: THREE.Vector3 | null = null;
 
   return {
     group,
@@ -319,35 +349,115 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
       legL: legL.hip, legR: legR.hip, armL: armL.shoulder, armR: armR.shoulder,
       torso, head, weaponMount: armR.shoulder,
       elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee, joints,
+      ...(capeSegs.length ? { cape: capeSegs } : {}),
     },
     swing() { atkT = 1; },
-    animate(t, speed, opts = {}) {
+    animate(t, speed, opts: AnimateOpts = {}) {
       const k = Math.min(1, speed / 6);
-      const f = t * (8 + k * 4);
-      const s = Math.sin(f);
-      const sw = s * 0.7 * k;
-      legL.hip.rotation.x = sw; legR.hip.rotation.x = -sw;
-      armL.shoulder.rotation.x = -sw * 0.85; armR.shoulder.rotation.x = sw * 0.85;
-      // Sub-pivot articulation, phase-coupled to the parent swing (procedural, no bones):
-      // knees bend as their leg swings forward, elbows counter-swing the arms.
-      legL.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, -s));
-      legR.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, s));
-      armL.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, -s);
-      armR.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, s);
-      let atkP = opts.attacking && opts.attacking > 0 ? opts.attacking : 0;
-      if (!atkP && atkT >= 0) { atkP = 1 - atkT; atkT -= 0.045; if (atkT < 0) atkT = -1; }
-      if (atkP > 0) {
-        // overhead slash: 0..1 progress
-        const p = atkP;
-        armR.shoulder.rotation.x = -2.4 + p * 3.2;
-        armR.shoulder.rotation.z = 0.4 - p * 0.5;
-        armR.elbow.rotation.x = -0.25 - 0.9 * (1 - p); // bent at windup, snaps straight
-      } else armR.shoulder.rotation.z = 0;
-      const bob = Math.abs(Math.sin(f)) * 0.05 * k;
-      torso.position.y = baseY.torso + bob;
-      head.position.y = baseY.head + bob;
       if (opts.dead) {
-        group.rotation.x = -Math.PI / 2 * Math.min(1, (group.userData.deadT = (group.userData.deadT ?? 0) + 0.03));
+        // DEATH FEEL: momentum-carrying procedural tumble — the death velocity
+        // converts into angular tumble; the group slides/bounces to rest.
+        if (!deadTumble) {
+          const v = opts.deadVelocity ? opts.deadVelocity.clone() : new THREE.Vector3(0, 0, 0);
+          const sp = Math.hypot(v.x, v.z);
+          // deterministic tumble axis: perpendicular to travel (a body hit forward
+          // tumbles forward), plus a backward tip so still deaths still read
+          const ang = sp > 0.05
+            ? new THREE.Vector3(-v.z / sp, 0, v.x / sp).multiplyScalar(1.6 + sp * 0.55)
+            : new THREE.Vector3(1.8, 0.2, 0.3);
+          ang.x += 1.2;
+          v.y = Math.max(v.y, 1.0) + Math.min(2.0, sp * 0.2); // pop off the ground
+          deadTumble = { vel: v, ang, lastT: -1 };
+        }
+        const d = deadTumble;
+        const dt = d.lastT < 0 ? 1 / 60 : Math.min(0.05, t - d.lastT);
+        d.lastT = t;
+        d.vel.y -= 26 * dt; // visual gravity only
+        group.position.x += d.vel.x * dt;
+        group.position.y += d.vel.y * dt;
+        group.position.z += d.vel.z * dt;
+        const restY = 0.3 * group.scale.y;
+        if (group.position.y < restY) {
+          group.position.y = restY;
+          d.vel.y = d.vel.y < -3 ? -d.vel.y * 0.35 : 0; // one bounce, then rest
+          const fr = 1 - Math.min(1, 6 * dt);
+          d.vel.x *= fr; d.vel.z *= fr; // ground friction
+          d.ang.multiplyScalar(1 - Math.min(1, 5 * dt));
+        } else {
+          d.ang.multiplyScalar(1 - Math.min(1, 0.25 * dt)); // light air drag
+        }
+        group.rotation.x += d.ang.x * dt;
+        group.rotation.y += d.ang.y * dt;
+        group.rotation.z += d.ang.z * dt;
+        // limbs go loose and splay — a corpse, not a mannequin
+        const limp = 1 - Math.min(1, 5 * dt);
+        legL.hip.rotation.x *= limp; legR.hip.rotation.x *= limp;
+        armL.shoulder.rotation.x *= limp; armR.shoulder.rotation.x *= limp;
+        legL.knee.rotation.x *= limp; legR.knee.rotation.x *= limp;
+        armL.elbow.rotation.x *= limp; armR.elbow.rotation.x *= limp;
+        armL.shoulder.rotation.z += (0.7 - armL.shoulder.rotation.z) * Math.min(1, 3 * dt);
+        armR.shoulder.rotation.z += (-0.7 - armR.shoulder.rotation.z) * Math.min(1, 3 * dt);
+      } else {
+        if (deadTumble) deadTumble = null;
+        const f = t * (8 + k * 4);
+        const s = Math.sin(f);
+        const sw = s * 0.7 * k;
+        legL.hip.rotation.x = sw; legR.hip.rotation.x = -sw;
+        armL.shoulder.rotation.x = -sw * 0.85; armR.shoulder.rotation.x = sw * 0.85;
+        // Sub-pivot articulation, phase-coupled to the parent swing (procedural, no bones):
+        // knees bend as their leg swings forward, elbows counter-swing the arms.
+        legL.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, -s));
+        legR.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, s));
+        armL.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, -s);
+        armR.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, s);
+        let atkP = opts.attacking && opts.attacking > 0 ? opts.attacking : 0;
+        if (!atkP && atkT >= 0) { atkP = 1 - atkT; atkT -= 0.045; if (atkT < 0) atkT = -1; }
+        if (atkP > 0) {
+          // overhead slash in three beats: anticipation windup → strike → follow-through
+          const p = Math.min(1, atkP);
+          let armX: number, elbow: number, coil: number;
+          if (p < 0.35) {            // windup: coil back, elbow folds deep
+            const q = p / 0.35, e = q * q;
+            armX = -2.4 - 0.6 * e; elbow = -0.25 - 0.9 * e; coil = 0.35 * e;
+          } else if (p < 0.8) {      // the strike: fast, elbow snaps straight late
+            const q = (p - 0.35) / 0.45, e = 1 - Math.pow(1 - q, 3);
+            armX = -3.0 + 3.7 * e; elbow = -1.15 + 1.0 * q * q; coil = 0.35 - 0.45 * e;
+          } else {                   // follow-through: settle back toward rest
+            const q = (p - 0.8) / 0.2, e = 1 - Math.pow(1 - q, 2);
+            armX = 0.7 - 0.7 * e; elbow = -0.15 - 0.1 * e; coil = -0.1 + 0.1 * e;
+          }
+          armR.shoulder.rotation.x = armX;
+          armR.shoulder.rotation.z = 0.4 - p * 0.5;
+          armR.elbow.rotation.x = elbow;
+          torso.rotation.y = coil;
+        } else { armR.shoulder.rotation.z = 0; torso.rotation.y = 0; }
+        // run-cycle weight: vertical bob + forward lean, both scaled by speed
+        const bob = Math.abs(Math.sin(f)) * 0.05 * k;
+        // idle breathing: subtle torso swell, fades out as speed rises
+        const breath = Math.sin(t * 2.2) * 0.006 * (1 - k);
+        torso.position.y = baseY.torso + bob + breath;
+        head.position.y = baseY.head + bob + breath * 1.4;
+        torso.scale.set(1 + breath * 0.4, 1 + breath, 1 + breath * 0.4);
+        group.rotation.x = 0.13 * k;
+        head.rotation.x = -0.08 * k; // head stabilizes against the lean
+        // landing squash: brief y-compression, xz-bulge (land: 1→0, impact-scaled)
+        const landQ = Math.min(1, Math.max(0, opts.land ?? 0));
+        if (landQ > 0) {
+          const sq = 0.16 * Math.sin(Math.PI * landQ);
+          if (!squashBase) squashBase = group.scale.clone();
+          group.scale.set(squashBase.x * (1 + 0.55 * sq), squashBase.y * (1 - sq), squashBase.z * (1 + 0.55 * sq));
+        } else if (squashBase) { group.scale.copy(squashBase); squashBase = null; }
+        // CLOTH: cape segments trail with speed and flutter on two detuned sines
+        if (capeSegs.length) {
+          const wob = 0.3 + k;
+          for (let i = 0; i < capeSegs.length; i++) {
+            const cg = capeSegs[i];
+            cg.rotation.x = 0.12 + 0.10 * k * (i + 1)
+              + Math.sin(t * 6.3 + i * 1.9) * 0.045 * wob
+              + Math.sin(t * 11.7 + i * 0.7) * 0.028 * wob;
+            cg.rotation.z = Math.sin(t * 5.1 + i * 2.3) * 0.035 * wob;
+          }
+        }
       }
       if (flashTime > 0) {
         flashTime -= 0.016;
@@ -355,7 +465,7 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
         for (const m of allMats) m.emissive.setHex(on ? 0xff2222 : 0x000000), m.emissiveIntensity = on ? 0.8 : 0;
       }
     },
-    setDead(dead) { if (dead) group.userData.deadT = 0; },
+    setDead(dead) { if (!dead) deadTumble = null; /* tumble inits lazily on animate(dead) */ },
     flash() { flashTime = 0.25; },
     dispose() { disposeOwned(group); },
   };

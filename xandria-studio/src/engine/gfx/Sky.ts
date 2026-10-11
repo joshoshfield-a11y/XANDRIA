@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
 import { gradeAtmosphere } from './GenreGrade';
+import { LightLife } from './LightLife';
 import { Rng } from '../core/Rng';
 
 export interface SkyRig {
@@ -12,6 +13,13 @@ export interface SkyRig {
   ambient: THREE.AmbientLight;
   /** recommended tone-mapping exposure (physical sky is HDR-bright) */
   exposure: number;
+  /**
+   * Lighting-life system (polish wave, LOOK crew): flickering point lights,
+   * pulsing emissive materials, and the pooled 3-light flash system for
+   * muzzle flashes / pickups. Blueprints register via
+   * engine.sky.lightLife.flicker()/pulse()/flash().
+   */
+  lightLife: LightLife;
   update(dt: number, target: THREE.Vector3): void;
   dispose(): void;
 }
@@ -114,12 +122,18 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   scene.background = fogColor;
 
   scene.add(group);
+  // Polish wave (LOOK crew): lighting life — flickering lights, pulsing
+  // emissives, pooled flash lights. Updated in the rig's per-frame update
+  // below; disabled at retro quality (retro keeps its own look).
+  const lightLife = new LightLife(scene, quality);
   let t = 0;
   return {
     group, sun, hemi, ambient,
     exposure: grade.exposure,
+    lightLife,
     update(dt, target) {
       t += dt;
+      lightLife.update(dt);
       if (skyMat) skyMat.uniforms.time.value = t;
       dome.position.copy(target);
       cloudGroup.position.x = target.x + ((t * 4) % 200) - 100;

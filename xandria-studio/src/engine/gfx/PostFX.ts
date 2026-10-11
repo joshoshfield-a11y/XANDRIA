@@ -7,6 +7,8 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { GradeShader, setGradeUniforms } from './GradeShader';
+import { gradeAtmosphere } from './GenreGrade';
 import type { GameSpec } from '@spec';
 
 const RetroShader = {
@@ -33,6 +35,9 @@ export class PostFX {
   private scene: THREE.Scene;
   private camera: THREE.Camera;
   private retroPass: ShaderPass | null = null;
+  private gradePass: ShaderPass | null = null;
+  /** true when the filmic grade pass is in the chain (standard/high, non-retro) */
+  readonly gradeActive: boolean;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, spec: GameSpec) {
     this.renderer = renderer;
@@ -62,7 +67,21 @@ export class PostFX {
         );
         this.composer.addPass(bloom);
       }
-      if (spec.theme.retroFilter && quality !== 'high') {
+      // Polish wave (LOOK crew, plan #7): filmic color grade after bloom —
+      // lift/gamma/gain + saturation + vignette, per-genre via GenreGrade.
+      // Standard/high tiers only; retro keeps its own shader (and a
+      // retro-filtered standard game already gets its vignette from it).
+      const wantRetro = spec.theme.retroFilter && quality !== 'high';
+      if (quality !== 'retro' && !wantRetro) {
+        this.gradePass = new ShaderPass(GradeShader);
+        setGradeUniforms(
+          this.gradePass,
+          gradeAtmosphere(spec.meta.genre, spec.theme.timeOfDay).grade,
+        );
+        this.composer.addPass(this.gradePass);
+      }
+      this.gradeActive = this.gradePass !== null;
+      if (wantRetro) {
         this.retroPass = new ShaderPass(RetroShader);
         if (quality === 'standard') {
           this.retroPass.uniforms.pixelSize.value = 0;      // no pixelation
@@ -74,6 +93,7 @@ export class PostFX {
       }
     } catch {
       this.composer = null;
+      this.gradeActive = false;
     }
   }
 

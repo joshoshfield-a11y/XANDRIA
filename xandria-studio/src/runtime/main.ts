@@ -189,7 +189,7 @@ function boot() {
   // staged first-stage description via makeCampaignObjectives (R2-M2: never
   // overwrite it here with the legacy objective text).
   engine.hud.toast(spec.meta.name.toUpperCase(), 3);
-  engine.particles.setWeather(spec.theme.weather, spec.meta.seed);
+  engine.particles.setWeather(spec.theme.weather, spec.meta.seed, engine.effectiveQuality(), spec.meta.genre);
   engine.onUpdatePersistent(() => engine.particles.updateWeather(engine.camera.position, 1 / 60));
   // register the blueprint builder: enables in-place restart()
   engine.setRunBuilder((e) => build(e, spec));

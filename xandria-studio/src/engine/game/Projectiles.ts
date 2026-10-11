@@ -96,7 +96,8 @@ export class Projectiles {
       const hit = this.engine.physics.raycast(from, to, p.body.collisionFilterMask, p.body);
       if (hit && hit.distance <= speed * dt * 2 + 0.2) {
         this.onHit(p, hit.body, hit.point);
-        this.engine.particles.sparks(hit.point, p.friendly ? '#8df2ff' : '#ff9a5c', 8);
+        // polish wave: impacts read — sparks + smoke + shake, not sparks alone
+        this.engine.juice.impact(hit.point, p.friendly ? 0.9 : 1.1, p.friendly ? '#8df2ff' : '#ff9a5c');
         this.kill(p);
       }
     }

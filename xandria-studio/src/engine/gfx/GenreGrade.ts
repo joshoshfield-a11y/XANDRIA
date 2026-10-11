@@ -42,42 +42,92 @@ export interface GenreGrade {
    * Night uses the gradient dome (unaffected); night grade is 1.0.
    */
   sky: number;
+  /**
+   * filmic color grade for the post grade pass (polish wave, LOOK crew).
+   * Consumed by PostFX on standard/high tiers only — retro keeps its own
+   * shader. Night is identity except a mild vignette (no brightness change,
+   * so the night visibility floor is unaffected).
+   */
+  grade: ColorGrade;
+}
+
+/**
+ * Per-genre filmic color grade (ASC-CDL style lift/gamma/gain + saturation +
+ * vignette). Values are subtle by design — cohesion, not an Instagram filter.
+ * lift/gamma/gain are per-channel; 0 / 1 / 1 is identity.
+ */
+export interface ColorGrade {
+  /** additive shadow tint per channel, ~±0.03 */
+  lift: [number, number, number];
+  /** per-channel gamma, 1.0 = identity */
+  gamma: [number, number, number];
+  /** per-channel gain (highlight tint), 1.0 = identity */
+  gain: [number, number, number];
+  /** saturation multiplier, 1.0 = identity */
+  saturation: number;
+  /** vignette strength; 0 = off, ~0.4–0.6 is filmic (corners ~20–30% darker) */
+  vignette: number;
 }
 
 /** Day/dusk grade table. exposure is absolute (old baselines: day 0.6, dusk 0.72). */
 const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   // Exploration vistas: thin the fog so distant ruins read, darken it so the
   // horizon keeps its warm tone; dim the white cloud discs a touch.
+  // Grade: warm shadows/highlights, gentle lift for the ruins.
   'third-person-action': {
     fogDensity: 0.75, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.8, cloudColor: '#ffffff', sky: 0.45,
+    grade: {
+      lift: [0.015, 0.005, -0.010], gamma: [1.0, 1.0, 1.0], gain: [1.03, 1.0, 0.96],
+      saturation: 1.08, vignette: 0.45,
+    },
   },
   // Walled arena: sightlines are short, keep close to baseline.
+  // Grade: cool neon-noir shadows, punchier saturation for the glow.
   'fps-arena': {
     fogDensity: 0.9, fogLuminance: 0.9,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.9, cloudColor: '#f0f4ff', sky: 0.5,
+    grade: {
+      lift: [-0.005, 0.005, 0.020], gamma: [1.0, 1.0, 1.0], gain: [0.96, 1.0, 1.06],
+      saturation: 1.15, vignette: 0.55,
+    },
   },
   // Brightest biome + long sightlines down the track: pull exposure down,
   // thin the fog hard, darken the sand fog so dunes keep their bands.
+  // Grade: warm desert highlights, restrained saturation so sand doesn't clip.
   racing: {
     fogDensity: 0.55, fogLuminance: 0.75,
     sun: 0.95, hemi: 0.95, ambient: 1.0,
     clouds: 0.7, cloudColor: '#fff8ec', sky: 0.55,
+    grade: {
+      lift: [0.020, 0.010, 0.000], gamma: [1.0, 1.0, 1.0], gain: [1.05, 1.0, 0.93],
+      saturation: 1.10, vignette: 0.40,
+    },
   },
   // Dreamy depth: keep a little more fog but darken the purple so it glows
   // instead of washing white; lift the hemisphere fill slightly.
+  // Grade: violet-tinted shadows, lifted saturation for the dreamscape.
   platformer: {
     fogDensity: 1.15, fogLuminance: 0.8,
     sun: 1.0, hemi: 1.05, ambient: 1.0,
     clouds: 1.0, cloudColor: '#e8dcff', sky: 0.45,
+    grade: {
+      lift: [0.010, 0.000, 0.020], gamma: [1.0, 1.0, 1.0], gain: [1.0, 0.97, 1.05],
+      saturation: 1.12, vignette: 0.40,
+    },
   },
   // Top-down readability: enemies at range must stay crisp — thin fog hard.
+  // Grade: near-neutral with a cool touch, stronger vignette to focus the arena.
   'top-down-shooter': {
     fogDensity: 0.5, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5,
+    grade: {
+      lift: [0.000, 0.000, 0.005], gamma: [1.0, 1.0, 1.0], gain: [0.98, 1.0, 1.03],
+      saturation: 1.06, vignette: 0.50,
+    },
   },
 };
 
@@ -103,6 +153,12 @@ const NIGHT_GRADE: GenreGrade = {
   fogDensity: 1.0, fogLuminance: 1.0,
   sun: 1.0, hemi: 1.0, ambient: 1.0,
   clouds: 1.0, cloudColor: '#3a4460', sky: 1.0,
+  // color grade at night is identity except a mild vignette (no brightness
+  // change, so the night visibility floor is unaffected).
+  grade: {
+    lift: [0, 0, 0], gamma: [1, 1, 1], gain: [1, 1, 1],
+    saturation: 1.0, vignette: 0.35,
+  },
 };
 
 export function gradeAtmosphere(genre: Genre, timeOfDay: TimeOfDay): GenreGrade {

@@ -37,6 +37,9 @@ export class CharacterController {
   private stepAcc = 0;
   private wasGrounded = true;
   private tmpV = new THREE.Vector3();
+  /** landing squash (polish wave): 1→0 progress + impact-scaled depth, fed to rig.animate as `land` */
+  private landT = 0;
+  private landDepth = 0;
 
   constructor(
     private engine: Engine,
@@ -108,7 +111,11 @@ export class CharacterController {
     else this.coyote -= dt;
 
     if (this.grounded && !this.wasGrounded) {
-      this.events.onLand?.(Math.abs(b.velocity.y));
+      const impact = Math.abs(b.velocity.y);
+      this.events.onLand?.(impact);
+      // animation hook: brief squash-and-stretch on land, depth scaled by impact
+      this.landT = 1;
+      this.landDepth = THREE.MathUtils.clamp(impact / 12, 0.3, 1);
     }
     this.wasGrounded = this.grounded;
 
@@ -175,7 +182,11 @@ export class CharacterController {
     this.rig.group.rotation.y += d * Math.min(1, dt * 14);
     const v = this.velocity;
     const planar = Math.hypot(v.x, v.z);
-    this.rig.animate(t, planar, { attacking: this.attackT >= 0 ? 1 - this.attackT : 0 });
+    if (this.landT > 0) this.landT = Math.max(0, this.landT - dt * 4.5); // ~0.22s squash
+    this.rig.animate(t, planar, {
+      attacking: this.attackT >= 0 ? 1 - this.attackT : 0,
+      land: this.landT * this.landDepth,
+    });
     if (this.attackT >= 0) {
       this.attackT -= dt * 3.4;
       if (this.attackT < 0) this.attackT = -1;
