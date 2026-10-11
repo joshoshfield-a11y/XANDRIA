@@ -82,9 +82,9 @@ const roleMat = (rig: CharacterRig, role: string): THREE.MeshStandardMaterial =>
 const isHex = (v: unknown): boolean => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
 
 describe('beauty wave: built-in skin library', () => {
-  it('has 12 skins and every def is schema-valid + deterministic', () => {
+  it('has 16 skins and every def is schema-valid + deterministic', () => {
     const ids = Object.keys(BUILT_IN_SKINS);
-    expect(ids).toHaveLength(12);
+    expect(ids).toHaveLength(16);
     for (const id of ids) {
       const def = BUILT_IN_SKINS[id];
       expect(def.name, `${id}.name`).toBeTruthy();

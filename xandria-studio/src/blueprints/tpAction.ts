@@ -46,6 +46,7 @@ import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
+import { buildItemKit, type BlueprintItemKit } from './itemKit';
 
 export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud } = engine;
@@ -117,6 +118,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
+  // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -233,7 +236,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   };
 
   // --- camera
-  const camRig = makeCameraRig(spec.player.camera, engine.camera, engine.input, (x, z) => engine.terrain.heightAt(x, z));
+  const camRig = makeCameraRig(spec.player.camera, engine.camera, engine.input, (x, z) => engine.terrain.heightAt(x, z),
+    { physics: engine.physics, skipBody: avatar.ctrl.body });
 
   // --- boss aura
   const bossAura = spec.objective.type === 'boss'
@@ -249,11 +253,12 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // (+sin,+cos): offset by PI so W walks away from the camera
     avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
+    itemKit?.update(dt);
 
     // attack input (melee damage scales with the damage upgrade multiplier)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
       if (spec.player.weapon === 'sword' || spec.player.weapon === 'none') {
-        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult());
+        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult() * (itemKit?.damageMult() ?? 1));
       } else {
         // shoot toward camera forward
         const dir = new THREE.Vector3();
@@ -316,5 +321,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets };
+  return { avatar, enemies, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

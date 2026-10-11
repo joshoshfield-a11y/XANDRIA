@@ -193,7 +193,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   // checkpoint XP: award once per gate per lap, in forward-crossing order
   const CP_T = [0.25, 0.5, 0.75];
   let nextCp = 0;
-  const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z));
+  const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z),
+    { physics: engine.physics, skipBody: car.chassis });
   // polish wave (#12): smoothed camera roll fed by the exposed drift angle
   let camRoll = 0;
 

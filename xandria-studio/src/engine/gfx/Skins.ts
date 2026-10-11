@@ -29,6 +29,8 @@ import {
   type GameSpec, type SkinDef, type SkinTexturePattern, type SkinTextureRole,
   SKIN_TEXTURE_ROLES,
 } from '@spec';
+import type { CharacterRig } from './Characters';
+import { applyVoxelArmor, clearVoxelArmor, resolveVoxelArmorSet } from './VoxelArmor';
 
 export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   default: {
@@ -121,6 +123,39 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     roughness: 0.4,
     metalness: 0.6,
     texture: { pattern: 'digital' },
+  },
+  // ---- art-direction pass: voxel armor skins (each = armor set + palette + visor color) ----
+  nomad: {
+    name: 'Nomad',
+    palette: { skin: '#2a2d36', shirt: '#14161c', pants: '#101216', accent: '#d8a428' },
+    armor: 'nomad',
+    visor: { color: '#ffd23f', intensity: 2.2 },
+    roughness: 0.55,
+    metalness: 0.45,
+  },
+  'desert-raider': {
+    name: 'Desert Raider',
+    palette: { skin: '#8a5a3a', shirt: '#7a3320', pants: '#4a2418', accent: '#e08a2e' },
+    armor: 'raider',
+    visor: { color: '#ff9d2e', intensity: 2.4 },
+    roughness: 0.9,
+    metalness: 0.1,
+  },
+  'emerald-guardian': {
+    name: 'Emerald Guardian',
+    palette: { skin: '#2a4a38', shirt: '#16301f', pants: '#12281c', accent: '#d8a428' },
+    armor: 'guardian',
+    visor: { color: '#4dff6a', intensity: 2.2 },
+    roughness: 0.5,
+    metalness: 0.5,
+  },
+  'void-scout': {
+    name: 'Void Scout',
+    palette: { skin: '#4a5a7a', shirt: '#232c40', pants: '#1c2330', accent: '#9fb2cc' },
+    armor: 'scout',
+    visor: { color: '#35e0ff', intensity: 2.2 },
+    roughness: 0.6,
+    metalness: 0.3,
   },
 };
 
@@ -379,6 +414,24 @@ export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef): void {
       if (tex) applyTex(tex);
     } else if (t && 'url' in t && typeof t.url === 'string' && TEX_URL_RE.test(t.url)) {
       textureLoader.load(t.url, applyTex, undefined, () => { /* procedural fallback: palette stands */ });
+    }
+
+    // Voxel armor (art-direction pass): a skin naming an armor set renders the
+    // set's boxy shells automatically; the skin's visor overrides the set's
+    // default slit color. Skins without `armor` render exactly as before and
+    // strip any skin-origin armor (a re-skin is a full look change); item-origin
+    // armor from equipped gear is left alone. No-op on rigs without pivots
+    // (e.g. imported GLB rigs — the roles.size === 0 early return above).
+    const armorId = typeof skin.armor === 'string' && skin.armor ? skin.armor : undefined;
+    const cRig = rig as CharacterRig;
+    if (armorId && resolveVoxelArmorSet(armorId)) {
+      const visorColor = skin.visor && isHex(skin.visor.color) ? skin.visor.color : undefined;
+      const visorIntensity = skin.visor && typeof skin.visor.intensity === 'number' &&
+        Number.isFinite(skin.visor.intensity)
+        ? THREE.MathUtils.clamp(skin.visor.intensity, 0, 5) : undefined;
+      applyVoxelArmor(cRig, armorId, { visorColor, visorIntensity, origin: 'skin' });
+    } else {
+      clearVoxelArmor(cRig, undefined, 'skin');
     }
   } catch {
     // skins must never break generation — a bad skin is a no-op
