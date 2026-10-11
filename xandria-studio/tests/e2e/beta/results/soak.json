@@ -1,0 +1,228 @@
+{
+  "suite": "soak",
+  "name": "soak-10min",
+  "passed": true,
+  "durationMs": 608600,
+  "metrics": {
+    "samples": [
+      {
+        "t": 87,
+        "heapBytes": 19300000,
+        "frame": 4,
+        "pos": {
+          "x": 1.1347473099861931e-13,
+          "y": 0.8489177424663282,
+          "z": -1.0972667545461676e-13
+        }
+      },
+      {
+        "t": 30365,
+        "heapBytes": 19300000,
+        "frame": 24,
+        "pos": {
+          "x": 0.9440846247364131,
+          "y": 0.849908946029888,
+          "z": -1.8389004145873775
+        }
+      },
+      {
+        "t": 60563,
+        "heapBytes": 19300000,
+        "frame": 40,
+        "pos": {
+          "x": 2.961896419699939,
+          "y": 1.017649007934823,
+          "z": -12.672122665312882
+        }
+      },
+      {
+        "t": 90710,
+        "heapBytes": 19300000,
+        "frame": 50,
+        "pos": {
+          "x": 4.050986974851435,
+          "y": 2.359287042583778,
+          "z": -19.20079786723669
+        }
+      },
+      {
+        "t": 120897,
+        "heapBytes": 19300000,
+        "frame": 59,
+        "pos": {
+          "x": 7.838934419019853,
+          "y": 3.3514505374038115,
+          "z": -23.53381415166196
+        }
+      },
+      {
+        "t": 151117,
+        "heapBytes": 19300000,
+        "frame": 68,
+        "pos": {
+          "x": 13.972899709287429,
+          "y": 2.3662800454756643,
+          "z": -25.89090993918142
+        }
+      },
+      {
+        "t": 181400,
+        "heapBytes": 19300000,
+        "frame": 76,
+        "pos": {
+          "x": 18.2738318744642,
+          "y": 3.133928977045515,
+          "z": -29.679764385959988
+        }
+      },
+      {
+        "t": 211573,
+        "heapBytes": 19300000,
+        "frame": 83,
+        "pos": {
+          "x": 20.937611057419776,
+          "y": 2.6757031352758474,
+          "z": -33.95549146571643
+        }
+      },
+      {
+        "t": 241795,
+        "heapBytes": 19300000,
+        "frame": 92,
+        "pos": {
+          "x": 0.01755624948469488,
+          "y": 3.828888888888889,
+          "z": 0.08693786805668881
+        }
+      },
+      {
+        "t": 272063,
+        "heapBytes": 19300000,
+        "frame": 97,
+        "pos": {
+          "x": -0.6845614866718356,
+          "y": 0.8498136563992132,
+          "z": 3.2938746823338354
+        }
+      },
+      {
+        "t": 302363,
+        "heapBytes": 19300000,
+        "frame": 103,
+        "pos": {
+          "x": -3.3043578099890722,
+          "y": 0.8487774811642902,
+          "z": 9.058012498344626
+        }
+      },
+      {
+        "t": 333086,
+        "heapBytes": 19300000,
+        "frame": 107,
+        "pos": {
+          "x": -5.348243689211097,
+          "y": 0.7575220989516803,
+          "z": 13.207263044271087
+        }
+      },
+      {
+        "t": 363271,
+        "heapBytes": 19300000,
+        "frame": 112,
+        "pos": {
+          "x": -7.6782576497181845,
+          "y": 1.504021479139521,
+          "z": 17.928884523389556
+        }
+      },
+      {
+        "t": 393678,
+        "heapBytes": 19300000,
+        "frame": 115,
+        "pos": {
+          "x": -8.779825897124574,
+          "y": 2.1452883022865015,
+          "z": 19.585980269603624
+        }
+      },
+      {
+        "t": 423917,
+        "heapBytes": 19300000,
+        "frame": 123,
+        "pos": {
+          "x": -6.7648639480842405,
+          "y": 0.7895908836060639,
+          "z": 14.129513071180721
+        }
+      },
+      {
+        "t": 454290,
+        "heapBytes": 19300000,
+        "frame": 129,
+        "pos": {
+          "x": -4.832849567888783,
+          "y": 0.8321657338074527,
+          "z": 10.469951008592195
+        }
+      },
+      {
+        "t": 484571,
+        "heapBytes": 19300000,
+        "frame": 138,
+        "pos": {
+          "x": -2.3578491826938097,
+          "y": 0.8498460655591942,
+          "z": 4.765570304933486
+        }
+      },
+      {
+        "t": 514793,
+        "heapBytes": 19300000,
+        "frame": 143,
+        "pos": {
+          "x": -1.2823293205615174,
+          "y": 0.8498460000000174,
+          "z": 1.4867145149343728
+        }
+      },
+      {
+        "t": 545160,
+        "heapBytes": 19300000,
+        "frame": 148,
+        "pos": {
+          "x": -0.3661427257617586,
+          "y": 0.8498460000017889,
+          "z": -1.85927326012181
+        }
+      },
+      {
+        "t": 575383,
+        "heapBytes": 19300000,
+        "frame": 154,
+        "pos": {
+          "x": 0.5531159940195022,
+          "y": 0.8498393285528333,
+          "z": -5.890470994823489
+        }
+      }
+    ],
+    "heapStart": 19300000,
+    "heapEnd": 19300000,
+    "growthFactor": 1,
+    "slopePerMin": 0,
+    "outcome": "playing-throughout",
+    "memoryCheck": "pass",
+    "playingWindows": 9
+  },
+  "errors": [],
+  "notes": [
+    "duration target: 600000ms (SOAK_MS override not set)",
+    "booted in 8519ms",
+    "bot survived the full run (state stayed 'playing')",
+    "final frame=159; approx sim time=0.4 sim-min (test mode: 10 substeps x 1/60s per rendered frame)",
+    "heap: start(60s)=18.4MB end=18.4MB growthFactor=1.000 slope=0.00MB/min projected-1h=1.00x (n=18)",
+    "HEAP QUANTIZATION WARNING: all post-warmup heap samples bit-identical (18.4MB) — performance.memory may be frozen/quantized in this environment; treat the memory gate as weak evidence, not a strong pass.",
+    "sim advanced in all 9 'playing' 60s windows",
+    "honest limits: 10 real minutes is not 10 hours; this scene renders ~0.4fps under SwiftShader here (heavier than the ~3fps assumption), so the run covers only ~40-60 sim-seconds — an endurance signal for leaks/crashes, not a long-horizon stability proof; single genre (third-person-action); bot is deliberately simple (greedy steer + 8m attack taps, no pathing, no stuck-detection)."
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "suite": "fuzz",
+  "name": "invalid-action-probe",
+  "genre": "racing",
+  "passed": true,
+  "durationMs": 4692,
+  "metrics": {
+    "injections": 1,
+    "nanFindings": 0
+  },
+  "errors": [],
+  "notes": "Injected unknown action \"fly_away\" via engine.input.inject(). Input.inject() does no validation: the name lands in the injected set and input.pressed(\"fly_away\") would return true, but no blueprint queries it, so it is silently ignored. Report-only, no assertions.",
+  "probe": {
+    "threw": null,
+    "stillInjectedAfter2s": true,
+    "pressedResult": true,
+    "pressedThrows": null,
+    "errorsDelta": 0,
+    "state": "playing"
+  }
+}

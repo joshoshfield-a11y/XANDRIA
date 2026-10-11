@@ -1,0 +1,135 @@
+{
+  "suite": "fuzz",
+  "name": "intent-fuzzer",
+  "passed": true,
+  "durationMs": 0,
+  "metrics": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0
+  },
+  "errors": [],
+  "notes": "Generator keyword-matches intent against GENRE_KEYS with word-boundary regex; unmatched intents fall back to third-person-action (generate.ts: `genre ??= 'third-person-action'`); an empty intent param is falsy so resolveSpec() uses the built-in demo spec. \"Fails gracefully\" = reaches state 'playing' with a valid spec genre and zero errors.",
+  "intents": [
+    {
+      "intent": "sword adventure in ancient ruins",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4505ms)"
+    },
+    {
+      "intent": "<img src=x onerror=alert(1)>",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4600ms)"
+    },
+    {
+      "intent": "blorpt zzz",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4667ms)"
+    },
+    {
+      "intent": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (2905ms)"
+    },
+    {
+      "intent": "🏎️💥 赛车",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (2695ms)"
+    },
+    {
+      "intent": "racing shooter platformer cooking sim",
+      "outcome": "pass",
+      "genre": "racing",
+      "note": "reached playing; spec genre=racing (3281ms)"
+    },
+    {
+      "intent": "'; DROP TABLE",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (2702ms)"
+    },
+    {
+      "intent": "<script>alert(1)</script>",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (2914ms)"
+    },
+    {
+      "intent": "   ",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (5141ms)"
+    },
+    {
+      "intent": "",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (5326ms)"
+    },
+    {
+      "intent": "12345",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4941ms)"
+    },
+    {
+      "intent": "first person doom quake deathmatch arena shooter race grand prix f1 kart drift twin stick horde top down overhead sidescroll mario jumping samurai ninja rpg quest explore sword",
+      "outcome": "pass",
+      "genre": "racing",
+      "note": "reached playing; spec genre=racing (5406ms)"
+    },
+    {
+      "intent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4503ms)"
+    },
+    {
+      "intent": "racing\n\tdrift\t\ncar",
+      "outcome": "pass",
+      "genre": "racing",
+      "note": "reached playing; spec genre=racing (4416ms)"
+    },
+    {
+      "intent": "undefined",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (8906ms)"
+    },
+    {
+      "intent": "null",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4411ms)"
+    },
+    {
+      "intent": "{\"json\": true, not valid json}",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4384ms)"
+    },
+    {
+      "intent": "../../etc/passwd",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (4205ms)"
+    },
+    {
+      "intent": "cooking sim bake a cake",
+      "outcome": "pass",
+      "genre": "third-person-action",
+      "note": "reached playing; spec genre=third-person-action (8464ms)"
+    },
+    {
+      "intent": "https://example.com/game?mode=race&laps=3",
+      "outcome": "pass",
+      "genre": "racing",
+      "note": "reached playing; spec genre=racing (17117ms)"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "suite": "bots",
+  "name": "tp-action",
+  "genre": "third-person-action",
+  "passed": true,
+  "durationMs": 377467,
+  "metrics": {
+    "frames": 180,
+    "scoreStart": 0,
+    "scoreEnd": 400,
+    "progressStart": 0,
+    "progressEnd": 2,
+    "softlockWindows": 19
+  },
+  "errors": [],
+  "notes": [
+    "baseline frame=8 score=0 progress=0",
+    "reached 180 rendered frames"
+  ],
+  "summary": "errors:0 | score 0→400 | progress 0→2 | softlock 0/19 | nan:0 | frames:180"
+}
