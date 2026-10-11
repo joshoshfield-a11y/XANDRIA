@@ -106,8 +106,7 @@ export class Terrain {
       if (ny < 0.75) { const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1); tmp.setRGB(colors[k * 3], colors[k * 3 + 1], colors[k * 3 + 2]).lerp(cRock, f); colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b; }
     }
     geo.attributes.color.needsUpdate = true;
-    const kind = MaterialLibrary.groundKind(spec.theme.environment);
-    const mat = mats.standard(kind, '#ffffff', { alt: shade('#ffffff', -0.1), repeat: this.size / 8, roughness: 0.95 });
+    const mat = mats.biomeGround(spec.theme.environment, { repeat: this.size / 8, roughness: 0.95 });
     mat.vertexColors = true;
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
@@ -142,22 +141,39 @@ export class Terrain {
     }
 
     // ---- water plane (polish wave: animated fake specular — a time-driven
-    // normal ripple in onBeforeCompile; no planar reflections, one uniform)
+    // normal ripple in onBeforeCompile; env-art pass: sun-aligned directional
+    // glint so the water throws a warm dusk sparkle toward the sun. No planar
+    // reflections — two uniforms and one pow(), no per-frame CPU cost.)
     if (t.water) {
       const wm = new THREE.MeshStandardMaterial({ color: spec.theme.environment === 'volcanic' ? '#ff5a1f' : '#2a6fb0', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3, emissive: spec.theme.environment === 'volcanic' ? '#ff3300' : '#000000', emissiveIntensity: 0.8 });
       wm.userData.uTime = { value: 0 };
-      wm.customProgramCacheKey = () => 'xandria-water-v1';
+      // default glint: low warm sun (dusk look); blueprints refine it from the
+      // real sky sun via setWaterSun() right after createSky().
+      wm.userData.uSunDirW = { value: new THREE.Vector3(0.55, 0.28, 0.45).normalize() };
+      wm.userData.uGlint = { value: new THREE.Color('#ffb46b') };
+      wm.customProgramCacheKey = () => 'xandria-water-v2';
       wm.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = wm.userData.uTime;
+        shader.uniforms.uSunDirW = wm.userData.uSunDirW;
+        shader.uniforms.uGlint = wm.userData.uGlint;
         shader.vertexShader = shader.vertexShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
-          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;');
+          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW; varying vec3 vWPos;')
+          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         shader.fragmentShader = shader.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
+          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; varying vec2 vUvW; varying vec3 vWPos;')
           .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
             float wv1 = sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
             float wv2 = sin((vUvW.x + vUvW.y) * 34.0 - uTime * 2.2);
-            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`);
+            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`)
+          .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+            {
+              vec3 Vw = normalize(cameraPosition - vWPos);
+              vec3 Hv = normalize(normalize(uSunDirW) + Vw);
+              float wspec = pow(max(dot(normalize(normal), Hv), 0.0), 90.0);
+              float shimmer = 0.5 + 0.5 * sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
+              totalEmissiveRadiance += uGlint * wspec * (0.25 + 0.75 * shimmer);
+            }`);
       };
       this.waterMat = wm;
       this.water = new THREE.Mesh(new THREE.PlaneGeometry(this.size * 3, this.size * 3), wm);
@@ -170,6 +186,25 @@ export class Terrain {
   /** Advance the water ripple clock. Called per frame only when water exists. */
   updateWater(dt: number) {
     if (this.waterMat) (this.waterMat.userData.uTime as { value: number }).value += dt;
+  }
+
+  /**
+   * Align the water's fake sun glint with the real sky sun. Call once after
+   * createSky() — e.g. `terrain.setWaterSun(sunDirFromSky, dusk ? '#ffb46b' : '#cfe8ff')`.
+   * Never throws; ignores bad input.
+   */
+  setWaterSun(dir: THREE.Vector3 | null | undefined, tint: string | null | undefined): void {
+    if (!this.waterMat) return;
+    try {
+      if (dir && Number.isFinite(dir.x + dir.y + dir.z)) {
+        (this.waterMat.userData.uSunDirW as { value: THREE.Vector3 }).value.copy(dir).normalize();
+      }
+      if (typeof tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(tint)) {
+        (this.waterMat.userData.uGlint as { value: THREE.Color }).value.set(tint);
+      }
+    } catch {
+      // water glint is cosmetic — never break the world over it
+    }
   }
 
   /** Bilinear height sample at world (x,z). */

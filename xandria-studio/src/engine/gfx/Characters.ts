@@ -6,6 +6,7 @@
  */
 import * as THREE from 'three';
 import type { MaterialLibrary } from './Materials';
+import { Rng } from '../core/Rng';
 import { forgeHumanoidPlan, forgeDronePlan, forgeVehiclePlan, type HumanoidPlan, type BodyArchetype } from './ModelForge';
 import type { ForgeCustom } from '@spec';
 
@@ -106,6 +107,65 @@ const ARCH_SCALE: Record<BodyArchetype, { limb: number; hand: number; foot: numb
   scout: { limb: 0.85, hand: 0.85, foot: 0.9, shoulder: 0.9, torso: 0.9 },
 };
 
+/** Face the +Z direction: true for head styles with a visible face. */
+const FACE_VISIBLE: Record<string, boolean> = {
+  visor: true, mohawk: true, antenna: true, crest: true, horned: true,
+  helmet: false, hood: false,
+};
+
+/** Seeded eye-glow variants (inventory wave: cheap facial/feature variety). */
+const EYE_GLOW_VARIANTS = ['#ffffff', '#ff5533', '#35e0ff'] as const;
+
+/**
+ * Facial/feature variety, seeded from the rig seed (deterministic: same seed →
+ * same face). All bits are tiny shared-material meshes — skins never touch
+ * them (owned materials are untouched) and they cost ~6 draw calls at most.
+ * - eyes: glowing eyes for face-visible styles without built-in eyes
+ *   (hood/helmet already have them); color drawn from EYE_GLOW_VARIANTS or
+ *   the plan accent
+ * - war-paint: two thin accent stripes across the cheeks (face-visible only)
+ * - headband: cloth band for mohawk/antenna/crest (visor has its own band)
+ * - scar: thin dark diagonal slash on the forehead (face-visible only)
+ */
+function dressFeatures(
+  head: THREE.Mesh, plan: HumanoidPlan, s: number, hr: number,
+  accent: THREE.Material, mats: MaterialLibrary, frng: Rng,
+) {
+  const faceVisible = FACE_VISIBLE[plan.headStyle] ?? true;
+  if (plan.headStyle === 'visor' || plan.headStyle === 'mohawk' || plan.headStyle === 'antenna' || plan.headStyle === 'crest') {
+    // eye-glow variant: plan accent or one of the cold/hot variants
+    const eyeHex = frng.chance(0.5) ? plan.colors.accent : frng.pick(EYE_GLOW_VARIANTS);
+    const eyeMat = mats.glow(eyeHex, 1.8);
+    head.add(
+      part(new THREE.SphereGeometry(0.024, 6, 5), eyeMat, 0.06 * s, 0.03, hr * 0.86),
+      part(new THREE.SphereGeometry(0.024, 6, 5), eyeMat, -0.06 * s, 0.03, hr * 0.86),
+    );
+  }
+  if (faceVisible && frng.chance(0.35)) {
+    // war-paint: accent cheek stripes
+    for (const side of [1, -1]) {
+      const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.13 * s, 0.022), accent);
+      stripe.position.set(0.085 * s * side, -0.035, hr * 0.88);
+      stripe.rotation.y = 0.35 * side;
+      head.add(stripe);
+    }
+  }
+  if (faceVisible && frng.chance(0.25)) {
+    // scar: thin dark slash on the forehead
+    const scar = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.016, 0.10 * s),
+      mats.flat('#5a3a2e', { roughness: 0.9 }),
+    );
+    scar.position.set(0.05 * s, 0.075, hr * 0.90);
+    scar.rotation.z = 0.5;
+    head.add(scar);
+  }
+  if ((plan.headStyle === 'mohawk' || plan.headStyle === 'antenna' || plan.headStyle === 'crest') && frng.chance(0.4)) {
+    // cloth headband (visor/horned styles already wear a band)
+    head.add(part(new THREE.CylinderGeometry(hr * 1.03, hr * 1.03, 0.06, 12, 1, true, -0.8, 1.6), accent, 0, 0.075, 0));
+  }
+}
+
 /** Attach forged headgear to a head mesh (sphere, radius hr, face toward +Z). No boxes — bands, domes, cones, fins. */
 function dressHead(head: THREE.Mesh, plan: HumanoidPlan, skin: THREE.Material, accent: THREE.Material, mats: MaterialLibrary) {
   const s = plan.headSize;
@@ -175,7 +235,7 @@ function dressHead(head: THREE.Mesh, plan: HumanoidPlan, skin: THREE.Material, a
 function dressTorso(
   torso: THREE.Object3D, group: THREE.Group, plan: HumanoidPlan,
   tex: { accent: THREE.Material; shirt: THREE.Material; accentDS: THREE.Material },
-  mats: MaterialLibrary,
+  mats: MaterialLibrary, frng: Rng,
 ): { cape: THREE.Object3D[] } {
   const b = plan.bulk;
   const arch = ARCH_SCALE[plan.archetype];
@@ -204,6 +264,24 @@ function dressTorso(
     }
     case 'none':
       break;
+  }
+  // Armor trim variety (inventory wave, seeded): glow rivets on pads/plate,
+  // a second strap on bandoliers, a chest emblem on bare torsos — so each
+  // armor set reads differently and torso-slot equips sit on something sensible.
+  if ((plan.armor === 'pads' || plan.armor === 'plate') && frng.chance(0.5)) {
+    const rivet = mats.glow(plan.colors.accent, 1.2);
+    torso.add(
+      part(new THREE.SphereGeometry(0.028, 6, 5), rivet, shoulderX * 0.82, 0.36, 0.10 * b),
+      part(new THREE.SphereGeometry(0.028, 6, 5), rivet, -shoulderX * 0.82, 0.36, 0.10 * b),
+    );
+  } else if (plan.armor === 'bandolier' && frng.chance(0.5)) {
+    const strap2 = part(new THREE.CylinderGeometry(0.32 * b * arch.torso, 0.27 * b * arch.torso, 0.09, 10, 1, true), accent, 0, 0.16, 0);
+    strap2.rotation.z = -0.5;
+    torso.add(strap2);
+  } else if (plan.armor === 'none' && frng.chance(0.3)) {
+    const emblem = part(new THREE.OctahedronGeometry(0.055), accent, 0, 0.18, 0.30 * b * arch.torso);
+    emblem.scale.set(1, 1.3, 0.5);
+    torso.add(emblem);
   }
   const capeSegs: THREE.Object3D[] = [];
   for (const e of plan.extras) {
@@ -256,6 +334,9 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   const { height, bulk, legLen } = plan;
   const arch = ARCH_SCALE[plan.archetype];
   const b = bulk;
+  // feature-variety RNG: seeded from the rig seed, independent of the plan
+  // forge (same seed → same face, every time; no Math.random in sim paths)
+  const frng = new Rng((seed ^ 0x5e47) >>> 0);
   // FIX: clone into per-instance owned materials — flash() mutates emissive, and
   // mutating the MaterialLibrary-cached originals permanently tinted every
   // same-palette character. Owned clones are disposed by dispose().
@@ -288,12 +369,13 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   const hips = part(new THREE.SphereGeometry(0.20 * b * arch.torso, 8, 6), pants, 0, -0.3, 0);
   hips.scale.set(1.15, 0.75, 0.9);
   torso.add(hips);
-  const { cape: capeSegs } = dressTorso(torso, group, plan, { accent, shirt, accentDS }, mats);
+  const { cape: capeSegs } = dressTorso(torso, group, plan, { accent, shirt, accentDS }, mats, frng);
 
-  // head: sphere + forged headgear
+  // head: sphere + forged headgear + seeded facial/feature variety
   const hr = 0.17 * plan.headSize;
   const head = part(new THREE.SphereGeometry(hr, 10, 8), skin, 0, torsoY + 0.54 * plan.headSize, 0);
   dressHead(head, plan, skin, accent, mats);
+  dressFeatures(head, plan, plan.headSize, hr, accent, mats, frng);
 
   // arms: shoulder pivot → upper arm → elbow pivot → forearm + fist
   const buildArm = (side: 1 | -1) => {
@@ -309,6 +391,12 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
     const hand = part(new THREE.SphereGeometry(handR, 8, 6), skin, 0, -foreArmLen - handR * 0.45, 0);
     hand.scale.set(0.9, 1.25, 0.95);
     elbow.add(fore, hand);
+    if (frng.chance(0.2)) {
+      // bandaged forearm: white wrap ring at the elbow (shared material, like horns)
+      const wrap = part(new THREE.TorusGeometry(0.075 * b * lr, 0.022, 6, 10), mats.flat('#e8e2d0', { roughness: 0.9 }), 0, -0.06, 0);
+      wrap.rotation.x = Math.PI / 2;
+      elbow.add(wrap);
+    }
     shoulder.add(delt, upper, elbow);
     return { shoulder, elbow };
   };
@@ -324,6 +412,12 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
     const boot = part(new THREE.SphereGeometry(footR, 8, 6), accent, 0, -shinLen + footR * 0.55, 0.06 * b);
     boot.scale.set(0.85, 0.6, 1.45);
     knee.add(shin, boot);
+    if (frng.chance(0.3)) {
+      // knee wrap: pants-colored band so legs-slot equips sit on something dressed
+      const wrap = part(new THREE.TorusGeometry(0.088 * b * lr, 0.02, 6, 10), pants, 0, -0.04, 0);
+      wrap.rotation.x = Math.PI / 2;
+      knee.add(wrap);
+    }
     hip.add(thigh, knee);
     return { hip, knee };
   };

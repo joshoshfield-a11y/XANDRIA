@@ -44,7 +44,9 @@ import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
+import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { PlayerAvatar } from './common';
+import { buildItemKit, type BlueprintItemKit } from './itemKit';
 
 export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
@@ -94,6 +96,21 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     exclusion: [{ x: 0, z: 0, r: 10 }],
     quality: engine.effectiveQuality(),
   });
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
+  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+    exclusion: [{ x: 0, z: 0, r: 10 }], quality: engine.effectiveQuality(),
+  });
+  scatterAmberGlow(scene, rng.fork(0xe9a1), {
+    mats: engine.mats,
+    groundY: (x, z) => terrain.heightAt(x, z),
+    half: terrain.size / 2 - 10,
+    exclusion: [{ x: 0, z: 0, r: 10 }],
+    quality: engine.effectiveQuality(),
+  });
+  terrain.setWaterSun(
+    engine.sky.sun.position.clone().sub(engine.sky.sun.target.position).normalize(),
+    spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn' ? '#ffb46b' : '#cfe8ff',
+  );
   // polish (LOOK crew): living light — neon pylons hum
   engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 2.2), 0.16, 2.1);
   // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
@@ -132,6 +149,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -142,7 +161,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult() * (itemKit?.damageMult() ?? 1), point); combatPulse(); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -292,6 +311,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const t = engine.time;
     avatar.ctrl.camYaw = camRig.yaw;
     avatar.update(dt, t);
+    itemKit?.update(dt);
 
     if ((input.pressed('attack') || input.justPressed('attack')) && engine.state === 'playing') {
       const dir = new THREE.Vector3();
@@ -334,5 +354,5 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (spec.objective.type === 'survive') hud.setProgress(`${enemies.aliveCount()} hostiles`);
   });
 
-  return { avatar, enemies, pickups, objectives, assets };
+  return { avatar, enemies, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

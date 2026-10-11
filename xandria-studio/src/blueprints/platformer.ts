@@ -35,8 +35,10 @@ import { ChapterDresser, ParallaxLayers } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
+import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
+import { buildItemKit, type BlueprintItemKit } from './itemKit';
 import { Rng } from '../engine/core/Rng';
 
 export function buildPlatformer(engine: Engine, spec: GameSpec) {
@@ -106,6 +108,20 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     heroesOnly: true,
     quality: engine.effectiveQuality(),
   });
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
+  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+    quality: engine.effectiveQuality(),
+  });
+  scatterAmberGlow(scene, rng.fork(0xe9a1), {
+    mats: engine.mats,
+    groundY: (x, z) => terrain.heightAt(x, z),
+    half: terrain.size / 2 - 10,
+    quality: engine.effectiveQuality(),
+  });
+  terrain.setWaterSun(
+    engine.sky.sun.position.clone().sub(engine.sky.sun.target.position).normalize(),
+    spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn' ? '#ffb46b' : '#cfe8ff',
+  );
   // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
   attachLightShafts(engine);
 
@@ -136,6 +152,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // enemy variants: spikeballs (never stomp) + skyrays (sine patrol)
   const variants = new VariantDirector(engine, enemies, null, 31337);
   avatar = new PlayerAvatar(engine, spec, start.clone().add(new THREE.Vector3(0, 2, 0)), enemies, projectiles);
+  // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -228,7 +246,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   }, { floating: true });
   let lastStage = 0;
 
-  const camRig = makeCameraRig('side', engine.camera, engine.input);
+  const camRig = makeCameraRig('side', engine.camera, engine.input, undefined,
+    { physics: engine.physics, skipBody: avatar.ctrl.body });
 
   engine.onUpdate((dt) => {
     const t = engine.time;
@@ -236,6 +255,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     // camYaw = 0 maps D to +x (the old -PI/2 sent D into the screen)
     avatar.ctrl.camYaw = 0;
     avatar.update(dt, t);
+    itemKit?.update(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     variants.update(dt, avatar.ctrl.position, t);
     pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());
@@ -293,5 +313,5 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets };
+  return { avatar, enemies, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

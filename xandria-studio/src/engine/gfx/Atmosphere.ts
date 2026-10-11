@@ -25,14 +25,21 @@ export function createAtmosphere(spec: GameSpec): AtmosphereRig {
   sky.scale.setScalar(1000);
 
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
-  const elevation = dusk ? 4 : 48;                     // degrees above horizon
+  // Env-art dusk preset: the sun sits lower for a longer atmospheric path and
+  // the air scatters harder — golden-hour warmth at the horizon. Day keeps
+  // the authored values.
+  const elevation = dusk ? 3 : 48;                     // degrees above horizon
   const azimuth = 100 + (spec.meta.seed % 160);        // deterministic per game
 
   const turbidity =
     weather === 'ash' ? 25 : weather === 'storm' ? 18 : weather === 'fog' ? 14
     : weather === 'rain' ? 12 : weather === 'snow' ? 9 : 6;
-  const rayleigh = dusk ? 3.2 : 1.8;
-  const mieCoefficient = weather === 'clear' ? 0.004 : weather === 'ash' ? 0.02 : 0.009;
+  const rayleigh = dusk ? 4.2 : 1.8;
+  // Env-art dusk preset: a stronger solar aureole at golden hour so the sun
+  // carries a warm glow (the reference vistas are ALL dusk). Day keeps the
+  // authored values.
+  const mieCoefficient = dusk ? 0.012
+    : weather === 'clear' ? 0.004 : weather === 'ash' ? 0.02 : 0.009;
   const mieDirectionalG = 0.8;
 
   const phi = THREE.MathUtils.degToRad(90 - elevation);

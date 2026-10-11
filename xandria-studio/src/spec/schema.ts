@@ -316,6 +316,98 @@ export interface CharactersCustom {
   /** enemy kind (or registered custom kind id) → slot */
   enemies?: Record<string, CharacterSlot>;
 }
+
+/** Item kinds. weapon/armor are equippable; consumable is used from inventory;
+ *  material stacks for crafting hooks; key/trinket are quest/flag items. */
+export const ITEM_TYPES = ['weapon', 'armor', 'consumable', 'material', 'key', 'trinket'] as const;
+export type ItemType = (typeof ITEM_TYPES)[number];
+
+/** Equip slots on the character rig. */
+export const EQUIP_SLOTS = ['weapon', 'head', 'torso', 'legs', 'accessory'] as const;
+export type EquipSlot = (typeof EQUIP_SLOTS)[number];
+
+/** Rarity ladder — drives glow color + particle shimmer on world items. */
+export const ITEM_RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
+export type ItemRarity = (typeof ITEM_RARITIES)[number];
+
+/** Stat keys an item may grant while equipped (all additive, finite numbers). */
+export const ITEM_STAT_KEYS = ['damage', 'defense', 'speed', 'maxHealth', 'crit', 'attackSpeed', 'luck'] as const;
+export type ItemStatKey = (typeof ITEM_STAT_KEYS)[number];
+export type ItemStats = Partial<Record<ItemStatKey, number>>;
+
+/** Consumable use-behavior. */
+export interface ItemBehavior {
+  effect: 'heal' | 'restore' | 'buff';
+  amount?: number;    // heal/restore amount, or buff magnitude
+  duration?: number;  // buff seconds (0 = instant)
+}
+/**
+ * One item definition. JSON-serializable; lives in `custom.items.defs`.
+ * `slot` is required for weapon/armor (which slot it equips to).
+ * `skin` references an item-skin id (built-in or `custom.items.skins`);
+ * `model` is a GLB/GLTF URL mesh override (online-only, procedural fallback).
+ * `stats` apply while equipped; `behavior` defines consumable use.
+ */
+export interface ItemDef {
+  name: string;
+  type: ItemType;
+  slot?: EquipSlot;
+  rarity?: ItemRarity;          // default 'common'
+  stats?: ItemStats;
+  behavior?: ItemBehavior;
+  skin?: string;
+  model?: string;
+  stack?: number;               // max stack size 1..999, default 1
+  value?: number;               // coin/vendor value, >= 0
+  description?: string;         // <= 280 chars
+}
+/**
+ * Item skin definition — the SkinDef concept extended to items.
+ * `roles` maps onto an item mesh's userData.role-tagged materials
+ * ('primary' | 'secondary' | 'glow'); unmapped roles keep the mesh default.
+ */
+export const ITEM_SKIN_ROLES = ['primary', 'secondary', 'glow'] as const;
+export type ItemSkinRole = (typeof ITEM_SKIN_ROLES)[number];
+export interface ItemSkinDef {
+  name: string;
+  palette?: Partial<Record<ItemSkinRole, string>>;  // #rrggbb each
+  emissive?: SkinEmissive;
+  roughness?: number;  // 0..1
+  metalness?: number;  // 0..1
+  /** item-mesh texture: URL image or named canvas pattern (same pattern set as character skins) */
+  texture?: { url: string } | { pattern: SkinTexturePattern };
+  textureRoles?: ItemSkinRole[];
+}
+/** A fixed loot placement: item id + world position (+ optional count). */
+export interface ItemLootSpot {
+  item: string;
+  pos: [number, number, number];
+  count?: number;
+}
+/** A breakable/lootable container placed in the world. */
+export interface ItemChestDef {
+  pos: [number, number, number];
+  loot: string[];          // item ids
+  locked?: boolean;
+  skin?: string;           // chest skin id (item skins)
+}
+/**
+ * Item tables for a generated game. All visual/behavioral — the generator
+ * may emit these; the runtime resolves ids against `defs` (unknown ids are
+ * hard errors at validation time, so typos never ship silently).
+ */
+export interface ItemsCustom {
+  /** item id → definition */
+  defs?: Record<string, ItemDef>;
+  /** custom item-skin id → definition (merged over built-ins at read time) */
+  skins?: Record<string, ItemSkinDef>;
+  /** fixed world loot placements */
+  loot?: ItemLootSpot[];
+  /** containers placed in the world */
+  chests?: ItemChestDef[];
+  /** item ids the player starts with */
+  starting?: string[];
+}
 /**
  * Per-asset visual override (the reskin contract).
  * `custom.assets` accepts either the legacy AssetPacks shape (when an
@@ -344,6 +436,13 @@ export interface CustomSpec {
    * model URLs always fall back to the procedural rig on any failure.
    */
   characters?: CharactersCustom;
+  /**
+   * Item tables (inventory wave): item definitions, item skins, world loot
+   * placement, chests, and starting inventory. Gameplay + visual; ids in
+   * loot/chests/starting must exist in `defs`. Invalid values are rejected
+   * by validateSpec.
+   */
+  items?: ItemsCustom;
   /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
   legacyOperators?: number[];
   /**
@@ -534,7 +633,7 @@ function validateStageGraph(
 
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'legacyOperators', 'profileDamageMult'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult'];
 
 /** Options for validateSpec. */
 export interface ValidateSpecOptions {
@@ -901,6 +1000,139 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
           if (ch.enemies !== undefined) {
             if (!isObj(ch.enemies)) err('custom.characters.enemies', 'must be an object');
             else for (const [k, s] of Object.entries(ch.enemies)) validateSlot(s, `custom.characters.enemies.${k}`);
+          }
+        }
+      }
+      // items — item tables, item skins, loot/chest placement (inventory wave)
+      const it = c.items;
+      if (it !== undefined) {
+        if (!isObj(it)) err('custom.items', 'must be an object');
+        else {
+          const defIds = new Set<string>();
+          const validateItemDef = (d: unknown, path: string) => {
+            if (!isObj(d)) return err(path, 'must be an object');
+            if (typeof d.name !== 'string' || !d.name) err(`${path}.name`, 'must be a non-empty string');
+            else if (d.name.length > 48) err(`${path}.name`, 'must be <= 48 chars');
+            if (!inEnum(d.type, ITEM_TYPES)) err(`${path}.type`, `must be one of ${ITEM_TYPES.join('|')}`);
+            if (d.slot !== undefined && !inEnum(d.slot, EQUIP_SLOTS))
+              err(`${path}.slot`, `must be one of ${EQUIP_SLOTS.join('|')}`);
+            if ((d.type === 'weapon' || d.type === 'armor') && d.slot === undefined)
+              err(`${path}.slot`, 'required for weapon/armor items');
+            if (d.rarity !== undefined && !inEnum(d.rarity, ITEM_RARITIES))
+              err(`${path}.rarity`, `must be one of ${ITEM_RARITIES.join('|')}`);
+            if (d.stats !== undefined) {
+              if (!isObj(d.stats)) err(`${path}.stats`, 'must be an object');
+              else for (const [k, v] of Object.entries(d.stats)) {
+                if (!(ITEM_STAT_KEYS as readonly string[]).includes(k))
+                  err(`${path}.stats.${k}`, `unknown stat (${ITEM_STAT_KEYS.join('|')})`);
+                else if (!num(v, -1000, 10000)) err(`${path}.stats.${k}`, 'must be a finite number -1000..10000');
+              }
+            }
+            if (d.behavior !== undefined) {
+              if (!isObj(d.behavior)) err(`${path}.behavior`, 'must be an object');
+              else {
+                if (!['heal', 'restore', 'buff'].includes(d.behavior.effect as string))
+                  err(`${path}.behavior.effect`, 'must be heal|restore|buff');
+                if (d.behavior.amount !== undefined && !num(d.behavior.amount, 0, 100000))
+                  err(`${path}.behavior.amount`, 'must be a number 0..100000');
+                if (d.behavior.duration !== undefined && !num(d.behavior.duration, 0, 3600))
+                  err(`${path}.behavior.duration`, 'must be a number 0..3600');
+              }
+            }
+            if (d.skin !== undefined && (typeof d.skin !== 'string' || !d.skin))
+              err(`${path}.skin`, 'must be a non-empty item-skin id');
+            if (d.model !== undefined && !isGlbUrl(d.model))
+              err(`${path}.model`, 'must be an https URL ending in .glb/.gltf');
+            if (d.stack !== undefined && !(Number.isInteger(d.stack) && (d.stack as number) >= 1 && (d.stack as number) <= 999))
+              err(`${path}.stack`, 'must be an integer 1..999');
+            if (d.value !== undefined && !num(d.value, 0, 1000000000))
+              err(`${path}.value`, 'must be a number >= 0');
+            if (d.description !== undefined) {
+              if (typeof d.description !== 'string') err(`${path}.description`, 'must be a string');
+              else if (d.description.length > 280) err(`${path}.description`, 'must be <= 280 chars');
+            }
+          };
+          if (it.defs !== undefined) {
+            if (!isObj(it.defs)) err('custom.items.defs', 'must be an object');
+            else for (const [id, d] of Object.entries(it.defs)) {
+              defIds.add(id);
+              validateItemDef(d, `custom.items.defs.${id}`);
+            }
+          }
+          const knownItem = (id: unknown, path: string) => {
+            if (typeof id !== 'string' || !id) err(path, 'must be a non-empty item id');
+            else if (!defIds.has(id)) err(path, `unknown item id "${id}" (not in custom.items.defs)`);
+          };
+          const isPos3 = (v: unknown): v is [number, number, number] =>
+            Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && Number.isFinite(n));
+          if (it.skins !== undefined) {
+            if (!isObj(it.skins)) err('custom.items.skins', 'must be an object');
+            else for (const [id, sd] of Object.entries(it.skins)) {
+              const p = `custom.items.skins.${id}`;
+              if (!isObj(sd)) { err(p, 'must be an object'); continue; }
+              if (typeof sd.name !== 'string' || !sd.name) err(`${p}.name`, 'must be a non-empty string');
+              if (sd.palette !== undefined) {
+                if (!isObj(sd.palette)) err(`${p}.palette`, 'must be an object');
+                else for (const [k, v] of Object.entries(sd.palette)) {
+                  if (!(ITEM_SKIN_ROLES as readonly string[]).includes(k))
+                    err(`${p}.palette.${k}`, `unknown role (${ITEM_SKIN_ROLES.join('|')})`);
+                  else if (!isHex(v)) err(`${p}.palette.${k}`, 'must be #rrggbb');
+                }
+              }
+              if (sd.emissive !== undefined) {
+                if (!isObj(sd.emissive)) err(`${p}.emissive`, 'must be an object');
+                else {
+                  if (!isHex(sd.emissive.color)) err(`${p}.emissive.color`, 'must be #rrggbb');
+                  if (!num(sd.emissive.intensity, 0, 5)) err(`${p}.emissive.intensity`, 'must be 0..5');
+                }
+              }
+              if (sd.roughness !== undefined && !num(sd.roughness, 0, 1)) err(`${p}.roughness`, 'must be 0..1');
+              if (sd.metalness !== undefined && !num(sd.metalness, 0, 1)) err(`${p}.metalness`, 'must be 0..1');
+              if (sd.texture !== undefined) {
+                if (!isObj(sd.texture)) err(`${p}.texture`, 'must be an object');
+                else if ('url' in sd.texture) {
+                  const u = (sd.texture as Record<string, unknown>).url;
+                  if (typeof u !== 'string' || !/^https:\/\/[^?#]+\.(png|jpe?g|webp)(\?.*)?$/i.test(u))
+                    err(`${p}.texture.url`, 'must be an https URL ending in .png/.jpg/.jpeg/.webp');
+                } else if ('pattern' in sd.texture) {
+                  if (!inEnum((sd.texture as Record<string, unknown>).pattern, SKIN_TEXTURE_PATTERNS))
+                    err(`${p}.texture.pattern`, `must be one of ${SKIN_TEXTURE_PATTERNS.join('|')}`);
+                } else err(`${p}.texture`, 'must be { url } or { pattern }');
+              }
+              if (sd.textureRoles !== undefined) {
+                const ok = Array.isArray(sd.textureRoles) &&
+                  sd.textureRoles.every((r) => inEnum(r, ITEM_SKIN_ROLES));
+                if (!ok) err(`${p}.textureRoles`, `must be an array of ${ITEM_SKIN_ROLES.join('|')}`);
+              }
+            }
+          }
+          if (it.loot !== undefined) {
+            if (!Array.isArray(it.loot)) err('custom.items.loot', 'must be an array');
+            else it.loot.forEach((s: unknown, i: number) => {
+              const p = `custom.items.loot[${i}]`;
+              if (!isObj(s)) return err(p, 'must be an object');
+              knownItem(s.item, `${p}.item`);
+              if (!isPos3(s.pos)) err(`${p}.pos`, 'must be [x, y, z] numbers');
+              if (s.count !== undefined && !(Number.isInteger(s.count) && (s.count as number) >= 1))
+                err(`${p}.count`, 'must be an integer >= 1');
+            });
+          }
+          if (it.chests !== undefined) {
+            if (!Array.isArray(it.chests)) err('custom.items.chests', 'must be an array');
+            else it.chests.forEach((s: unknown, i: number) => {
+              const p = `custom.items.chests[${i}]`;
+              if (!isObj(s)) return err(p, 'must be an object');
+              if (!isPos3(s.pos)) err(`${p}.pos`, 'must be [x, y, z] numbers');
+              if (!Array.isArray(s.loot) || !s.loot.length) err(`${p}.loot`, 'must be a non-empty array of item ids');
+              else s.loot.forEach((id: unknown, j: number) => knownItem(id, `${p}.loot[${j}]`));
+              if (s.locked !== undefined && typeof s.locked !== 'boolean') err(`${p}.locked`, 'must be boolean');
+              if (s.skin !== undefined && (typeof s.skin !== 'string' || !s.skin))
+                err(`${p}.skin`, 'must be a non-empty item-skin id');
+            });
+          }
+          if (it.starting !== undefined) {
+            if (!Array.isArray(it.starting)) err('custom.items.starting', 'must be an array');
+            else it.starting.forEach((id: unknown, i: number) => knownItem(id, `custom.items.starting[${i}]`));
           }
         }
       }

@@ -43,6 +43,17 @@ export interface GenreGrade {
    */
   sky: number;
   /**
+   * dusk-only amber fog tint (hex). Sky lerps the fog color 35% toward it —
+   * the reference vistas are ALL dusk with warm amber haze. null outside dusk.
+   */
+  fogTint: string | null;
+  /**
+   * god-ray presence multiplier for dusk (LightShafts scales its shaft alpha
+   * by this). Day = 1.0, dusk/dawn = 1.7 — stronger rays at golden hour.
+   * Night is 1.0 (shafts are off at night anyway).
+   */
+  godRays: number;
+  /**
    * filmic color grade for the post grade pass (polish wave, LOOK crew).
    * Consumed by PostFX on standard/high tiers only — retro keeps its own
    * shader. Night is identity except a mild vignette (no brightness change,
@@ -77,7 +88,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   'third-person-action': {
     fogDensity: 0.75, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
-    clouds: 0.8, cloudColor: '#ffffff', sky: 0.45,
+    clouds: 0.8, cloudColor: '#ffffff', sky: 0.45, fogTint: null, godRays: 1.0,
     grade: {
       lift: [0.015, 0.005, -0.010], gamma: [1.0, 1.0, 1.0], gain: [1.03, 1.0, 0.96],
       saturation: 1.08, vignette: 0.45,
@@ -88,7 +99,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   'fps-arena': {
     fogDensity: 0.9, fogLuminance: 0.9,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
-    clouds: 0.9, cloudColor: '#f0f4ff', sky: 0.5,
+    clouds: 0.9, cloudColor: '#f0f4ff', sky: 0.5, fogTint: null, godRays: 1.0,
     grade: {
       lift: [-0.005, 0.005, 0.020], gamma: [1.0, 1.0, 1.0], gain: [0.96, 1.0, 1.06],
       saturation: 1.15, vignette: 0.55,
@@ -100,7 +111,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   racing: {
     fogDensity: 0.55, fogLuminance: 0.75,
     sun: 0.95, hemi: 0.95, ambient: 1.0,
-    clouds: 0.7, cloudColor: '#fff8ec', sky: 0.55,
+    clouds: 0.7, cloudColor: '#fff8ec', sky: 0.55, fogTint: null, godRays: 1.0,
     grade: {
       lift: [0.020, 0.010, 0.000], gamma: [1.0, 1.0, 1.0], gain: [1.05, 1.0, 0.93],
       saturation: 1.10, vignette: 0.40,
@@ -112,7 +123,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   platformer: {
     fogDensity: 1.15, fogLuminance: 0.8,
     sun: 1.0, hemi: 1.05, ambient: 1.0,
-    clouds: 1.0, cloudColor: '#e8dcff', sky: 0.45,
+    clouds: 1.0, cloudColor: '#e8dcff', sky: 0.45, fogTint: null, godRays: 1.0,
     grade: {
       lift: [0.010, 0.000, 0.020], gamma: [1.0, 1.0, 1.0], gain: [1.0, 0.97, 1.05],
       saturation: 1.12, vignette: 0.40,
@@ -123,7 +134,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
   'top-down-shooter': {
     fogDensity: 0.5, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
-    clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5,
+    clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5, fogTint: null, godRays: 1.0,
     grade: {
       lift: [0.000, 0.000, 0.005], gamma: [1.0, 1.0, 1.0], gain: [0.98, 1.0, 1.03],
       saturation: 1.06, vignette: 0.50,
@@ -150,7 +161,7 @@ const DUSK_EXPOSURE: Record<Genre, number> = {
 /** Night grade: identity — the earlier night-lighting fix owns these values. */
 const NIGHT_GRADE: GenreGrade = {
   exposure: 1.05,
-  fogDensity: 1.0, fogLuminance: 1.0,
+  fogDensity: 1.0, fogLuminance: 1.0, fogTint: null, godRays: 1.0,
   sun: 1.0, hemi: 1.0, ambient: 1.0,
   clouds: 1.0, cloudColor: '#3a4460', sky: 1.0,
   // color grade at night is identity except a mild vignette (no brightness
@@ -165,8 +176,16 @@ export function gradeAtmosphere(genre: Genre, timeOfDay: TimeOfDay): GenreGrade 
   if (timeOfDay === 'night') return { ...NIGHT_GRADE };
   const base = DAY_TABLE[genre];
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
+  // Env-art dusk preset: the reference vistas are ALL dusk — warm amber fog
+  // tint, deeper fog luminance so the horizon holds its amber tone, warmer
+  // clouds, and stronger god-ray presence. Day keeps the authored table.
+  if (!dusk) return { ...base, exposure: DAY_EXPOSURE[genre] };
   return {
     ...base,
-    exposure: dusk ? DUSK_EXPOSURE[genre] : DAY_EXPOSURE[genre],
+    exposure: DUSK_EXPOSURE[genre],
+    fogLuminance: base.fogLuminance * 0.92,
+    fogTint: '#ff9a5c',
+    cloudColor: '#ffd9b0',
+    godRays: 1.7,
   };
 }

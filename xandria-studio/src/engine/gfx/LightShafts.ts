@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import type { Engine } from '../Engine';
 import { Rng } from '../core/Rng';
+import { gradeAtmosphere } from './GenreGrade';
 
 const SHAFT_COUNTS = { high: 7, standard: 4, retro: 0 } as const;
 
@@ -23,6 +24,8 @@ export class LightShafts {
     const rng = new Rng(spec.meta.seed ^ 0x51af7);
     const dusk = spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn';
     const tint = new THREE.Color(dusk ? '#ffcf9a' : '#fff3d0');
+    // Env-art pass: dusk grades stronger god-ray presence (grade.godRays 1.7).
+    const rayBoost = gradeAtmosphere(spec.meta.genre, spec.theme.timeOfDay).godRays;
     const axis = sunDir.clone().negate(); // light travels sun -> ground
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis.clone().normalize());
     for (let i = 0; i < this.count; i++) {
@@ -38,7 +41,7 @@ export class LightShafts {
           uColor: { value: tint },
           uPhase: { value: rng.range(0, Math.PI * 2) },
           uTime: { value: 0 },
-          uBase: { value: rng.range(0.015, 0.03) },
+          uBase: { value: rng.range(0.015, 0.03) * rayBoost },
         },
         vertexShader: `
           varying vec2 vUv;

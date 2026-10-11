@@ -43,7 +43,9 @@ import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
+import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { PlayerAvatar } from './common';
+import { buildItemKit, type BlueprintItemKit } from './itemKit';
 
 export function buildTopDown(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud, input } = engine;
@@ -77,6 +79,21 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     engine,
     quality: engine.effectiveQuality(),
   });
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
+  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+    exclusion: [{ x: 0, z: 0, r: arenaR + 6 }], quality: engine.effectiveQuality(),
+  });
+  scatterAmberGlow(scene, rng.fork(0xe9a1), {
+    mats: engine.mats,
+    groundY: (x, z) => terrain.heightAt(x, z),
+    half: terrain.size / 2 - 10,
+    exclusion: [{ x: 0, z: 0, r: arenaR + 6 }],
+    quality: engine.effectiveQuality(),
+  });
+  terrain.setWaterSun(
+    engine.sky.sun.position.clone().sub(engine.sky.sun.target.position).normalize(),
+    spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn' ? '#ffb46b' : '#cfe8ff',
+  );
   // polish (LOOK crew): living light — horde-lane glow pylons hum
   engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 2.0), 0.16, 2.0);
   // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
@@ -114,6 +131,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -123,7 +142,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult() * (itemKit?.damageMult() ?? 1), point); combatPulse(); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -151,7 +170,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     ? 'Left stick move · right stick aim (auto-fire)'
     : 'WASD move · mouse aim · LMB fire · Esc pause');
 
-  const camRig = makeCameraRig('top-down', engine.camera, input, (x, z) => terrain.heightAt(x, z));
+  const camRig = makeCameraRig('top-down', engine.camera, input, (x, z) => terrain.heightAt(x, z),
+    { physics: engine.physics, skipBody: avatar.ctrl.body });
 
   // aim: ray from camera through pointer onto the player-height plane
   const aimPoint = new THREE.Vector3(1, 0, 0);
@@ -206,6 +226,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     const t = engine.time;
     avatar.ctrl.camYaw = camRig.yaw; // top-down: fixed orientation, movement axes still map cleanly
     avatar.update(dt, t);
+    itemKit?.update(dt);
 
     // aim at pointer
     const pp = avatar.ctrl.position;
@@ -253,5 +274,5 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets };
+  return { avatar, enemies, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

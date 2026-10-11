@@ -132,6 +132,8 @@ describe('createSky grade wiring', () => {
       const expectedFog = new THREE.Color(spec.theme.palette.fog);
       if (spec.theme.timeOfDay === 'night') expectedFog.multiplyScalar(0.35);
       expectedFog.multiplyScalar(grade.fogLuminance);
+      // env-art pass: dusk grades an amber fog tint
+      if (grade.fogTint) expectedFog.lerp(new THREE.Color(grade.fogTint), 0.35);
       expect((scene.fog as THREE.FogExp2).color.getHex()).toBe(expectedFog.getHex());
       expect((scene.background as THREE.Color).getHex()).toBe(expectedFog.getHex());
       // day/dusk: the physical sky shader carries the per-genre brightness patch
