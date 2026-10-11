@@ -75,6 +75,22 @@ const css = `
            color:#3a4a65; letter-spacing:.2em; font-size:13px; }
   #meta { font-size:11px; color:#5a6a85; line-height:1.5; white-space:pre-wrap; max-height:150px; overflow:auto; }
   .badge { display:inline-block; padding:2px 8px; border-radius:6px; background:#1a2438; font-size:10.5px; margin:2px 2px 0 0; color:#8fa5c8; }
+  /* ---- Mobile: convert #side into a collapsible bottom drawer ---- */
+  #drawer-grabber { display:none; height:52px; flex:0 0 auto; margin:-18px -18px 0; cursor:pointer;
+                    align-items:center; justify-content:center; touch-action:manipulation; }
+  #drawer-grabber span { display:block; width:56px; height:6px; border-radius:3px; background:#3a4a65; }
+  #drawer-fab { display:none; position:fixed; bottom:20px; right:20px; z-index:30; width:56px; height:56px;
+                border-radius:50%; padding:0; font-size:24px; align-items:center; justify-content:center;
+                background:linear-gradient(180deg,#1f6d8a,#144256); border:1px solid #3fd8ff;
+                box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  @media (max-width: 720px) {
+    #side { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto; min-width:0; max-height:72vh;
+            border-right:none; border-top:1px solid #1e2638; border-radius:16px 16px 0 0;
+            transform:translateY(calc(100% - 52px)); transition:transform .25s ease; z-index:20; }
+    #side.open { transform:translateY(0); }
+    #drawer-grabber { display:flex; }
+    #drawer-fab { display:flex; }
+  }
 `;
 
 function el(html: string): HTMLElement {
@@ -95,6 +111,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   root.innerHTML = `
     <div id="layout">
       <div id="side">
+        <div id="drawer-grabber" role="button" aria-label="toggle panel" title="drag panel"><span></span></div>
         <h1>XANDRIA STUDIO<small>INTENT → PLAYABLE GAME</small></h1>
         ${billingOn ? '<div id="acct-host"></div>' : ''}
         <div class="row" id="viewtabs" style="gap:6px">
@@ -136,6 +153,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
         ${billingOn ? '<div id="view-pricing" style="display:none;flex:1;min-height:0;overflow-y:auto"></div>' : ''}
       </div>
       <div id="frame-wrap"><div id="empty">✦<br/>GENERATE A GAME TO PLAY IT HERE</div><iframe id="game" style="display:none"></iframe></div>
+      <button id="drawer-fab" aria-label="toggle panel" title="panel">✨</button>
     </div>`;
 
   const prompt = root.querySelector<HTMLTextAreaElement>('#prompt')!;
@@ -144,6 +162,14 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   const meta = root.querySelector<HTMLElement>('#meta')!;
   const frame = root.querySelector<HTMLIFrameElement>('#game')!;
   const empty = root.querySelector<HTMLElement>('#empty')!;
+
+  // ---- Mobile drawer: #side collapses to a 52px grabber bar at ≤720px.
+  // ---- No-op on desktop (the media query never activates; class is harmless).
+  const side = root.querySelector<HTMLElement>('#side')!;
+  const toggleDrawer = (force?: boolean) => side.classList.toggle('open', force ?? !side.classList.contains('open'));
+  const collapseDrawer = () => side.classList.remove('open');
+  root.querySelector<HTMLElement>('#drawer-grabber')!.addEventListener('click', () => toggleDrawer());
+  root.querySelector<HTMLButtonElement>('#drawer-fab')!.addEventListener('click', () => toggleDrawer());
   for (const [g, label] of Object.entries(GENRE_LABELS)) {
     genreSel.appendChild(el(`<option value="${g}">${label}</option>`) as HTMLOptionElement);
   }
@@ -225,6 +251,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     frame.src = `${playerBase}?spec=${b64url(lastSpec)}${splashQuery()}`;
     frame.style.display = 'block';
     empty.style.display = 'none';
+    collapseDrawer(); // mobile: give the canvas the full viewport
   };
 
   inspector.addEventListener('xandria-spec-patch', (e) => {
@@ -251,6 +278,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       frame.src = `${playerBase}?spec=${b64url(lastSpec)}&autostart=1${splashQuery()}`;
       frame.style.display = 'block';
       empty.style.display = 'none';
+      collapseDrawer(); // mobile: give the canvas the full viewport
     },
     regenerate: (): GameSpec | null => {
       if (!lastSpec) return null;
@@ -365,6 +393,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     frame.src = url;
     frame.style.display = 'block';
     empty.style.display = 'none';
+    collapseDrawer(); // mobile: give the canvas the full viewport
     meta.innerHTML =
       `<span class="badge">${GENRE_LABELS[spec.meta.genre]}</span><span class="badge">${spec.theme.environment}</span>` +
       `<span class="badge">${spec.theme.timeOfDay}</span><span class="badge">${spec.rules.difficulty}</span>` +

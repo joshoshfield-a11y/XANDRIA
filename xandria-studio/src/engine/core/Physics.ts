@@ -19,6 +19,14 @@ export interface RayHit {
   body: CANNON.Body;
 }
 
+/** Per-body render-interpolation state: previous + current fixed-step transforms. */
+interface InterpState {
+  prevPos: THREE.Vector3;
+  curPos: THREE.Vector3;
+  prevQuat: THREE.Quaternion;
+  curQuat: THREE.Quaternion;
+}
+
 export class Physics {
   world: CANNON.World;
   readonly defaultMat = new CANNON.Material('default');
@@ -27,6 +35,9 @@ export class Physics {
   private accumulator = 0;
   readonly fixedStep = 1 / 60;
   private onStep: Array<(dt: number) => void> = [];
+  /** Render interpolation history, keyed by body. Hot path is allocation-free
+   *  (state objects are created once, on first sight of a body). */
+  private interp = new Map<CANNON.Body, InterpState>();
 
   constructor(gravity: number) {
     this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, gravity, 0) });
@@ -58,6 +69,7 @@ export class Physics {
     for (let i = w.constraints.length - 1; i >= constraints; i--) w.removeConstraint(w.constraints[i]);
     this.onStep = [];
     this.accumulator = 0;
+    this.interp.clear();
   }
 
   step(dt: number) {
@@ -66,10 +78,80 @@ export class Physics {
     while (this.accumulator >= this.fixedStep && n < 5) {
       for (const f of this.onStep) f(this.fixedStep);
       this.world.step(this.fixedStep);
+      this.snapshotInterp();
       this.accumulator -= this.fixedStep;
       n++;
     }
     if (n === 5) this.accumulator = 0;
+  }
+
+  private static copyBodyTransform(b: CANNON.Body, pos: THREE.Vector3, quat: THREE.Quaternion) {
+    pos.set(b.position.x, b.position.y, b.position.z);
+    quat.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  }
+
+  /** Get (or first-sight create) the interpolation state for a body.
+   *  First sight initializes prev = current, so a body added/removed mid-frame
+   *  can never produce NaNs in the render path. */
+  interpState(body: CANNON.Body): InterpState {
+    let st = this.interp.get(body);
+    if (!st) {
+      st = {
+        prevPos: new THREE.Vector3(),
+        curPos: new THREE.Vector3(),
+        prevQuat: new THREE.Quaternion(),
+        curQuat: new THREE.Quaternion(),
+      };
+      Physics.copyBodyTransform(body, st.prevPos, st.prevQuat);
+      Physics.copyBodyTransform(body, st.curPos, st.curQuat);
+      this.interp.set(body, st);
+    }
+    return st;
+  }
+
+  /** Record prev = current, current = body transform for every simulated body.
+   *  Called once per fixed step, after world.step. Static bodies are skipped
+   *  (they never move, so interpolation would be a no-op). */
+  private snapshotInterp() {
+    for (const b of this.world.bodies) {
+      if (b.type === CANNON.Body.STATIC) continue;
+      const st = this.interpState(b);
+      st.prevPos.copy(st.curPos);
+      st.prevQuat.copy(st.curQuat);
+      Physics.copyBodyTransform(b, st.curPos, st.curQuat);
+    }
+  }
+
+  /** Render-path alpha: where we are between the last two fixed steps. Clamped to [0, 1]. */
+  getInterpolationAlpha(): number {
+    const a = this.accumulator / this.fixedStep;
+    return a < 0 ? 0 : a > 1 ? 1 : a;
+  }
+
+  /** Render-path mesh sync: lerp position and slerp quaternion between the
+   *  previous and current fixed-step transforms. Allocation-free per call
+   *  (writes straight into the mesh; state objects are preallocated). */
+  syncMeshInterpolated(mesh: THREE.Object3D, body: CANNON.Body, alpha = this.getInterpolationAlpha()) {
+    const st = this.interpState(body);
+    const t = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+    mesh.position.lerpVectors(st.prevPos, st.curPos, t);
+    mesh.quaternion.slerpQuaternions(st.prevQuat, st.curQuat, t);
+  }
+
+  /** Render-path: interpolated body position between the last two fixed steps.
+   *  Visual only — sim logic must keep using raw body transforms. */
+  interpolatedPosition(body: CANNON.Body, out: THREE.Vector3): THREE.Vector3 {
+    const st = this.interpState(body);
+    const a = this.getInterpolationAlpha();
+    const t = a < 0 ? 0 : a > 1 ? 1 : a;
+    return out.lerpVectors(st.prevPos, st.curPos, t);
+  }
+
+  /** Snap interpolation state to the body's current transform (call after teleports). */
+  snapInterp(body: CANNON.Body) {
+    const st = this.interpState(body);
+    Physics.copyBodyTransform(body, st.prevPos, st.prevQuat);
+    Physics.copyBodyTransform(body, st.curPos, st.curQuat);
   }
 
   box(size: THREE.Vector3 | [number, number, number], pos: THREE.Vector3 | [number, number, number], opts: { mass?: number; group?: number; mask?: number; material?: CANNON.Material; quaternion?: THREE.Quaternion } = {}): CANNON.Body {
@@ -118,7 +200,7 @@ export class Physics {
     return body;
   }
 
-  remove(body: CANNON.Body) { this.world.removeBody(body); }
+  remove(body: CANNON.Body) { this.world.removeBody(body); this.interp.delete(body); }
 
   raycast(from: THREE.Vector3, to: THREE.Vector3, mask = -1, skipBody?: CANNON.Body): RayHit | null {
     const result = new CANNON.RaycastResult();
@@ -142,6 +224,7 @@ export class Physics {
   dispose() {
     for (const b of [...this.world.bodies]) this.world.removeBody(b);
     this.onStep = [];
+    this.interp.clear();
   }
 }
 

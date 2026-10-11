@@ -239,7 +239,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
 
   engine.onUpdate((dt) => {
     const t = engine.time;
-    avatar.ctrl.camYaw = camRig.yaw;
+    // controller's "forward" is (-sin,-cos) but the third-person rig looks along
+    // (+sin,+cos): offset by PI so W walks away from the camera
+    avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
 
     // attack input (melee damage scales with the damage upgrade multiplier)
