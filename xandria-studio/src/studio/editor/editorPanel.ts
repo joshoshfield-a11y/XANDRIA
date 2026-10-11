@@ -8,8 +8,13 @@
  */
 import {
   MOODS, ENVIRONMENTS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
+  CHARACTER_PIVOTS,
   type GameSpec, type ObjectiveStage, type EnemySpec, type Weapon,
+  type CharacterPivot,
 } from '@spec';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { fitModelToHeight, resolvePivots } from '../../engine/gfx/RigAdapter';
 import {
   cloneSpec, getAtPath,
   validateEditable,
@@ -25,6 +30,7 @@ import {
   reskinNamespaces, getReskinOverride, setReskinOverride,
   clearCustomAssets, customAssetsShape, reskinOverridesPresent, isDefaultReskin,
   projectFromJson,
+  listSkinIds, getCharacterSlot, setCharacterSlot, setBoneMapEntry,
   type AssetControl, type AssetOverride,
 } from './specOps';
 
@@ -529,7 +535,161 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     }
   }
 
+  /**
+   * Characters section (workstream D+E): skin chooser dropdowns for the player
+   * + every enemy kind, GLB model-URL inputs (player + walker/brute), a live
+   * preview pane, and bone-remap dropdowns — all writing into
+   * spec.custom.characters. Skins are procedural-only; an explicit skin wins
+   * over the palette-derived colors; model URLs always fall back to the
+   * procedural rig on any failure (online-only).
+   */
+  function renderCharacters(s: GameSpec, host: HTMLElement): void {
+    host.appendChild(h(`<div class="xed-ns">CHARACTERS</div>`));
+    host.appendChild(h(`<div class="xed-hint">Skins recolor the procedural hero. A GLB/GLTF model URL (https) replaces the procedural rig — preview it here first. Writes to <b>custom.characters</b>.</div>`));
+
+    const skinSelect = (cur: string | undefined, which: 'player' | string): HTMLSelectElement => {
+      const sel = document.createElement('select');
+      const add = (v: string, label: string) => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = label; o.selected = v === (cur ?? '');
+        sel.appendChild(o);
+      };
+      add('', '(procedural default)');
+      for (const id of listSkinIds(s)) add(id, id);
+      sel.addEventListener('change', () =>
+        commit((sp) => setCharacterSlot(sp, which, { skin: sel.value || undefined }), false));
+      return sel;
+    };
+
+    // ---- player card
+    const player = getCharacterSlot(s, 'player');
+    const pcard = h(`<div class="xed-asset"><div class="xed-aname">PLAYER</div></div>`);
+    pcard.appendChild(field('SKIN', skinSelect(player.skin, 'player'),
+      'An explicit skin wins over the palette-derived colors.'));
+    const purl = document.createElement('input');
+    purl.type = 'text'; purl.value = player.model ?? ''; purl.placeholder = 'https://…/hero.glb';
+    purl.addEventListener('change', () =>
+      commit((sp) => setCharacterSlot(sp, 'player', { model: purl.value.trim() || undefined }), false));
+    pcard.appendChild(field('MODEL URL (.glb/.gltf, https)', purl,
+      'Empty = procedural rig. Supabase Storage upload ships in phase 2 — paste a hosted URL for now.'));
+    const prevStatus = h(`<div class="xed-hint">No model loaded — enter a URL above, then preview.</div>`);
+    const prevCanvas = document.createElement('canvas');
+    prevCanvas.style.cssText = 'width:100%;height:180px;border-radius:8px;background:#0a0e16;display:none';
+    const remapBox = h(`<div style="display:none;flex-direction:column;gap:6px;margin-top:6px"></div>`);
+    const prevBtn = h(`<button class="xed-iconbtn">▶ PREVIEW MODEL</button>`) as HTMLButtonElement;
+    prevBtn.addEventListener('click', () =>
+      void previewCharacterModel(purl.value.trim(), { status: prevStatus, canvas: prevCanvas, remapBox }));
+    const prevBox = h(`<div class="xed-card" style="padding:8px"></div>`);
+    prevBox.append(prevStatus, prevCanvas, prevBtn, remapBox);
+    pcard.appendChild(prevBox);
+    host.appendChild(pcard);
+
+    // ---- enemies card
+    const ecard = h(`<div class="xed-asset"><div class="xed-aname">ENEMIES</div></div>`);
+    for (const kind of ENEMY_KINDS) {
+      const slot = getCharacterSlot(s, kind);
+      const row = h(`<div style="display:flex;flex-direction:column;gap:6px;padding:6px 0;border-top:1px solid #1e2a45"></div>`);
+      row.appendChild(h(`<div class="xed-flabel">${kind.toUpperCase()}</div>`));
+      row.appendChild(field('SKIN', skinSelect(slot.skin, kind)));
+      if (kind === 'walker' || kind === 'brute') {
+        const eurl = document.createElement('input');
+        eurl.type = 'text'; eurl.value = slot.model ?? ''; eurl.placeholder = 'https://…/enemy.glb';
+        eurl.addEventListener('change', () =>
+          commit((sp) => setCharacterSlot(sp, kind, { model: eurl.value.trim() || undefined }), false));
+        row.appendChild(field('MODEL URL', eurl));
+      }
+      ecard.appendChild(row);
+    }
+    ecard.appendChild(h(`<div class="xed-hint">Model import applies to walker/brute only — drone/flyer/turret keep their forged builds. Custom skins are authored in the spec JSON under <b>custom.characters.skins</b> (built-ins: default, crimson, stealth, gold).</div>`));
+    host.appendChild(ecard);
+  }
+
+  /** Live GLB preview pane (phase 1): turntable render + node list → bone-remap dropdowns. */
+  async function previewCharacterModel(
+    url: string,
+    ui: { status: HTMLElement; canvas: HTMLCanvasElement; remapBox: HTMLElement },
+  ): Promise<void> {
+    const prev = (ui.canvas as unknown as { __preview?: { stop(): void } }).__preview;
+    prev?.stop();
+    if (!url) { ui.status.textContent = 'Enter a model URL first.'; return; }
+    ui.status.textContent = 'loading…';
+    ui.canvas.style.display = 'block';
+    let renderer: THREE.WebGLRenderer | null = null;
+    let raf = 0;
+    let alive = true;
+    const stop = () => { alive = false; cancelAnimationFrame(raf); renderer?.dispose(); };
+    (ui.canvas as unknown as { __preview: { stop(): void } }).__preview = { stop };
+    try {
+      const gltf = await Promise.race([
+        new GLTFLoader().loadAsync(url),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout after 20s')), 20000)),
+      ]);
+      if (!alive) return;
+      fitModelToHeight(gltf.scene); // same normalization the engine applies
+      renderer = new THREE.WebGLRenderer({ canvas: ui.canvas, antialias: true, alpha: true });
+      renderer.setSize(ui.canvas.clientWidth || 300, 180, false);
+      const scene = new THREE.Scene();
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.2));
+      const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+      dir.position.set(2, 4, 3);
+      scene.add(dir);
+      const pivot = new THREE.Group();
+      pivot.add(gltf.scene);
+      scene.add(pivot);
+      const cam = new THREE.PerspectiveCamera(40, (ui.canvas.clientWidth || 300) / 180, 0.05, 100);
+      cam.position.set(0, 1.1, 3.4);
+      cam.lookAt(0, 0.9, 0);
+      const names: string[] = [];
+      gltf.scene.traverse((o) => { if (o.name && !names.includes(o.name)) names.push(o.name); });
+      names.sort();
+      const resolved = resolvePivots(gltf.scene);
+      buildBoneRemap(ui.remapBox, names, resolved);
+      ui.status.textContent = `✓ loaded — ${names.length} named nodes. If the pose looks wrong in-game, remap pivots below.`;
+      const tick = () => {
+        if (!alive || !ui.canvas.isConnected) { stop(); return; }
+        pivot.rotation.y += 0.012;
+        renderer!.render(scene, cam);
+        raf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {
+      if (!alive) return;
+      ui.canvas.style.display = 'none';
+      ui.status.textContent = `✗ preview failed: ${e instanceof Error ? e.message : String(e)} — the game keeps the procedural rig.`;
+    }
+  }
+
+  /** Bone-remap dropdowns (phase 1): pivot → node name, written into the player slot's boneMap. */
+  function buildBoneRemap(
+    box: HTMLElement,
+    names: string[],
+    resolved: Partial<Record<CharacterPivot, THREE.Object3D>>,
+  ): void {
+    box.innerHTML = '';
+    box.style.display = 'flex';
+    const cur = working ? getCharacterSlot(working, 'player').boneMap ?? {} : {};
+    box.appendChild(h(`<div class="xed-flabel">BONE REMAP (pivot → model node)</div>`));
+    for (const pivot of CHARACTER_PIVOTS) {
+      const auto = resolved[pivot]?.name;
+      const sel = document.createElement('select');
+      const add = (v: string, label: string) => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = label; o.selected = v === (cur[pivot] ?? '');
+        sel.appendChild(o);
+      };
+      add('', auto ? `(auto: ${auto})` : '(auto: not found)');
+      for (const n of names) add(n, n);
+      sel.addEventListener('change', () =>
+        commit((sp) => setBoneMapEntry(sp, 'player', pivot, sel.value), false));
+      const row = h(`<div class="xed-chrow"></div>`);
+      row.appendChild(h(`<span class="xed-flabel" style="min-width:64px">${pivot}</span>`));
+      row.appendChild(sel);
+      box.appendChild(row);
+    }
+  }
+
   function renderAssets(s: GameSpec, host: HTMLElement): void {
+    renderCharacters(s, host);
     renderReskins(s, host);
     host.appendChild(h(`<div class="xed-ns">MODEL &amp; WORLD TWEAKS</div>`));
     host.appendChild(h(`<div class="xed-hint">These write to <b>custom.*</b> paths the engine honors today — what you set is what Play shows.</div>`));

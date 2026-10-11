@@ -8,6 +8,8 @@ import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { toV3 } from '../core/Physics';
 import { makeHumanoid, type CharacterRig } from '../gfx/Characters';
+import { resolveSkinDef, applySkin } from '../gfx/Skins';
+import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { PlayerSpec } from '@spec';
 
 export interface ControllerEvents {
@@ -34,6 +36,7 @@ export class CharacterController {
   camYaw = 0;
   private stepAcc = 0;
   private wasGrounded = true;
+  private tmpV = new THREE.Vector3();
 
   constructor(
     private engine: Engine,
@@ -44,8 +47,32 @@ export class CharacterController {
   ) {
     this.body = engine.physics.capsule(0.42, 1.7, [spawn.x, spawn.y + 1.2, spawn.z], { mass: 70 });
     this.rig = makeHumanoid(engine.mats, colors, engine.spec.meta.seed, engine.spec.custom?.forge);
+    // DE — character customization: an explicit spec skin wins over the
+    // palette-derived `colors` param; an import-model URL swaps the rig async.
+    const slot = engine.spec.custom?.characters?.player;
+    const skinDef = resolveSkinDef(engine.spec, slot?.skin);
+    if (skinDef) applySkin(this.rig, skinDef);
     engine.scene.add(this.rig.group);
+    if (slot?.model) void this.swapToModel(slot.model, slot.boneMap);
     engine.physics.addStepHandler((dt) => this.fixedUpdate(dt));
+  }
+
+  /**
+   * Async import-model swap (workstream E phase 1). The procedural rig is the
+   * floor: it stays live while the GLB loads, and stays permanently on any
+   * load failure. The skin (if any) is re-applied — a no-op on imported rigs
+   * since their materials carry no role tags.
+   */
+  private async swapToModel(url: string, boneMap?: BoneMapping) {
+    const rig = await loadRigFromURL(url, boneMap);
+    if (!rig) return; // procedural fallback stands
+    const skinDef = resolveSkinDef(this.engine.spec, this.engine.spec.custom?.characters?.player?.skin);
+    if (skinDef) applySkin(rig, skinDef);
+    const old = this.rig;
+    this.engine.scene.remove(old.group);
+    old.dispose();
+    this.rig = rig;
+    this.engine.scene.add(rig.group);
   }
 
   get position(): THREE.Vector3 { return toV3(this.body.position); }
@@ -54,6 +81,7 @@ export class CharacterController {
   teleport(p: THREE.Vector3) {
     this.body.position.set(p.x, p.y, p.z);
     this.body.velocity.setZero();
+    this.engine.physics.snapInterp(this.body);
   }
 
   private fixedUpdate(dt: number) {
@@ -135,9 +163,9 @@ export class CharacterController {
     if (this.speedBoostT > 0) this.speedBoostT -= dt;
   }
 
-  /** per-render-frame update: visuals */
+  /** per-render-frame update: visuals (position is render-interpolated; sim logic keeps raw body transforms) */
   update(dt: number, t: number) {
-    const p = this.position;
+    const p = this.engine.physics.interpolatedPosition(this.body, this.tmpV);
     this.rig.group.position.set(p.x, p.y - 0.85, p.z);
     // face movement yaw
     const targetRot = this.yaw + Math.PI; // model faces +z

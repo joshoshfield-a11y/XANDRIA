@@ -25,10 +25,13 @@ import {
   type Palette,
   type Environment,
   type Weather,
+  type CharacterSlot,
+  type CharacterPivot,
   ENVIRONMENTS,
   OBJECTIVES,
   ENEMY_KINDS,
 } from '@spec';
+import { BUILT_IN_SKINS } from '../../engine/gfx/Skins';
 import { ASSET_IDS, type AssetOverride } from '../../engine/game/Assets';
 
 // ---------------------------------------------------------------------------
@@ -594,6 +597,54 @@ export function clearCustomAssets(spec: GameSpec): void {
 /** A reskin override with every channel at its default (nothing to write). */
 export function isDefaultReskin(o: AssetOverride): boolean {
   return (o.color ?? '') === '' && (o.scale ?? 1) === 1 && (o.visible ?? true) === true;
+}
+
+// ---------------- character customization (workstream D+E) ----------------
+/** All skin ids the editor offers: built-ins + custom skins already in the spec. */
+export function listSkinIds(spec: GameSpec): string[] {
+  const ids = new Set<string>(Object.keys(BUILT_IN_SKINS));
+  const custom = spec.custom?.characters?.skins;
+  if (custom) for (const id of Object.keys(custom)) ids.add(id);
+  return [...ids];
+}
+
+/** Read a character slot ('player' or an enemy kind). Returns a copy — never the live object. */
+export function getCharacterSlot(spec: GameSpec, which: 'player' | string): CharacterSlot {
+  const ch = spec.custom?.characters;
+  const slot = which === 'player' ? ch?.player : ch?.enemies?.[which];
+  return { ...(slot ?? {}) };
+}
+
+/**
+ * Write a character slot. Empty patch values are dropped so the spec stays
+ * clean (no `skin: ''`, no `model: ''`); an empty slot is deleted entirely.
+ */
+export function setCharacterSlot(spec: GameSpec, which: 'player' | string, patch: Partial<CharacterSlot>): void {
+  const custom = ensureCustom(spec);
+  custom.characters = custom.characters ?? {};
+  const ch = custom.characters;
+  const cur: CharacterSlot = which === 'player' ? (ch.player ?? {}) : (ch.enemies?.[which] ?? {});
+  const next: CharacterSlot = { ...cur, ...patch };
+  if (next.skin === '') delete next.skin;
+  if (next.model === '') delete next.model;
+  if (next.boneMap && Object.keys(next.boneMap).length === 0) delete next.boneMap;
+  const empty = Object.keys(next).length === 0;
+  if (which === 'player') {
+    if (empty) delete ch.player; else ch.player = next;
+  } else {
+    ch.enemies = ch.enemies ?? {};
+    if (empty) delete ch.enemies[which]; else ch.enemies[which] = next;
+  }
+  if (!ch.player && (!ch.enemies || Object.keys(ch.enemies).length === 0) && !ch.skins) delete custom.characters;
+}
+
+/** Set one bone-remap entry (pivot → node name) on a slot. */
+export function setBoneMapEntry(spec: GameSpec, which: 'player' | string, pivot: CharacterPivot, node: string): void {
+  const cur = getCharacterSlot(spec, which);
+  const boneMap = { ...(cur.boneMap ?? {}) };
+  if (node) boneMap[pivot] = node;
+  else delete boneMap[pivot];
+  setCharacterSlot(spec, which, { boneMap });
 }
 
 /**

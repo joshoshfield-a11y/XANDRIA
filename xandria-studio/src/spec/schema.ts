@@ -251,6 +251,65 @@ export interface AssetPacks {
   /** name → GLB/GLTF URL (https only). Online-only; procedural fallback always. */
   packs?: Record<string, string>;
 }
+
+/** https URL ending in .glb/.gltf (character models + asset packs share this rule) */
+export const GLB_URL_RE = /^https:\/\/[^?#]+\.(glb|gltf)(\?.*)?$/i;
+export const isGlbUrl = (u: unknown): u is string => typeof u === 'string' && GLB_URL_RE.test(u);
+
+/** Named canvas-procedural texture patterns a skin can stamp onto shirt/pants. */
+export const SKIN_TEXTURE_PATTERNS = ['camo', 'stripes', 'digital', 'carbon'] as const;
+export type SkinTexturePattern = (typeof SKIN_TEXTURE_PATTERNS)[number];
+
+/** CharacterRig pivots addressable by skins/imports (the six legacy limb pivots + C-wave sub-pivots). */
+export const CHARACTER_PIVOTS = [
+  'legL', 'legR', 'armL', 'armR', 'torso', 'head',
+  'elbowL', 'elbowR', 'kneeL', 'kneeR',
+] as const;
+export type CharacterPivot = (typeof CHARACTER_PIVOTS)[number];
+
+/** Palette roles — match the userData.role tags makeHumanoid stamps on its owned materials. */
+export interface SkinPalette {
+  skin?: string;
+  shirt?: string;
+  pants?: string;
+  accent?: string;
+}
+export interface SkinEmissive {
+  color: string;      // #rrggbb
+  intensity: number;  // 0..5
+}
+export interface SkinDef {
+  /** display name */
+  name: string;
+  /** per-role color overrides (applied to the rig's owned cloned materials) */
+  palette?: SkinPalette;
+  /** emissive accent glow (applied to accent-role materials) */
+  emissive?: SkinEmissive;
+  roughness?: number;  // 0..1
+  metalness?: number;  // 0..1
+  /** shirt/pants texture: a URL image (https, png/jpg/webp) or a named canvas pattern.
+   *  Texture failures never throw — the plain palette stands as fallback. */
+  texture?: { url: string } | { pattern: SkinTexturePattern };
+}
+/**
+ * One character's import/customization slot. `skin` references a skin id
+ * (built-in or a custom id in `skins`); `model` is a GLB/GLTF URL that
+ * replaces the procedural rig (online-only; procedural fallback always).
+ * `boneMap` overrides the default Mixamo-convention pivot mapping
+ * (pivot → node name in the model).
+ */
+export interface CharacterSlot {
+  skin?: string;
+  model?: string;
+  boneMap?: Partial<Record<CharacterPivot, string>>;
+}
+export interface CharactersCustom {
+  /** custom skin id → definition (merged over the built-ins at read time) */
+  skins?: Record<string, SkinDef>;
+  player?: CharacterSlot;
+  /** enemy kind (or registered custom kind id) → slot */
+  enemies?: Record<string, CharacterSlot>;
+}
 /**
  * Per-asset visual override (the reskin contract).
  * `custom.assets` accepts either the legacy AssetPacks shape (when an
@@ -272,6 +331,13 @@ export interface CustomSpec {
   weaponMods?: WeaponMods;
   quality?: QualityMode;
   assets?: AssetPacks | Record<string, AssetOverride>;
+  /**
+   * Character customization (workstream D+E): skins + GLB import slots for the
+   * player and per enemy kind. Visual only — never touches gameplay. Every
+   * field optional; invalid values are rejected by validateSpec. Online-only
+   * model URLs always fall back to the procedural rig on any failure.
+   */
+  characters?: CharactersCustom;
   /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
   legacyOperators?: number[];
   /**
@@ -462,7 +528,7 @@ function validateStageGraph(
 
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'legacyOperators', 'profileDamageMult'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'legacyOperators', 'profileDamageMult'];
 
 /** Options for validateSpec. */
 export interface ValidateSpecOptions {
@@ -743,7 +809,7 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
           if (as.packs !== undefined) {
             if (!isObj(as.packs)) err('custom.assets.packs', 'must be an object');
             else for (const [k, u] of Object.entries(as.packs)) {
-              if (typeof u !== 'string' || !/^https:\/\/[^?#]+\.(glb|gltf)(\?.*)?$/i.test(u))
+              if (!isGlbUrl(u))
                 err(`custom.assets.packs.${k}`, 'must be an https URL ending in .glb/.gltf');
             }
           }
@@ -760,6 +826,70 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
               err(`${p}.emissiveIntensity`, 'must be a number');
             if (o.scale !== undefined && typeof o.scale !== 'number') err(`${p}.scale`, 'must be a number');
             if (o.visible !== undefined && typeof o.visible !== 'boolean') err(`${p}.visible`, 'must be boolean');
+          }
+        }
+      }
+      // characters — skins + GLB import slots (workstream D+E). Visual only.
+      const ch = c.characters;
+      if (ch !== undefined) {
+        if (!isObj(ch)) err('custom.characters', 'must be an object');
+        else {
+          const validateSlot = (s: unknown, path: string) => {
+            if (!isObj(s)) return err(path, 'must be an object');
+            if (s.skin !== undefined && (typeof s.skin !== 'string' || !s.skin))
+              err(`${path}.skin`, 'must be a non-empty skin id');
+            if (s.model !== undefined && !isGlbUrl(s.model))
+              err(`${path}.model`, 'must be an https URL ending in .glb/.gltf');
+            if (s.boneMap !== undefined) {
+              if (!isObj(s.boneMap)) err(`${path}.boneMap`, 'must be an object');
+              else for (const [k, v] of Object.entries(s.boneMap)) {
+                if (!(CHARACTER_PIVOTS as readonly string[]).includes(k))
+                  err(`${path}.boneMap.${k}`, `unknown pivot (${CHARACTER_PIVOTS.join('|')})`);
+                else if (typeof v !== 'string' || !v)
+                  err(`${path}.boneMap.${k}`, 'must be a non-empty node name');
+              }
+            }
+          };
+          if (ch.skins !== undefined) {
+            if (!isObj(ch.skins)) err('custom.characters.skins', 'must be an object');
+            else for (const [id, sd] of Object.entries(ch.skins)) {
+              const p = `custom.characters.skins.${id}`;
+              if (!isObj(sd)) { err(p, 'must be an object'); continue; }
+              if (typeof sd.name !== 'string' || !sd.name) err(`${p}.name`, 'must be a non-empty string');
+              if (sd.palette !== undefined) {
+                if (!isObj(sd.palette)) err(`${p}.palette`, 'must be an object');
+                else for (const [k, v] of Object.entries(sd.palette)) {
+                  if (!['skin', 'shirt', 'pants', 'accent'].includes(k))
+                    err(`${p}.palette.${k}`, 'unknown role (skin|shirt|pants|accent)');
+                  else if (!isHex(v)) err(`${p}.palette.${k}`, 'must be #rrggbb');
+                }
+              }
+              if (sd.emissive !== undefined) {
+                if (!isObj(sd.emissive)) err(`${p}.emissive`, 'must be an object');
+                else {
+                  if (!isHex(sd.emissive.color)) err(`${p}.emissive.color`, 'must be #rrggbb');
+                  if (!num(sd.emissive.intensity, 0, 5)) err(`${p}.emissive.intensity`, 'must be 0..5');
+                }
+              }
+              if (sd.roughness !== undefined && !num(sd.roughness, 0, 1)) err(`${p}.roughness`, 'must be 0..1');
+              if (sd.metalness !== undefined && !num(sd.metalness, 0, 1)) err(`${p}.metalness`, 'must be 0..1');
+              if (sd.texture !== undefined) {
+                if (!isObj(sd.texture)) err(`${p}.texture`, 'must be an object');
+                else if ('url' in sd.texture) {
+                  const u = (sd.texture as Record<string, unknown>).url;
+                  if (typeof u !== 'string' || !/^https:\/\/[^?#]+\.(png|jpe?g|webp)(\?.*)?$/i.test(u))
+                    err(`${p}.texture.url`, 'must be an https URL ending in .png/.jpg/.jpeg/.webp');
+                } else if ('pattern' in sd.texture) {
+                  if (!inEnum((sd.texture as Record<string, unknown>).pattern, SKIN_TEXTURE_PATTERNS))
+                    err(`${p}.texture.pattern`, `must be one of ${SKIN_TEXTURE_PATTERNS.join('|')}`);
+                } else err(`${p}.texture`, 'must be { url } or { pattern }');
+              }
+            }
+          }
+          if (ch.player !== undefined) validateSlot(ch.player, 'custom.characters.player');
+          if (ch.enemies !== undefined) {
+            if (!isObj(ch.enemies)) err('custom.characters.enemies', 'must be an object');
+            else for (const [k, s] of Object.entries(ch.enemies)) validateSlot(s, `custom.characters.enemies.${k}`);
           }
         }
       }

@@ -11,6 +11,8 @@ import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { GROUP, toV3 } from '../core/Physics';
 import { makeHumanoid, makeDrone, makeTurret, disposeOwned, type CharacterRig } from '../gfx/Characters';
+import { resolveSkinDef, applySkin } from '../gfx/Skins';
+import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { EnemySpec, EnemyKind } from '@spec';
 import type { Projectiles } from './Projectiles';
 import { Rng } from '../core/Rng';
@@ -42,6 +44,7 @@ export class Enemy {
   private rng: Rng;
   private speedMult = 1;
   private aggroMult = 1;
+  private tmpV = new THREE.Vector3();
   /**
    * Boss flag — set when this enemy is a brute in a boss objective
    * (objective.type === 'boss', or any quest stage with type 'boss').
@@ -54,6 +57,8 @@ export class Enemy {
   private customDef: import('./Modding').CustomEnemyKindDef | null = null;
   /** effective build kind: the registered base for custom kinds, else spec.kind */
   private readonly kind: EnemyKind;
+  /** group scale applied to the procedural rig (re-applied after an import-model swap) */
+  private rigScale = 1;
 
   constructor(
     private engine: Engine,
@@ -87,7 +92,15 @@ export class Enemy {
       });
       this.rig = makeHumanoid(engine.mats, { ...(tint ?? ENEMY_COLORS[buildKind]), skin: '#8f8a80', bulk }, seed, engine.spec.custom?.forge);
       if (sz !== 1) this.rig.group.scale.setScalar(sz);
+      this.rigScale = sz !== 1 ? sz : 1;
+      // DE — character customization: explicit spec skin wins over kind colors;
+      // an import-model URL swaps the rig async (procedural fallback always).
+      const slot = engine.spec.custom?.characters?.enemies?.[spec.kind]
+        ?? engine.spec.custom?.characters?.enemies?.[buildKind];
+      const skinDef = resolveSkinDef(engine.spec, slot?.skin);
+      if (skinDef) applySkin(this.rig, skinDef);
       engine.scene.add(this.rig.group);
+      if (slot?.model) void this.swapToModel(slot.model, slot.boneMap, slot.skin);
     } else if (buildKind === 'drone' || buildKind === 'flyer') {
       this.body = engine.physics.sphere(0.5 * sz, [spawn.x, spawn.y + 2.5, spawn.z], {
         mass: 8,
@@ -113,9 +126,27 @@ export class Enemy {
     if (mods?.glow && glowRoot) this.applyGlow(mods.glow, glowRoot);
   }
 
+  /**
+   * Async import-model swap (workstream E phase 1) for walker/brute rigs.
+   * The procedural rig stays live while the GLB loads and stays permanently
+   * on any failure. The size scale (`custom.enemyMods.size`) is re-applied;
+   * the skin (if any) is re-applied — a no-op on imported rigs.
+   */
+  private async swapToModel(url: string, boneMap: BoneMapping | undefined, skinId: string | undefined) {
+    const rig = await loadRigFromURL(url, boneMap);
+    if (!rig || !this.alive) return; // procedural fallback stands (or died mid-load)
+    const skinDef = resolveSkinDef(this.engine.spec, skinId);
+    if (skinDef) applySkin(rig, skinDef);
+    if (this.rigScale !== 1) rig.group.scale.setScalar(this.rigScale);
+    const old = this.rig;
+    this.engine.scene.remove(old!.group);
+    old!.dispose();
+    this.rig = rig;
+    this.engine.scene.add(rig.group);
+  }
+
   /** True when the objective (or any quest stage) is a boss fight. */
-  private static isBossObjective(engine: Engine): boolean {
-    const obj = engine.spec.objective;
+  private static isBossObjective(engine: Engine): boolean {    const obj = engine.spec.objective;
     if (obj.type === 'boss') return true;
     return !!obj.stages?.some((s) => s.type === 'boss');
   }
@@ -230,6 +261,8 @@ export class Enemy {
   update(dt: number, playerPos: THREE.Vector3, t: number) {
     if (!this.alive) return;
     const pos = this.position;
+    // render-interpolated position for visual placements only — AI logic keeps raw `pos`
+    const vpos = this.body ? this.engine.physics.interpolatedPosition(this.body, this.tmpV) : pos;
     const dist = pos.distanceTo(playerPos);
     this.attackCd -= dt;
 
@@ -263,7 +296,7 @@ export class Enemy {
           b.velocity.x = dir.x * this.spec.speed * this.speedMult * 0.3;
           b.velocity.z = dir.z * this.spec.speed * this.speedMult * 0.3;
         }
-        this.rig!.group.position.set(pos.x, pos.y - 0.85 * (this.kind === 'brute' ? 1.7 : 1), pos.z);
+        this.rig!.group.position.set(vpos.x, vpos.y - 0.85 * (this.kind === 'brute' ? 1.7 : 1), vpos.z);
         const planar = Math.hypot(b.velocity.x, b.velocity.z);
         this.rig!.animate(t, planar, {});
         break;
@@ -285,7 +318,7 @@ export class Enemy {
         b.velocity.x = dir.x * sp;
         b.velocity.z = dir.z * sp;
         b.velocity.y = (hoverY - pos.y) * 2.2;
-        this.rig!.group.position.copy(pos);
+        this.rig!.group.position.copy(vpos);
         this.rig!.group.rotation.y = Math.atan2(playerPos.x - pos.x, playerPos.z - pos.z);
         this.rig!.animate(t, sp, {});
         if (this.state === 'attack' && this.attackCd <= 0 && this.projectiles) {

@@ -6,13 +6,22 @@
  */
 import * as THREE from 'three';
 import type { MaterialLibrary } from './Materials';
-import { forgeHumanoidPlan, forgeDronePlan, forgeVehiclePlan, type HumanoidPlan } from './ModelForge';
+import { forgeHumanoidPlan, forgeDronePlan, forgeVehiclePlan, type HumanoidPlan, type BodyArchetype } from './ModelForge';
 import type { ForgeCustom } from '@spec';
 
 export interface CharacterRig {
   group: THREE.Group;
-  /** limbs keyed for animation */
-  limbs: { legL: THREE.Object3D; legR: THREE.Object3D; armL: THREE.Object3D; armR: THREE.Object3D; torso: THREE.Object3D; head: THREE.Object3D; weaponMount?: THREE.Object3D };
+  /** limbs keyed for animation — the six legacy pivots (shoulder/hip positions unchanged) */
+  limbs: {
+    legL: THREE.Object3D; legR: THREE.Object3D; armL: THREE.Object3D; armR: THREE.Object3D;
+    torso: THREE.Object3D; head: THREE.Object3D; weaponMount?: THREE.Object3D;
+    /** OPTIONAL sub-pivots (wave C): elbow/knee joints, children of the matching limb pivot.
+     *  Procedural only — no bones, no clips. animate() drives them phase-coupled to parents. */
+    elbowL?: THREE.Object3D; elbowR?: THREE.Object3D;
+    kneeL?: THREE.Object3D; kneeR?: THREE.Object3D;
+    /** same four joints as a map, for code that prefers keyed access */
+    joints?: { elbowL: THREE.Object3D; elbowR: THREE.Object3D; kneeL: THREE.Object3D; kneeR: THREE.Object3D };
+  };
   /** call every frame with planar speed (m/s) */
   animate(t: number, speed: number, opts?: { attacking?: number; dead?: boolean }): void;
   /** trigger a melee swing animation (self-advancing) */
@@ -55,64 +64,126 @@ function box(w: number, h: number, d: number, mat: THREE.Material, x = 0, y = 0,
   return m;
 }
 
-/** Attach forged headgear to a head mesh. */
+/** Faceted low-poly finish: de-index so flat normals survive (keeps the PS2 look on smooth primitives). */
+function faceted<T extends THREE.BufferGeometry>(g: T): T {
+  const ng = g.index ? g.toNonIndexed() : g;
+  ng.computeVertexNormals();
+  return ng as T;
+}
+
+/** A shadow-casting mesh from a faceted primitive. */
+function part(geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
+  const m = new THREE.Mesh(faceted(geo), mat);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  return m;
+}
+
+/** Tapered limb segment hanging down from a pivot: top radius rt, bottom radius rb, length len. */
+function segment(mat: THREE.Material, rt: number, rb: number, len: number, radial = 7): THREE.Mesh {
+  return part(new THREE.CylinderGeometry(rt, rb, len, radial), mat, 0, -len / 2, 0);
+}
+
+/** Per-archetype visual multipliers applied inside makeHumanoid (seeded via plan.archetype). */
+const ARCH_SCALE: Record<BodyArchetype, { limb: number; hand: number; foot: number; shoulder: number; torso: number }> = {
+  standard: { limb: 1.0, hand: 1.0, foot: 1.0, shoulder: 1.0, torso: 1.0 },
+  brute: { limb: 1.28, hand: 1.45, foot: 1.3, shoulder: 1.18, torso: 1.14 },
+  scout: { limb: 0.85, hand: 0.85, foot: 0.9, shoulder: 0.9, torso: 0.9 },
+};
+
+/** Attach forged headgear to a head mesh (sphere, radius hr, face toward +Z). No boxes — bands, domes, cones, fins. */
 function dressHead(head: THREE.Mesh, plan: HumanoidPlan, skin: THREE.Material, accent: THREE.Material, mats: MaterialLibrary) {
   const s = plan.headSize;
+  const hr = 0.17 * s;
+  /** curved visor band across the face: open cylinder arc centered on +Z */
+  const visorBand = (mat: THREE.Material, glow = 0) =>
+    part(new THREE.CylinderGeometry(hr * 1.04, hr * 1.04, 0.085, 12, 1, true, -0.75, 1.5), mat, 0, 0.02, 0);
+  const hornMat = mats.flat('#e8e2d0', { roughness: 0.6 });
   switch (plan.headStyle) {
     case 'visor':
-      head.add(box(0.26 * s, 0.08, 0.05, accent, 0, 0.02, 0.17 * s));
+      head.add(visorBand(accent));
       break;
     case 'horned':
-      head.add(box(0.26 * s, 0.07, 0.05, accent, 0, 0.01, 0.17 * s));
-      const hornMat = mats.flat('#e8e2d0', { roughness: 0.6 });
-      const h1 = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.22, 5), hornMat);
-      h1.position.set(0.13 * s, 0.22 * s, 0); h1.rotation.z = -0.35; h1.castShadow = true;
-      const h2 = h1.clone(); h2.position.x *= -1; h2.rotation.z = 0.35;
-      head.add(h1, h2);
+      head.add(visorBand(accent));
+      for (const side of [1, -1]) {
+        const horn = part(new THREE.ConeGeometry(0.05, 0.24, 6), hornMat, 0.14 * s * side, 0.2 * s, 0);
+        horn.rotation.z = -0.4 * side;
+        head.add(horn);
+      }
       break;
-    case 'helmet':
-      head.add(box(0.4 * s, 0.12, 0.38 * s, accent, 0, 0.2 * s, 0));
-      head.add(box(0.3 * s, 0.06, 0.05, mats.glow(plan.colors.accent, 1.6), 0, 0.03, 0.18 * s));
-      break;
-    case 'mohawk':
-      head.add(box(0.07, 0.2 * s, 0.34 * s, accent, 0, 0.24 * s, 0));
-      head.add(box(0.24 * s, 0.06, 0.04, accent, 0, 0.0, 0.17 * s));
-      break;
-    case 'hood':
-      head.add(box(0.42 * s, 0.4 * s, 0.4 * s, accent, 0, 0.06, -0.03));
-      head.add(box(0.2 * s, 0.05, 0.04, mats.glow(plan.colors.accent, 2.2), 0, 0.0, 0.2 * s));
-      break;
-    case 'antenna': {
-      head.add(box(0.24 * s, 0.07, 0.05, accent, 0, 0.02, 0.17 * s));
-      const a = box(0.03, 0.3, 0.03, mats.flat('#c9ccd2', { metalness: 0.7, roughness: 0.3 }), 0.1 * s, 0.3 * s, 0);
-      a.add(box(0.07, 0.07, 0.07, mats.glow(plan.colors.accent, 2), 0, 0.18, 0));
-      head.add(a);
+    case 'helmet': {
+      // dome shell + glowing visor slit
+      head.add(part(new THREE.SphereGeometry(hr * 1.16, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.62), accent, 0, 0.03 * s, -0.01));
+      const slit = new THREE.Mesh(new THREE.PlaneGeometry(0.22 * s, 0.055), mats.glow(plan.colors.accent, 1.8));
+      slit.position.set(0, 0.03, hr * 0.99);
+      head.add(slit);
       break;
     }
-    case 'crest':
-      head.add(box(0.34 * s, 0.14, 0.1, accent, 0, 0.22 * s, 0));
-      head.add(box(0.24 * s, 0.06, 0.05, mats.glow('#ffffff', 1.4), 0, 0.02, 0.17 * s));
+    case 'mohawk': {
+      const fin = part(new THREE.OctahedronGeometry(0.13 * s), accent, 0, hr * 1.05, -0.02);
+      fin.scale.set(0.32, 1.0, 2.0);
+      head.add(fin, visorBand(mats.flat('#c9ccd2', { metalness: 0.7, roughness: 0.3 })));
       break;
+    }
+    case 'hood': {
+      // open cone hood, front left open so the face shows; glowing eyes inside
+      head.add(part(new THREE.ConeGeometry(hr * 1.55, hr * 2.4, 10, 1, true, 0.7, Math.PI * 2 - 1.4), accent, 0, hr * 0.45, -0.04));
+      const eyeMat = mats.glow(plan.colors.accent, 2.2);
+      head.add(
+        part(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, 0.06 * s, 0.03, hr * 0.78),
+        part(new THREE.SphereGeometry(0.028, 6, 5), eyeMat, -0.06 * s, 0.03, hr * 0.78),
+      );
+      break;
+    }
+    case 'antenna': {
+      head.add(visorBand(accent));
+      const shaft = part(new THREE.CylinderGeometry(0.016, 0.022, 0.34, 6), mats.flat('#c9ccd2', { metalness: 0.7, roughness: 0.3 }), 0.1 * s, hr + 0.17, 0);
+      const tip = part(new THREE.SphereGeometry(0.045, 8, 6), mats.glow(plan.colors.accent, 2), 0.1 * s, hr + 0.36, 0);
+      head.add(shaft, tip);
+      break;
+    }
+    case 'crest': {
+      const fin = part(new THREE.OctahedronGeometry(0.11 * s), accent, 0, hr * 1.02, 0);
+      fin.scale.set(1.5, 0.85, 0.55);
+      const brow = new THREE.Mesh(new THREE.PlaneGeometry(0.24 * s, 0.05), mats.glow('#ffffff', 1.4));
+      brow.position.set(0, 0.02, hr * 0.98);
+      head.add(fin, brow);
+      break;
+    }
   }
 }
 
-/** Attach forged armor + extras to torso/group. */
-function dressTorso(torso: THREE.Mesh, group: THREE.Group, plan: HumanoidPlan, accent: THREE.Material, shirt: THREE.Material, mats: MaterialLibrary) {
+/** Attach forged armor + extras to the torso. Torso is a tapered cylinder (top r≈0.30·b,
+ *  bottom r≈0.22·b, h=0.72); children use torso-local coords, top at +0.36. No boxes —
+ *  shells, caps, bands, cones, draped cloth. accentDS = double-sided owned accent (cape). */
+function dressTorso(
+  torso: THREE.Object3D, group: THREE.Group, plan: HumanoidPlan,
+  tex: { accent: THREE.Material; shirt: THREE.Material; accentDS: THREE.Material },
+  mats: MaterialLibrary,
+) {
   const b = plan.bulk;
+  const arch = ARCH_SCALE[plan.archetype];
+  const { accent, shirt, accentDS } = tex;
+  const shoulderX = 0.42 * b * arch.shoulder;
+  const pad = (side: number) => {
+    const p = part(new THREE.SphereGeometry(0.155 * b, 8, 6), accent, shoulderX * side, 0.33, 0);
+    p.scale.set(1.15, 0.7, 1.1);
+    return p;
+  };
   switch (plan.armor) {
     case 'pads':
-      torso.add(box(0.2 * b, 0.12, 0.38 * b, accent, 0.36 * b, 0.34, 0));
-      torso.add(box(0.2 * b, 0.12, 0.38 * b, accent, -0.36 * b, 0.34, 0));
+      torso.add(pad(1), pad(-1));
       break;
     case 'plate':
-      torso.add(box(0.56 * b, 0.5, 0.08, accent, 0, 0.04, 0.2 * b));
-      torso.add(box(0.2 * b, 0.12, 0.38 * b, accent, 0.36 * b, 0.34, 0));
-      torso.add(box(0.2 * b, 0.12, 0.38 * b, accent, -0.36 * b, 0.34, 0));
+      // curved chest shell, open at the back
+      torso.add(part(new THREE.CylinderGeometry(0.315 * b * arch.torso, 0.26 * b * arch.torso, 0.5, 10, 1, true, -0.95, 1.9), accent, 0, 0.06, 0));
+      torso.add(pad(1), pad(-1));
       break;
     case 'bandolier': {
-      const strap = box(0.1, 0.78, 0.4 * b, accent, 0, 0, 0);
+      const strap = part(new THREE.CylinderGeometry(0.32 * b * arch.torso, 0.27 * b * arch.torso, 0.13, 10, 1, true), accent, 0, 0.08, 0);
       strap.rotation.z = 0.5;
-      torso.add(strap);
+      const buckle = part(new THREE.SphereGeometry(0.06, 8, 6), mats.glow(plan.colors.accent, 1.6), 0.12, -0.08, 0.26 * b);
+      torso.add(strap, buckle);
       break;
     }
     case 'none':
@@ -120,30 +191,46 @@ function dressTorso(torso: THREE.Mesh, group: THREE.Group, plan: HumanoidPlan, a
   }
   for (const e of plan.extras) {
     if (e === 'cape') {
-      const cape = box(0.5 * b, 0.85, 0.04, accent, 0, -0.12, -0.22 * b);
-      cape.rotation.x = 0.12;
+      const capeGeo = new THREE.PlaneGeometry(0.55 * b, 0.95, 1, 6);
+      const pos = capeGeo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        const d = (0.475 - y) / 0.95; // 0 top → 1 bottom
+        pos.setZ(i, -0.3 * d * d * b);
+        pos.setX(i, pos.getX(i) * (1 - 0.3 * d));
+      }
+      const cape = new THREE.Mesh(faceted(capeGeo), accentDS);
+      cape.castShadow = true;
+      cape.position.set(0, -0.12, -0.26 * b);
+      cape.rotation.x = 0.08;
       torso.add(cape);
     } else if (e === 'backpack') {
-      torso.add(box(0.4 * b, 0.5, 0.18, mats.flat('#4a4640', { roughness: 0.9 }), 0, 0.02, -0.28 * b));
+      torso.add(part(new THREE.CapsuleGeometry(0.15 * b, 0.28, 4, 8), mats.flat('#4a4640', { roughness: 0.9 }), 0, 0.06, -(0.24 * b + 0.13)));
     } else if (e === 'spikes') {
-      const sp = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.18, 4), accent);
-      sp.position.set(0.36 * b, 0.46, 0); sp.castShadow = true;
-      const sp2 = sp.clone(); sp2.position.x *= -1;
+      const sp = part(new THREE.ConeGeometry(0.06, 0.18, 4), accent, 0.36 * b, 0.44, 0);
+      const sp2 = part(new THREE.ConeGeometry(0.06, 0.18, 4), accent, -0.36 * b, 0.44, 0);
       torso.add(sp, sp2);
     } else if (e === 'belt') {
-      torso.add(box(0.64 * b, 0.09, 0.36 * b, accent, 0, -0.32, 0));
+      const belt = part(new THREE.TorusGeometry(0.25 * b * arch.torso, 0.05, 6, 14), accent, 0, -0.3, 0);
+      belt.rotation.x = Math.PI / 2;
+      torso.add(belt);
     } else if (e === 'skirt') {
-      torso.add(box(0.6 * b, 0.22, 0.34 * b, shirt, 0, -0.44, 0));
+      torso.add(part(new THREE.CylinderGeometry(0.3 * b, 0.4 * b, 0.26, 10, 1, true), shirt, 0, -0.42, 0));
     } else if (e === 'pauldron-asym') {
-      torso.add(box(0.26 * b, 0.18, 0.44 * b, accent, 0.38 * b, 0.36, 0));
+      torso.add(part(new THREE.SphereGeometry(0.17 * b, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), accent, shoulderX, 0.32, 0));
     }
   }
 }
 
-/** Forged chunky humanoid, ~1.8m tall before plan scaling. Origin at feet. */
+/** Forged articulated humanoid, ~1.8m tall before plan scaling. Origin at feet.
+ *  Capsule/tapered-cylinder/sphere body with real elbow + knee sub-pivots;
+ *  the seeded archetype (standard/brute/scout) drives proportions. The six legacy
+ *  limb pivots keep their exact positions; joints are children of them. */
 export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shirt?: string; pants?: string; accent?: string; bulk?: number }, seed = 1, hints?: ForgeCustom): CharacterRig {
   const plan = forgeHumanoidPlan(seed, colors, hints);
   const { height, bulk, legLen } = plan;
+  const arch = ARCH_SCALE[plan.archetype];
+  const b = bulk;
   // FIX: clone into per-instance owned materials — flash() mutates emissive, and
   // mutating the MaterialLibrary-cached originals permanently tinted every
   // same-palette character. Owned clones are disposed by dispose().
@@ -151,52 +238,111 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   const shirt = own(mats.flat(plan.colors.shirt, { roughness: 0.85 }));
   const pants = own(mats.flat(plan.colors.pants, { roughness: 0.9 }));
   const accent = own(mats.flat(plan.colors.accent, { roughness: 0.5, metalness: 0.3 }));
+  const accentDS = own(mats.flat(plan.colors.accent, { roughness: 0.5, metalness: 0.3 }));
+  accentDS.side = THREE.DoubleSide; // cape cloth
+  const allMats = [skin, shirt, pants, accent, accentDS];
+  // DE-skins hook-in: semantic role tags so skins can target materials by role
+  // (userData.owned is what dispose()/flash() key off; role is what skins key off).
+  skin.userData.role = 'skin'; shirt.userData.role = 'shirt'; pants.userData.role = 'pants';
+  accent.userData.role = 'accent'; accentDS.userData.role = 'accentDS';
 
   const legL0 = 0.74 * legLen, torsoY = legL0 + 0.38;
+  const thighLen = legL0 * 0.5, shinLen = legL0 * 0.5;
+  const upperArmLen = 0.34 * height, foreArmLen = 0.30 * height;
+  const lr = arch.limb; // limb-radius multiplier
+
   const group = new THREE.Group();
-  const torso = box(0.62 * bulk, 0.7, 0.34 * bulk, shirt, 0, torsoY, 0);
-  const head = box(0.34 * plan.headSize, 0.34 * plan.headSize, 0.32 * plan.headSize, skin, 0, torsoY + 0.54 * plan.headSize, 0);
+
+  // torso: tapered cylinder + chest cap + neck + hips (children bob together)
+  const torsoR = 0.30 * b * arch.torso;
+  const torso = part(new THREE.CylinderGeometry(torsoR, 0.22 * b * arch.torso, 0.72, 8), shirt, 0, torsoY, 0);
+  const chestCap = part(new THREE.SphereGeometry(torsoR * 0.99, 8, 6), shirt, 0, 0.32, 0);
+  chestCap.scale.set(1, 0.55, 0.85);
+  torso.add(chestCap);
+  torso.add(part(new THREE.CylinderGeometry(0.07 * plan.headSize, 0.09, 0.22, 7), skin, 0, 0.44, 0));
+  const hips = part(new THREE.SphereGeometry(0.20 * b * arch.torso, 8, 6), pants, 0, -0.3, 0);
+  hips.scale.set(1.15, 0.75, 0.9);
+  torso.add(hips);
+  dressTorso(torso, group, plan, { accent, shirt, accentDS }, mats);
+
+  // head: sphere + forged headgear
+  const hr = 0.17 * plan.headSize;
+  const head = part(new THREE.SphereGeometry(hr, 10, 8), skin, 0, torsoY + 0.54 * plan.headSize, 0);
   dressHead(head, plan, skin, accent, mats);
-  dressTorso(torso, group, plan, accent, shirt, mats);
 
-  const mkLimb = (mat: THREE.Material, w: number, len: number) => {
-    const pivot = new THREE.Group();
-    const seg = box(w, len, w, mat, 0, -len / 2, 0);
-    pivot.add(seg);
-    return pivot;
+  // arms: shoulder pivot → upper arm → elbow pivot → forearm + fist
+  const buildArm = (side: 1 | -1) => {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(0.42 * b * side, torsoY + 0.3, 0);
+    const delt = part(new THREE.SphereGeometry(0.10 * b * lr, 8, 6), shirt, 0, -0.02, 0);
+    delt.scale.set(1, 0.8, 1);
+    const upper = segment(shirt, 0.095 * b * lr, 0.075 * b * lr, upperArmLen);
+    const elbow = new THREE.Group();
+    elbow.position.set(0, -upperArmLen, 0);
+    const fore = segment(skin, 0.07 * b * lr, 0.055 * b * lr, foreArmLen);
+    const handR = 0.085 * b * arch.hand;
+    const hand = part(new THREE.SphereGeometry(handR, 8, 6), skin, 0, -foreArmLen - handR * 0.45, 0);
+    hand.scale.set(0.9, 1.25, 0.95);
+    elbow.add(fore, hand);
+    shoulder.add(delt, upper, elbow);
+    return { shoulder, elbow };
   };
-  const armLen = 0.62 * height;
-  const armL = mkLimb(shirt, 0.17 * bulk, armLen); armL.position.set(0.42 * bulk, torsoY + 0.3, 0);
-  const armR = mkLimb(shirt, 0.17 * bulk, armLen); armR.position.set(-0.42 * bulk, torsoY + 0.3, 0);
-  const legL = mkLimb(pants, 0.2 * bulk, legL0); legL.position.set(0.17 * bulk, legL0, 0);
-  const legR = mkLimb(pants, 0.2 * bulk, legL0); legR.position.set(-0.17 * bulk, legL0, 0);
+  // legs: hip pivot → thigh → knee pivot → shin + boot
+  const buildLeg = (side: 1 | -1) => {
+    const hip = new THREE.Group();
+    hip.position.set(0.17 * b * side, legL0, 0);
+    const thigh = segment(pants, 0.115 * b * lr, 0.085 * b * lr, thighLen);
+    const knee = new THREE.Group();
+    knee.position.set(0, -thighLen, 0);
+    const shin = segment(pants, 0.08 * b * lr, 0.06 * b * lr, shinLen);
+    const footR = 0.10 * b * arch.foot;
+    const boot = part(new THREE.SphereGeometry(footR, 8, 6), accent, 0, -shinLen + footR * 0.55, 0.06 * b);
+    boot.scale.set(0.85, 0.6, 1.45);
+    knee.add(shin, boot);
+    hip.add(thigh, knee);
+    return { hip, knee };
+  };
+  const armL = buildArm(1), armR = buildArm(-1);
+  const legL = buildLeg(1), legR = buildLeg(-1);
 
-  group.add(torso, head, armL, armR, legL, legR);
+  group.add(torso, head, armL.shoulder, armR.shoulder, legL.hip, legR.hip);
   group.scale.setScalar(height);
 
   const baseY = { torso: torso.position.y, head: head.position.y };
   let flashTime = 0;
   let atkT = -1; // self-advancing swing timer (1 → 0)
-  const allMats = [skin, shirt, pants, accent];
+  const joints = { elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee };
 
   return {
     group,
-    limbs: { legL, legR, armL, armR, torso, head, weaponMount: armR },
+    limbs: {
+      legL: legL.hip, legR: legR.hip, armL: armL.shoulder, armR: armR.shoulder,
+      torso, head, weaponMount: armR.shoulder,
+      elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee, joints,
+    },
     swing() { atkT = 1; },
     animate(t, speed, opts = {}) {
       const k = Math.min(1, speed / 6);
       const f = t * (8 + k * 4);
-      const sw = Math.sin(f) * 0.7 * k;
-      legL.rotation.x = sw; legR.rotation.x = -sw;
-      armL.rotation.x = -sw * 0.85; armR.rotation.x = sw * 0.85;
+      const s = Math.sin(f);
+      const sw = s * 0.7 * k;
+      legL.hip.rotation.x = sw; legR.hip.rotation.x = -sw;
+      armL.shoulder.rotation.x = -sw * 0.85; armR.shoulder.rotation.x = sw * 0.85;
+      // Sub-pivot articulation, phase-coupled to the parent swing (procedural, no bones):
+      // knees bend as their leg swings forward, elbows counter-swing the arms.
+      legL.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, -s));
+      legR.knee.rotation.x = k * (0.08 + 0.85 * Math.max(0, s));
+      armL.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, -s);
+      armR.elbow.rotation.x = -0.12 - k * 0.5 * Math.max(0, s);
       let atkP = opts.attacking && opts.attacking > 0 ? opts.attacking : 0;
       if (!atkP && atkT >= 0) { atkP = 1 - atkT; atkT -= 0.045; if (atkT < 0) atkT = -1; }
       if (atkP > 0) {
         // overhead slash: 0..1 progress
         const p = atkP;
-        armR.rotation.x = -2.4 + p * 3.2;
-        armR.rotation.z = 0.4 - p * 0.5;
-      } else armR.rotation.z = 0;
+        armR.shoulder.rotation.x = -2.4 + p * 3.2;
+        armR.shoulder.rotation.z = 0.4 - p * 0.5;
+        armR.elbow.rotation.x = -0.25 - 0.9 * (1 - p); // bent at windup, snaps straight
+      } else armR.shoulder.rotation.z = 0;
       const bob = Math.abs(Math.sin(f)) * 0.05 * k;
       torso.position.y = baseY.torso + bob;
       head.position.y = baseY.head + bob;
