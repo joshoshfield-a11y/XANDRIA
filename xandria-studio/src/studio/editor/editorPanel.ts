@@ -10,7 +10,7 @@ import {
   MOODS, ENVIRONMENTS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
   CHARACTER_PIVOTS,
   type GameSpec, type ObjectiveStage, type EnemySpec, type Weapon,
-  type CharacterPivot,
+  type CharacterPivot, type SkinDef, type ItemSkinDef, type ItemDef,
 } from '@spec';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -18,6 +18,9 @@ import { fitModelToHeight, resolvePivots } from '../../engine/gfx/RigAdapter';
 import { MaterialLibrary } from '../../engine/gfx/Materials';
 import { makeHumanoid, type CharacterRig } from '../../engine/gfx/Characters';
 import { BUILT_IN_SKINS, resolveSkinDef, applySkin } from '../../engine/gfx/Skins';
+import { mountSkinCreator } from '../creators/skinCreator';
+import { mountItemEditor, type LootSpot } from '../creators/itemEditor';
+import { attachUploadButton } from '../uploadUI';
 import {
   cloneSpec, getAtPath,
   validateEditable,
@@ -70,13 +73,14 @@ const TAB_ERROR_PREFIXES: Record<string, string[]> = {
   enemies: ['enemies'],
   pickups: ['pickups', 'progression'],
   assets: ['custom'],
+  creators: ['custom.characters', 'custom.items'],
 };
 
-const TABS = ['story', 'world', 'player', 'enemies', 'pickups', 'assets'] as const;
+const TABS = ['story', 'world', 'player', 'enemies', 'pickups', 'assets', 'creators'] as const;
 type TabId = (typeof TABS)[number];
 const TAB_LABELS: Record<TabId, string> = {
   story: 'Story', world: 'World', player: 'Player',
-  enemies: 'Enemies', pickups: 'Pickups', assets: 'Assets',
+  enemies: 'Enemies', pickups: 'Pickups', assets: 'Assets', creators: 'Creators',
 };
 
 const css = `
@@ -699,7 +703,14 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     purl.addEventListener('change', () =>
       commit((sp) => setCharacterSlot(sp, 'player', { model: purl.value.trim() || undefined }), false));
     pcard.appendChild(field('MODEL URL (.glb/.gltf, https)', purl,
-      'Empty = procedural rig. Supabase Storage upload ships in phase 2 — paste a hosted URL for now.'));
+      'Empty = procedural rig. Use ⬆ UPLOAD to push a file to Supabase Storage, or paste a hosted URL.'));
+    attachUploadButton(purl, {
+      accept: '.glb,.gltf,.png,.jpg,.jpeg,.webp',
+      onUrl: (url) => {
+        purl.value = url;
+        commit((sp) => setCharacterSlot(sp, 'player', { model: url }), false);
+      },
+    });
     const prevStatus = h(`<div class="xed-hint">No model loaded — enter a URL above, then preview.</div>`);
     const prevCanvas = document.createElement('canvas');
     prevCanvas.style.cssText = 'width:100%;height:180px;border-radius:8px;background:#0a0e16;display:none';
@@ -725,10 +736,17 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
         eurl.addEventListener('change', () =>
           commit((sp) => setCharacterSlot(sp, kind, { model: eurl.value.trim() || undefined }), false));
         row.appendChild(field('MODEL URL', eurl));
+        attachUploadButton(eurl, {
+          accept: '.glb,.gltf,.png,.jpg,.jpeg,.webp',
+          onUrl: (url) => {
+            eurl.value = url;
+            commit((sp) => setCharacterSlot(sp, kind, { model: url }), false);
+          },
+        });
       }
       ecard.appendChild(row);
     }
-    ecard.appendChild(h(`<div class="xed-hint">Model import applies to walker/brute only — drone/flyer/turret keep their forged builds. Custom skins are authored in the spec JSON under <b>custom.characters.skins</b> (built-ins: ${Object.keys(BUILT_IN_SKINS).join(', ')}).</div>`));
+    ecard.appendChild(h(`<div class="xed-hint">Model import applies to walker/brute only — drone/flyer/turret keep their forged builds. Custom skins are painted in the <b>Creators</b> tab or authored in the spec JSON under <b>custom.characters.skins</b> (built-ins: ${Object.keys(BUILT_IN_SKINS).join(', ')}).</div>`));
     host.appendChild(ecard);
   }
 
@@ -933,7 +951,56 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     else if (activeTab === 'player') renderPlayer(s, body);
     else if (activeTab === 'enemies') renderEnemies(s, body);
     else if (activeTab === 'pickups') renderPickups(s, body);
+    else if (activeTab === 'creators') renderCreators(s, body);
     else renderAssets(s, body);
+  }
+
+  /** Creators tab (inventory wave): visual skin + item authoring. */
+  function renderCreators(s: GameSpec, host: HTMLElement): void {
+    host.appendChild(h(`<div class="xed-ns">CREATORS</div>`));
+    host.appendChild(h(`<div class="xed-hint">"Add to spec" writes to <b>custom.characters.skins</b>, <b>custom.items.skins</b> and <b>custom.items.defs</b>; "Place in world" appends to <b>custom.items.loot</b>. Errors surface inline at the top of the panel.</div>`));
+    const skinHost = h(`<div></div>`);
+    const itemHost = h(`<div></div>`);
+    host.append(skinHost, itemHost);
+    mountSkinCreator(skinHost, {
+      getSpec: () => (working ? cloneSpec(working) : null),
+      onAddToSpec: (kind, id, def) => {
+        commit((sp) => {
+          sp.custom = sp.custom ?? {};
+          if (kind === 'character') {
+            sp.custom.characters = sp.custom.characters ?? {};
+            sp.custom.characters.skins = sp.custom.characters.skins ?? {};
+            sp.custom.characters.skins[id] = def as SkinDef;
+          } else {
+            sp.custom.items = sp.custom.items ?? {};
+            sp.custom.items.skins = sp.custom.items.skins ?? {};
+            sp.custom.items.skins[id] = def as ItemSkinDef;
+          }
+        }, false);
+      },
+    });
+    mountItemEditor(itemHost, {
+      onAddToSpec: (id, def) => {
+        commit((sp) => {
+          sp.custom = sp.custom ?? {};
+          sp.custom.items = sp.custom.items ?? {};
+          sp.custom.items.defs = sp.custom.items.defs ?? {};
+          sp.custom.items.defs[id] = def as ItemDef;
+        }, false);
+      },
+      onPlaceInWorld: (spot: LootSpot) => {
+        commit((sp) => {
+          sp.custom = sp.custom ?? {};
+          sp.custom.items = sp.custom.items ?? {};
+          sp.custom.items.loot = sp.custom.items.loot ?? [];
+          sp.custom.items.loot.push({
+            item: spot.item,
+            pos: [...spot.pos] as [number, number, number],
+            ...(spot.count !== undefined ? { count: spot.count } : {}),
+          });
+        }, false);
+      },
+    });
   }
 
   // ---------------------------------------------------------- wiring
