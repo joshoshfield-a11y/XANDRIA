@@ -27,11 +27,12 @@ import {
   type Weather,
   type CharacterSlot,
   type CharacterPivot,
+  type SkinDef,
   ENVIRONMENTS,
   OBJECTIVES,
   ENEMY_KINDS,
 } from '@spec';
-import { BUILT_IN_SKINS } from '../../engine/gfx/Skins';
+import { BUILT_IN_SKINS, resolveSkinDef } from '../../engine/gfx/Skins';
 import { ASSET_IDS, type AssetOverride } from '../../engine/game/Assets';
 
 // ---------------------------------------------------------------------------
@@ -645,6 +646,40 @@ export function setBoneMapEntry(spec: GameSpec, which: 'player' | string, pivot:
   if (node) boneMap[pivot] = node;
   else delete boneMap[pivot];
   setCharacterSlot(spec, which, { boneMap });
+}
+
+/** True when the spec carries a custom skin def overriding a built-in id. */
+export function hasCustomSkinOverride(spec: GameSpec, id: string): boolean {
+  return !!spec.custom?.characters?.skins?.[id] && !!BUILT_IN_SKINS[id];
+}
+
+/**
+ * Per-skin accent tweak (beauty wave): writes a custom skin def under the
+ * same id, copied from the resolved base with only palette.accent replaced
+ * (emissive.color follows the accent when the base has emissive). Custom
+ * spec skins win over built-ins at resolve time, so the game shows the
+ * tweak. `accent === undefined` deletes the override and restores the
+ * built-in (only offered for built-in ids; pure custom skins are edited
+ * in place and have no built-in to restore).
+ */
+export function setCustomSkinAccent(spec: GameSpec, id: string, accent: string | undefined): void {
+  const custom = ensureCustom(spec);
+  custom.characters = custom.characters ?? {};
+  const ch = custom.characters;
+  if (accent === undefined) {
+    if (ch.skins?.[id] && BUILT_IN_SKINS[id]) delete ch.skins[id];
+  } else {
+    const base = resolveSkinDef(spec, id);
+    if (!base) return;
+    const next: SkinDef = JSON.parse(JSON.stringify(base)) as SkinDef;
+    next.name = base.name;
+    next.palette = { ...(base.palette ?? {}), accent };
+    if (next.emissive) next.emissive = { ...next.emissive, color: accent };
+    ch.skins = ch.skins ?? {};
+    ch.skins[id] = next;
+  }
+  if (!ch.player && (!ch.enemies || Object.keys(ch.enemies).length === 0) &&
+      (!ch.skins || Object.keys(ch.skins).length === 0)) delete custom.characters;
 }
 
 /**

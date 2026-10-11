@@ -256,9 +256,13 @@ export interface AssetPacks {
 export const GLB_URL_RE = /^https:\/\/[^?#]+\.(glb|gltf)(\?.*)?$/i;
 export const isGlbUrl = (u: unknown): u is string => typeof u === 'string' && GLB_URL_RE.test(u);
 
-/** Named canvas-procedural texture patterns a skin can stamp onto shirt/pants. */
-export const SKIN_TEXTURE_PATTERNS = ['camo', 'stripes', 'digital', 'carbon'] as const;
+/** Named canvas-procedural texture patterns a skin can stamp onto body roles. */
+export const SKIN_TEXTURE_PATTERNS = ['camo', 'stripes', 'digital', 'carbon', 'hazard', 'fade', 'runes'] as const;
 export type SkinTexturePattern = (typeof SKIN_TEXTURE_PATTERNS)[number];
+
+/** Body roles a skin pattern texture may be stamped onto (default: shirt+pants). */
+export const SKIN_TEXTURE_ROLES = ['skin', 'shirt', 'pants', 'accent', 'accentDS'] as const;
+export type SkinTextureRole = (typeof SKIN_TEXTURE_ROLES)[number];
 
 /** CharacterRig pivots addressable by skins/imports (the six legacy limb pivots + C-wave sub-pivots). */
 export const CHARACTER_PIVOTS = [
@@ -290,6 +294,8 @@ export interface SkinDef {
   /** shirt/pants texture: a URL image (https, png/jpg/webp) or a named canvas pattern.
    *  Texture failures never throw — the plain palette stands as fallback. */
   texture?: { url: string } | { pattern: SkinTexturePattern };
+  /** which body roles get the texture map (default: shirt+pants). */
+  textureRoles?: SkinTextureRole[];
 }
 /**
  * One character's import/customization slot. `skin` references a skin id
@@ -883,6 +889,11 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
                   if (!inEnum((sd.texture as Record<string, unknown>).pattern, SKIN_TEXTURE_PATTERNS))
                     err(`${p}.texture.pattern`, `must be one of ${SKIN_TEXTURE_PATTERNS.join('|')}`);
                 } else err(`${p}.texture`, 'must be { url } or { pattern }');
+              }
+              if (sd.textureRoles !== undefined) {
+                const okRoles = Array.isArray(sd.textureRoles) &&
+                  sd.textureRoles.every((r) => inEnum(r, SKIN_TEXTURE_ROLES));
+                if (!okRoles) err(`${p}.textureRoles`, `must be an array of ${SKIN_TEXTURE_ROLES.join('|')}`);
               }
             }
           }

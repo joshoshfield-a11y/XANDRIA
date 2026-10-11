@@ -15,6 +15,9 @@ import {
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { fitModelToHeight, resolvePivots } from '../../engine/gfx/RigAdapter';
+import { MaterialLibrary } from '../../engine/gfx/Materials';
+import { makeHumanoid, type CharacterRig } from '../../engine/gfx/Characters';
+import { BUILT_IN_SKINS, resolveSkinDef, applySkin } from '../../engine/gfx/Skins';
 import {
   cloneSpec, getAtPath,
   validateEditable,
@@ -31,6 +34,7 @@ import {
   clearCustomAssets, customAssetsShape, reskinOverridesPresent, isDefaultReskin,
   projectFromJson,
   listSkinIds, getCharacterSlot, setCharacterSlot, setBoneMapEntry,
+  setCustomSkinAccent, hasCustomSkinOverride,
   type AssetControl, type AssetOverride,
 } from './specOps';
 
@@ -536,18 +540,130 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
   }
 
   /**
-   * Characters section (workstream D+E): skin chooser dropdowns for the player
-   * + every enemy kind, GLB model-URL inputs (player + walker/brute), a live
-   * preview pane, and bone-remap dropdowns — all writing into
+   * Characters section (workstream D+E + beauty wave A): skin chooser
+   * dropdowns for the player + every enemy kind, a live skin preview pane
+   * (player: palette swatches, accent tweak, procedural-rig turntable),
+   * GLB model-URL inputs (player + walker/brute), a live model preview
+   * pane, and bone-remap dropdowns — all writing into
    * spec.custom.characters. Skins are procedural-only; an explicit skin wins
    * over the palette-derived colors; model URLs always fall back to the
    * procedural rig on any failure (online-only).
    */
+  /**
+   * Live skin preview pane (beauty wave): palette swatches + a small
+   * procedural-rig turntable (same render-loop shape as the GLB model
+   * preview) + a per-skin accent tweak. The rig is rebuilt on skin change
+   * so stale texture maps can never linger; renderer + rig are disposed
+   * when the canvas detaches (tab switch / re-render stops the loop).
+   */
+  function buildSkinPreview(): {
+    swatches: HTMLElement; accentRow: HTMLElement; box: HTMLElement;
+    refresh(id: string | undefined): void;
+  } {
+    const swatches = h(`<div class="xed-swatches"></div>`);
+    const accentInput = document.createElement('input');
+    accentInput.type = 'color';
+    accentInput.title = 'Tweak this skin\u2019s accent color — saves a custom override into custom.characters.skins';
+    const accentReset = h(`<button class="xed-iconbtn" title="Drop the accent override and restore the built-in">RESET</button>`) as HTMLButtonElement;
+    const accentRow = h(`<div style="display:flex;gap:8px;align-items:center"></div>`);
+    accentRow.append(h(`<div class="xed-flabel">ACCENT</div>`), accentInput, accentReset);
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'width:100%;height:180px;border-radius:8px;background:#0a0e16';
+    const status = h(`<div class="xed-hint"></div>`);
+    const box = h(`<div class="xed-card" style="padding:8px"></div>`);
+    box.append(status, canvas);
+
+    let rig: CharacterRig | null = null;
+    let pivot: THREE.Group | null = null;
+    let curId: string | undefined;
+
+    const rebuildRig = (id: string | undefined) => {
+      if (!working) return undefined;
+      if (rig) { rig.dispose(); rig = null; }
+      rig = makeHumanoid(new MaterialLibrary(working), {}, 7);
+      const def = resolveSkinDef(working, id);
+      if (def) applySkin(rig, def);
+      if (pivot) { pivot.clear(); pivot.add(rig.group); }
+      return def;
+    };
+
+    const refresh = (id: string | undefined) => {
+      curId = id;
+      const def = rebuildRig(id);
+      // palette swatches
+      swatches.innerHTML = '';
+      const pal = def?.palette;
+      const rows: [string, string | undefined][] = [
+        ['skin', pal?.skin], ['shirt', pal?.shirt], ['pants', pal?.pants], ['accent', pal?.accent],
+      ];
+      for (const [role, hex] of rows) {
+        swatches.appendChild(h(
+          `<div class="xed-sw"><div class="xed-dots"><span class="xed-dot" style="background:${hex ?? 'transparent'}"></span></div>${role}<span>${escapeHtml(hex ?? '—')}</span></div>`));
+      }
+      // accent tweak (cheap: color picker + reset; writes a custom skin override)
+      const accentHex = typeof pal?.accent === 'string' && /^#[0-9a-f]{6}$/i.test(pal.accent) ? pal.accent : '#ffffff';
+      accentInput.value = accentHex;
+      accentInput.disabled = !id || !working;
+      const overridden = !!id && !!working && hasCustomSkinOverride(working, id);
+      accentReset.style.display = overridden ? '' : 'none';
+      status.textContent = !id
+        ? 'preview: procedural default (no skin selected)'
+        : `preview: ${def?.name ?? id}${overridden ? ' — custom accent override' : ''}`;
+    };
+
+    accentInput.addEventListener('input', () => {
+      if (!curId || !working) return;
+      commit((sp) => setCustomSkinAccent(sp, curId!, accentInput.value), false);
+      refresh(curId);
+    });
+    accentReset.addEventListener('click', () => {
+      if (!curId || !working) return;
+      commit((sp) => setCustomSkinAccent(sp, curId!, undefined), false);
+      refresh(curId);
+    });
+
+    // turntable (starts once; refresh() swaps the rig under it)
+    try {
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+      renderer.setSize(canvas.clientWidth || 300, 180, false);
+      const scene = new THREE.Scene();
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.2));
+      const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+      dir.position.set(2, 4, 3);
+      scene.add(dir);
+      pivot = new THREE.Group();
+      scene.add(pivot);
+      const cam = new THREE.PerspectiveCamera(40, (canvas.clientWidth || 300) / 180, 0.05, 100);
+      cam.position.set(0, 0.72, 2.3);
+      cam.lookAt(0, 0.55, 0);
+      let raf = 0;
+      let alive = true;
+      const stop = () => {
+        alive = false;
+        cancelAnimationFrame(raf);
+        renderer.dispose();
+        if (rig) { rig.dispose(); rig = null; }
+      };
+      (canvas as unknown as { __skinPreview: { stop(): void } }).__skinPreview = { stop };
+      const tick = () => {
+        if (!alive || !canvas.isConnected) { stop(); return; }
+        pivot!.rotation.y += 0.012;
+        renderer.render(scene, cam);
+        raf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      status.textContent = 'skin preview unavailable in this browser';
+    }
+
+    return { swatches, accentRow, box, refresh };
+  }
+
   function renderCharacters(s: GameSpec, host: HTMLElement): void {
     host.appendChild(h(`<div class="xed-ns">CHARACTERS</div>`));
     host.appendChild(h(`<div class="xed-hint">Skins recolor the procedural hero. A GLB/GLTF model URL (https) replaces the procedural rig — preview it here first. Writes to <b>custom.characters</b>.</div>`));
 
-    const skinSelect = (cur: string | undefined, which: 'player' | string): HTMLSelectElement => {
+    const skinSelect = (cur: string | undefined, which: 'player' | string, onChange?: (id: string | undefined) => void): HTMLSelectElement => {
       const sel = document.createElement('select');
       const add = (v: string, label: string) => {
         const o = document.createElement('option');
@@ -555,17 +671,29 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
         sel.appendChild(o);
       };
       add('', '(procedural default)');
-      for (const id of listSkinIds(s)) add(id, id);
-      sel.addEventListener('change', () =>
-        commit((sp) => setCharacterSlot(sp, which, { skin: sel.value || undefined }), false));
+      for (const id of listSkinIds(s)) {
+        const def = resolveSkinDef(s, id);
+        add(id, def ? `${def.name} (${id})` : id);
+      }
+      sel.addEventListener('change', () => {
+        commit((sp) => setCharacterSlot(sp, which, { skin: sel.value || undefined }), false);
+        onChange?.(sel.value || undefined);
+      });
       return sel;
     };
 
     // ---- player card
     const player = getCharacterSlot(s, 'player');
     const pcard = h(`<div class="xed-asset"><div class="xed-aname">PLAYER</div></div>`);
-    pcard.appendChild(field('SKIN', skinSelect(player.skin, 'player'),
+    const skinUi = buildSkinPreview();
+    pcard.appendChild(field('SKIN', skinSelect(player.skin, 'player', (id) => skinUi.refresh(id)),
       'An explicit skin wins over the palette-derived colors.'));
+    pcard.appendChild(h(`<div class="xed-flabel">PALETTE</div>`));
+    pcard.appendChild(skinUi.swatches);
+    pcard.appendChild(skinUi.accentRow);
+    pcard.appendChild(h(`<div class="xed-flabel">LIVE PREVIEW</div>`));
+    pcard.appendChild(skinUi.box);
+    skinUi.refresh(player.skin);
     const purl = document.createElement('input');
     purl.type = 'text'; purl.value = player.model ?? ''; purl.placeholder = 'https://…/hero.glb';
     purl.addEventListener('change', () =>
@@ -600,7 +728,7 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       }
       ecard.appendChild(row);
     }
-    ecard.appendChild(h(`<div class="xed-hint">Model import applies to walker/brute only — drone/flyer/turret keep their forged builds. Custom skins are authored in the spec JSON under <b>custom.characters.skins</b> (built-ins: default, crimson, stealth, gold).</div>`));
+    ecard.appendChild(h(`<div class="xed-hint">Model import applies to walker/brute only — drone/flyer/turret keep their forged builds. Custom skins are authored in the spec JSON under <b>custom.characters.skins</b> (built-ins: ${Object.keys(BUILT_IN_SKINS).join(', ')}).</div>`));
     host.appendChild(ecard);
   }
 

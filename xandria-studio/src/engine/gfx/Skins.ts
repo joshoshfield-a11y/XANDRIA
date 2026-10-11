@@ -1,7 +1,8 @@
 /**
- * Character skins (workstream D) — palette / emissive / texture overrides
- * applied to a procedural CharacterRig's OWNED, role-tagged materials
- * (userData.role = skin|shirt|pants|accent|accentDS, stamped in makeHumanoid).
+ * Character skins (workstream D, beauty wave A) — palette / emissive /
+ * texture overrides applied to a procedural CharacterRig's OWNED,
+ * role-tagged materials (userData.role = skin|shirt|pants|accent|accentDS,
+ * stamped in makeHumanoid).
  *
  * Rules:
  *  - Only owned cloned materials are ever mutated — the MaterialLibrary cache
@@ -14,10 +15,20 @@
  *    The colors param is palette-derived blueprint defaults; a skin choice is
  *    a deliberate authoring decision and must be visible. No skin set → the
  *    colors-param path is untouched (backward compatible).
+ *
+ * Pattern system (beauty wave): named patterns are 128px deterministic canvas
+ * textures. Most painters are LUMINANCE layers — near-white bases with darker
+ * motif overlays — so the skin's palette hue shows through the multiply
+ * (map × color); a palette works with any pattern. `hazard` is the exception:
+ * it is deliberately chromatic (yellow/black), meant for accent roles.
+ * `textureRoles` picks which roles get the map (default: shirt+pants).
  */
 import * as THREE from 'three';
 import { TextureLoader } from 'three';
-import type { GameSpec, SkinDef, SkinTexturePattern } from '@spec';
+import {
+  type GameSpec, type SkinDef, type SkinTexturePattern, type SkinTextureRole,
+  SKIN_TEXTURE_ROLES,
+} from '@spec';
 
 export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   default: {
@@ -46,6 +57,70 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     roughness: 0.3,
     metalness: 0.9,
     texture: { pattern: 'carbon' },
+  },
+  neonstreet: {
+    name: 'Neon Street',
+    palette: { skin: '#b98a5e', shirt: '#241a3f', pants: '#141021', accent: '#ff2fd6' },
+    emissive: { color: '#ff2fd6', intensity: 1.4 },
+    roughness: 0.6,
+    metalness: 0.3,
+    texture: { pattern: 'fade' },
+  },
+  rustscrap: {
+    name: 'Rust Scrap',
+    palette: { skin: '#a37a52', shirt: '#5f4a30', pants: '#3b2d22', accent: '#e08a2e' },
+    roughness: 0.95,
+    metalness: 0.35,
+    texture: { pattern: 'hazard' },
+    textureRoles: ['accent'],
+  },
+  spectral: {
+    name: 'Spectral Warden',
+    palette: { skin: '#bcd8e8', shirt: '#3a5a7a', pants: '#24384e', accent: '#9ff2ff' },
+    emissive: { color: '#9ff2ff', intensity: 1.6 },
+    roughness: 0.4,
+    metalness: 0.05,
+    texture: { pattern: 'runes' },
+  },
+  royalguard: {
+    name: 'Royal Guard',
+    palette: { skin: '#d9a066', shirt: '#1f2a5a', pants: '#151a33', accent: '#ffd700' },
+    emissive: { color: '#ffd700', intensity: 0.3 },
+    roughness: 0.5,
+    metalness: 0.5,
+    texture: { pattern: 'stripes' },
+  },
+  desertnomad: {
+    name: 'Desert Nomad',
+    palette: { skin: '#c28a5e', shirt: '#a8895a', pants: '#6e5638', accent: '#2e7f8a' },
+    roughness: 1.0,
+    metalness: 0.0,
+    texture: { pattern: 'camo' },
+  },
+  abyssal: {
+    name: 'Abyssal Diver',
+    palette: { skin: '#7a9aa8', shirt: '#0e2233', pants: '#081420', accent: '#35e0ff' },
+    emissive: { color: '#35e0ff', intensity: 1.0 },
+    roughness: 0.35,
+    metalness: 0.4,
+    texture: { pattern: 'fade' },
+    textureRoles: ['shirt', 'pants'],
+  },
+  solarpaladin: {
+    name: 'Solar Paladin',
+    palette: { skin: '#d9a066', shirt: '#e8dcc0', pants: '#b8a878', accent: '#ff9d2e' },
+    emissive: { color: '#ffcc55', intensity: 0.8 },
+    roughness: 0.45,
+    metalness: 0.55,
+    texture: { pattern: 'runes' },
+  },
+  cyberronin: {
+    name: 'Cyber Ronin',
+    palette: { skin: '#c9995c', shirt: '#0f0f13', pants: '#0a0a0d', accent: '#ff2255' },
+    emissive: { color: '#ff2255', intensity: 1.8 },
+    roughness: 0.4,
+    metalness: 0.6,
+    texture: { pattern: 'digital' },
   },
 };
 
@@ -86,8 +161,150 @@ function roleMaterials(root: THREE.Object3D): Map<string, THREE.MeshStandardMate
 const isHex = (s: unknown): s is string =>
   typeof s === 'string' && /^#[0-9a-fA-F]{6}$/.test(s);
 
+// ---------------------------------------------------------------------------
+// deterministic canvas painters (beauty wave: upgraded camo + 3 new patterns)
+// ---------------------------------------------------------------------------
+
+/** FNV-1a string hash → per-pattern PRNG seed (stable across sessions). */
+function hashStr(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+/** Deterministic LCG — no Math.random anywhere in the painters. */
+function seededRnd(seed: number): () => number {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 0xffffffff;
+  };
+}
+
+type Painter = (ctx: CanvasRenderingContext2D, rnd: () => number) => void;
+
+/** diagonal pinstripes over a near-white base (luminance layer — palette shows through) */
+const paintStripes: Painter = (ctx, _rnd) => {
+  ctx.fillStyle = '#f4f6fa'; ctx.fillRect(0, 0, 128, 128);
+  ctx.fillStyle = '#c3c9d4';
+  for (let i = -128; i < 256; i += 28) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0); ctx.lineTo(i + 13, 0); ctx.lineTo(i + 13 - 64, 128); ctx.lineTo(i - 64, 128);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#9aa2b2';
+  for (let i = -128 + 20; i < 256; i += 28) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0); ctx.lineTo(i + 3, 0); ctx.lineTo(i + 3 - 64, 128); ctx.lineTo(i - 64, 128);
+    ctx.fill();
+  }
+};
+
+/** camo blotches: layered ellipses + speckle, over a near-white base (upgraded: more blobs, varied shapes) */
+const paintCamo: Painter = (ctx, rnd) => {
+  ctx.fillStyle = '#f2f4f7'; ctx.fillRect(0, 0, 128, 128);
+  const cols = ['#c7ccd5', '#a9b1bd', '#8d96a4'];
+  for (let i = 0; i < 40; i++) {
+    ctx.fillStyle = cols[i % 3];
+    ctx.beginPath();
+    ctx.ellipse(rnd() * 128, rnd() * 128, 6 + rnd() * 20, 5 + rnd() * 16, rnd() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(125,135,150,0.35)';
+  for (let i = 0; i < 500; i++) ctx.fillRect(rnd() * 128, rnd() * 128, 1.5, 1.5);
+};
+
+/** digital static: sparse darker blocks over a near-white base */
+const paintDigital: Painter = (ctx, rnd) => {
+  ctx.fillStyle = '#eef1f6'; ctx.fillRect(0, 0, 128, 128);
+  const cols = ['#c9cfda', '#aeb6c4', '#8f97a8'];
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const r = rnd();
+    if (r < 0.42) {
+      ctx.fillStyle = cols[(x * 7 + y * 13) % 3];
+      ctx.fillRect(x * 8, y * 8, 8, 8);
+    } else if (r > 0.965) {
+      ctx.fillStyle = '#6d7583';
+      ctx.fillRect(x * 8, y * 8, 8, 8);
+    }
+  }
+};
+
+/** carbon 2x2 twill weave in grays */
+const paintCarbon: Painter = (ctx, _rnd) => {
+  ctx.fillStyle = '#dfe3ea'; ctx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const horiz = (x + y) % 2 === 0;
+    ctx.fillStyle = horiz ? '#c3c9d4' : '#a9b1bd';
+    ctx.fillRect(x * 8 + (horiz ? 0 : 1), y * 8 + (horiz ? 1 : 0), 8 - (horiz ? 0 : 2), 8 - (horiz ? 2 : 0));
+  }
+};
+
+/** hazard stripes: deliberately chromatic yellow/black 45° chevrons — best on the accent role */
+const paintHazard: Painter = (ctx, _rnd) => {
+  ctx.fillStyle = '#232227'; ctx.fillRect(0, 0, 128, 128);
+  ctx.fillStyle = '#f2c230';
+  for (let i = -128; i < 256; i += 40) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0); ctx.lineTo(i + 20, 0); ctx.lineTo(i + 20 - 64, 128); ctx.lineTo(i - 64, 128);
+    ctx.fill();
+  }
+};
+
+/** gradient fade: white → mid-gray, top to bottom (palette fades darker toward the feet) */
+const paintFade: Painter = (ctx, _rnd) => {
+  const g = ctx.createLinearGradient(0, 0, 0, 128);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(1, '#5a6270');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
+};
+
+/** rune/sigil decals: pseudo-glyphs (seeded segment runs on a 3x3 lattice) with a cold glow */
+const paintRunes: Painter = (ctx, rnd) => {
+  ctx.fillStyle = '#eef1f6'; ctx.fillRect(0, 0, 128, 128);
+  const lattice = (cx: number, cy: number, cell: number): [number, number][] => {
+    const pts: [number, number][] = [];
+    for (let gy = 0; gy < 3; gy++) for (let gx = 0; gx < 3; gx++)
+      pts.push([cx + gx * (cell / 2), cy + gy * (cell / 2)]);
+    return pts;
+  };
+  for (let gy = 0; gy < 4; gy++) for (let gx = 0; gx < 4; gx++) {
+    if (rnd() < 0.35) continue; // some cells stay bare
+    const cx = gx * 32 + 4, cy = gy * 32 + 4, cell = 24;
+    const pts = lattice(cx, cy, cell);
+    let p = Math.floor(rnd() * 9);
+    ctx.strokeStyle = '#7d8698';
+    ctx.lineWidth = 2.5;
+    try { ctx.shadowBlur = 8; ctx.shadowColor = '#9fd8ff'; } catch { /* canvas stubs */ }
+    ctx.beginPath();
+    ctx.moveTo(pts[p][0], pts[p][1]);
+    const segs = 3 + Math.floor(rnd() * 3);
+    for (let k = 0; k < segs; k++) {
+      const nb = [p - 3, p + 3, p - 1, p + 1].filter((q) => q >= 0 && q < 9 && q !== p);
+      p = nb[Math.floor(rnd() * nb.length)];
+      ctx.lineTo(pts[p][0], pts[p][1]);
+    }
+    ctx.stroke();
+    try { ctx.shadowBlur = 0; } catch { /* canvas stubs */ }
+    ctx.fillStyle = '#4d5563';
+    ctx.fillRect(pts[p][0] - 1, pts[p][1] - 1, 2, 2);
+  }
+};
+
+const PAINTERS: Record<SkinTexturePattern, Painter> = {
+  stripes: paintStripes,
+  camo: paintCamo,
+  digital: paintDigital,
+  carbon: paintCarbon,
+  hazard: paintHazard,
+  fade: paintFade,
+  runes: paintRunes,
+};
+
 /** Deterministic 128px canvas patterns for skin.texture.pattern. Returns null when no DOM canvas is available. */
 export function makePatternTexture(pattern: SkinTexturePattern): THREE.CanvasTexture | null {
+  const painter = PAINTERS[pattern];
+  if (!painter) return null;
   try {
     const doc = (globalThis as unknown as { document?: Document }).document;
     const canvas = doc?.createElement('canvas');
@@ -95,42 +312,7 @@ export function makePatternTexture(pattern: SkinTexturePattern): THREE.CanvasTex
     canvas.width = 128; canvas.height = 128;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    // tiny deterministic PRNG so the pattern is stable across sessions
-    let s = 0x9e3779b9;
-    const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 0xffffffff);
-    const fill = (c: string) => { ctx.fillStyle = c; ctx.fillRect(0, 0, 128, 128); };
-    if (pattern === 'stripes') {
-      fill('#20242c');
-      ctx.fillStyle = '#3a4150';
-      for (let i = -128; i < 256; i += 24) {
-        ctx.beginPath();
-        ctx.moveTo(i, 0); ctx.lineTo(i + 12, 0); ctx.lineTo(i + 12 - 64, 128); ctx.lineTo(i - 64, 128);
-        ctx.fill();
-      }
-    } else if (pattern === 'camo') {
-      fill('#3a4432');
-      const cols = ['#2c3527', '#55603f', '#1e241b'];
-      for (let i = 0; i < 26; i++) {
-        ctx.fillStyle = cols[i % 3];
-        ctx.beginPath();
-        ctx.ellipse(rnd() * 128, rnd() * 128, 8 + rnd() * 18, 6 + rnd() * 14, rnd() * Math.PI, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    } else if (pattern === 'digital') {
-      fill('#14161c');
-      const cols = ['#1e2530', '#232d3d', '#2c3d55'];
-      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-        if (rnd() < 0.45) { ctx.fillStyle = cols[(x * 7 + y * 13) % 3]; ctx.fillRect(x * 8, y * 8, 8, 8); }
-      }
-    } else {
-      // carbon weave
-      fill('#101114');
-      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-        const horiz = (x + y) % 2 === 0;
-        ctx.fillStyle = horiz ? '#1c1e24' : '#26282f';
-        ctx.fillRect(x * 8 + (horiz ? 0 : 1), y * 8 + (horiz ? 1 : 0), 8 - (horiz ? 0 : 2), 8 - (horiz ? 2 : 0));
-      }
-    }
+    painter(ctx, seededRnd(0x9e3779b9 ^ hashStr(pattern)));
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -142,6 +324,8 @@ export function makePatternTexture(pattern: SkinTexturePattern): THREE.CanvasTex
 
 const TEX_URL_RE = /^https:\/\/[^?#]+\.(png|jpe?g|webp)(\?.*)?$/i;
 const textureLoader = new TextureLoader();
+
+const VALID_TEX_ROLES: readonly string[] = SKIN_TEXTURE_ROLES;
 
 /**
  * Apply a skin to a rig. Mutates only owned, role-tagged materials — shared
@@ -179,11 +363,13 @@ export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef): void {
       }
     }
 
-    // texture → shirt + pants. URL loads async; on any failure the palette stands.
+    // texture → textureRoles (default shirt+pants). URL loads async; on any failure the palette stands.
+    const texRoles = (skin.textureRoles?.length ? skin.textureRoles : ['shirt', 'pants'])
+      .filter((r) => VALID_TEX_ROLES.includes(r));
     const applyTex = (tex: THREE.Texture) => {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      for (const mat of [...(roles.get('shirt') ?? []), ...(roles.get('pants') ?? [])]) {
+      for (const mat of texRoles.flatMap((r) => roles.get(r) ?? [])) {
         try { mat.map = tex; mat.needsUpdate = true; } catch { /* skip */ }
       }
     };
