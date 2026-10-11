@@ -42,6 +42,7 @@ import {
 } from './fx';
 import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
+import { Scatter } from '../engine/world/Scatter';
 import { PlayerAvatar } from './common';
 
 export function buildFpsArena(engine: Engine, spec: GameSpec) {
@@ -82,6 +83,14 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     ring.position.y = terrain.heightAt(0, 0) + 5.2;
     scene.add(ring);
   }
+
+  // beauty wave: per-genre hero props (pylons + cover crates); the arena
+  // dressing above stays untouched, this only adds scatter
+  new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
+    heroesOnly: true,
+    exclusion: [{ x: 0, z: 0, r: 10 }],
+    quality: engine.effectiveQuality(),
+  });
 
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
   let avatar: PlayerAvatar;

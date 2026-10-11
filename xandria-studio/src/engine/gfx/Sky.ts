@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
+import { gradeAtmosphere } from './GenreGrade';
 import { Rng } from '../core/Rng';
 
 export interface SkyRig {
@@ -22,6 +23,9 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   const bottom = new THREE.Color(palette.horizon);
   const night = timeOfDay === 'night';
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
+  // Beauty wave: per-genre atmosphere grade (exposure, fog, lights, clouds).
+  // Night grades to identity — the night visibility floor must not regress.
+  const grade = gradeAtmosphere(spec.meta.genre, timeOfDay);
   if (night) { top.multiplyScalar(0.25); bottom.multiplyScalar(0.35); }
   if (dusk) { bottom.lerp(new THREE.Color('#ff9a5c'), 0.45); top.multiplyScalar(0.7); }
 
@@ -63,7 +67,7 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   const rng = new Rng(spec.meta.seed ^ 0xc10d5);
   const cloudGroup = new THREE.Group();
   if (weather !== 'clear' || environment !== 'space-station') {
-    const cm = new THREE.MeshBasicMaterial({ color: night ? '#3a4460' : '#ffffff', transparent: true, opacity: weather === 'storm' ? 0.85 : 0.55, depthWrite: false, fog: false });
+    const cm = new THREE.MeshBasicMaterial({ color: night ? '#3a4460' : grade.cloudColor, transparent: true, opacity: (weather === 'storm' ? 0.85 : 0.55) * grade.clouds, depthWrite: false, fog: false });
     const count = weather === 'clear' ? 10 : 26;
     for (let i = 0; i < count; i++) {
       const w = 60 + rng.range(0, 120);
@@ -81,7 +85,7 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   // minimums — a dark palette (e.g. neon-city) under the old 0.5/0.35/0.12 levels
   // produced an effectively black framebuffer (see visibility.spec.ts).
   const sunColor = night ? new THREE.Color('#7f8fc0') : dusk ? new THREE.Color('#ffb070') : new THREE.Color('#fff4e0');
-  const sun = new THREE.DirectionalLight(sunColor, night ? 1.8 : dusk ? 1.6 : 2.2);
+  const sun = new THREE.DirectionalLight(sunColor, (night ? 1.8 : dusk ? 1.6 : 2.2) * grade.sun);
   const sunDir = sunDirPhys ? sunDirPhys.clone() : new THREE.Vector3(0.45, dusk ? 0.35 : 0.75, 0.35).normalize();
   sun.position.copy(sunDir).multiplyScalar(140);
   sun.castShadow = true;
@@ -96,14 +100,16 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   if (skyMat) skyMat.uniforms.sunDir.value.copy(sunDir);
   group.add(sun); group.add(sun.target);
 
-  const hemi = new THREE.HemisphereLight(top.clone().lerp(new THREE.Color('#ffffff'), 0.3), new THREE.Color(palette.ground).multiplyScalar(0.6), night ? 1.3 : 0.9);
-  const ambient = new THREE.AmbientLight('#ffffff', night ? 0.9 : 0.25);
+  const hemi = new THREE.HemisphereLight(top.clone().lerp(new THREE.Color('#ffffff'), 0.3), new THREE.Color(palette.ground).multiplyScalar(0.6), (night ? 1.3 : 0.9) * grade.hemi);
+  const ambient = new THREE.AmbientLight('#ffffff', (night ? 0.9 : 0.25) * grade.ambient);
   group.add(hemi, ambient);
 
-  // Fog
+  // Fog — density and luminance graded per genre so backgrounds hold detail
+  // instead of blowing out to white (night keeps the 0.35 darkening, grade is identity).
   const fogColor = new THREE.Color(palette.fog);
   if (night) fogColor.multiplyScalar(0.35);
-  const density = weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035;
+  fogColor.multiplyScalar(grade.fogLuminance);
+  const density = (weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035) * grade.fogDensity;
   scene.fog = new THREE.FogExp2(fogColor.getHex(), density);
   scene.background = fogColor;
 
@@ -111,7 +117,7 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   let t = 0;
   return {
     group, sun, hemi, ambient,
-    exposure: night ? 1.05 : dusk ? 0.72 : 0.6,
+    exposure: grade.exposure,
     update(dt, target) {
       t += dt;
       if (skyMat) skyMat.uniforms.time.value = t;

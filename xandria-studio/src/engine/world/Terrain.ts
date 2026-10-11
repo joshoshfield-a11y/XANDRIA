@@ -74,6 +74,11 @@ export class Terrain {
     const cGround = new THREE.Color(spec.theme.palette.ground).convertLinearToSRGB();
     const cAlt = new THREE.Color(spec.theme.palette.groundAlt).convertLinearToSRGB();
     const cRock = new THREE.Color(spec.theme.palette.rock).convertLinearToSRGB();
+    // Beauty wave: patch colors derived from the palette itself so new hues
+    // never clash — dark earthy patches and sun-bleached patches that break
+    // the flat procedural look. Baked into vertex colors: zero per-frame cost.
+    const cPatchDark = cGround.clone().lerp(cRock, 0.35).multiplyScalar(0.72);
+    const cPatchLight = cGround.clone().lerp(new THREE.Color(1, 1, 1), 0.28);
     const tmp = new THREE.Color();
     for (let k = 0; k < pos.count; k++) {
       const x = pos.getX(k), z = pos.getZ(k);
@@ -84,6 +89,11 @@ export class Terrain {
       tmp.copy(cGround).lerp(cAlt, (slopeN + 1) / 2);
       const hn = THREE.MathUtils.clamp((y / Math.max(1, t.maxHeight)) - 0.6, 0, 1);
       tmp.lerp(cRock, hn * 1.2);
+      // high-frequency patchiness: earthy hollows + bleached rises
+      const patchN = noise.get(x * 0.33 + 47.3, z * 0.33 - 23.7);
+      const pk = (patchN + 1) / 2;
+      if (pk < 0.42) tmp.lerp(cPatchDark, ((0.42 - pk) / 0.42) * 0.6);
+      else if (pk > 0.58) tmp.lerp(cPatchLight, ((pk - 0.58) / 0.42) * 0.4);
       colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));

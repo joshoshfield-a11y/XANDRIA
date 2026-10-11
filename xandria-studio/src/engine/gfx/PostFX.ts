@@ -53,9 +53,12 @@ export class PostFX {
       this.composer = new EffectComposer(renderer, target);
       this.composer.addPass(new RenderPass(scene, camera));
       if (spec.theme.bloom) {
+        // Beauty wave: threshold 1.0 (was 0.82) — the day sky's horizon band
+        // sits at linear ~1.3-1.7 and was blooming into the white wash. True
+        // HDR emitters (neon glow 2.0+, crystals, muzzle flashes) still bloom.
         const bloom = new UnrealBloomPass(
           new THREE.Vector2(innerWidth, innerHeight),
-          quality === 'high' ? 0.35 : 0.45, 0.6, 0.82,
+          quality === 'high' ? 0.35 : 0.45, 0.6, 1.0,
         );
         this.composer.addPass(bloom);
       }

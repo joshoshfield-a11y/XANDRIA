@@ -33,6 +33,7 @@ import {
 } from './fx';
 import { ChapterDresser, ParallaxLayers } from './dressing';
 import { Structures } from '../engine/world/Structures';
+import { Scatter } from '../engine/world/Scatter';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
 import { Rng } from '../engine/core/Rng';
@@ -93,6 +94,12 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const hazardLight = new THREE.PointLight(spec.theme.environment === 'volcanic' ? '#ff5a2f' : '#7a4fe8', 1.4, 90);
   hazardLight.position.set(start.x + 40, hazardY + 8, 0);
   scene.add(hazardLight);
+
+  // beauty wave: per-genre hero props (floating shards + wisps along the course)
+  new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
+    heroesOnly: true,
+    quality: engine.effectiveQuality(),
+  });
 
   // goal at final platform
   const last = platforms[platforms.length - 1];
