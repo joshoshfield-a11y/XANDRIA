@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import type { Engine } from '../engine/Engine';
 import type { GameSpec } from '@spec';
 import type { Rng } from '../engine/core/Rng';
+import { scatterProps, makeBanner, type PropField } from '../engine/gfx/Props';
 
 /** Hemisphere tint per chapter — subtle mood rotation through the campaign. */
 const CHAPTER_TINTS = ['#ffffff', '#ffd9b0', '#b0e0ff', '#e6b0ff', '#b0ffd9'];
@@ -26,6 +27,8 @@ export interface DressArea {
 export class ChapterDresser {
   private group: THREE.Group | null = null;
   private baseFog: number | null = null;
+  /** inventory wave: prop-variety field (fragile registry for tryShatter) */
+  private propField: PropField | null = null;
 
   constructor(private engine: Engine) {}
 
@@ -67,6 +70,19 @@ export class ChapterDresser {
     }
     this.engine.scene.add(group);
     this.group = group;
+    // inventory wave: prop variety shares the chapter dressing budget —
+    // crates, barrels, banners, pillars, runestones + fragile crystals/vases
+    // (registered for Props.tryShatter). Deterministic from the stage rng.
+    if (this.propField) { this.propField.dispose(); this.propField = null; }
+    this.propField = scatterProps(this.engine.scene, rng, {
+      mats: this.engine.mats,
+      pal: spec.theme.palette,
+      quality: this.engine.effectiveQuality(),
+      count: 6 + stage,
+      half: Math.max(12, area.half),
+      groundY: area.yAt,
+      exclusion: [{ x: area.cx, z: area.cz, r: 10 }],
+    });
     // mood shift: hemisphere tint rotates per chapter, fog thickens slightly
     this.engine.sky.hemi.color.set(CHAPTER_TINTS[stage % CHAPTER_TINTS.length]).lerp(new THREE.Color(pal.accent), 0.25);
     const fog = this.engine.scene.fog as THREE.FogExp2 | null;
@@ -81,6 +97,10 @@ export class ChapterDresser {
       this.engine.scene.remove(this.group);
       disposeGroup(this.group);
       this.group = null;
+    }
+    if (this.propField) {
+      this.propField.dispose();
+      this.propField = null;
     }
   }
 
@@ -142,6 +162,21 @@ export function dressRacing(
     arch.position.copy(p).add(new THREE.Vector3(0, 0.5, 0));
     arch.rotation.y = Math.atan2(tan.x, tan.z);
     group.add(arch);
+  }
+
+  // inventory wave: prop variety — banner flags flanking the circuit
+  const bannerCloth = new Map<string, THREE.Material>();
+  for (let i = 0; i < 10; i++) {
+    const tt = (i + 0.5) / 10;
+    const p = track.curve.getPointAt(tt);
+    const tan = track.curve.getTangentAt(tt);
+    const side = i % 2 === 0 ? 1 : -1;
+    const bx = p.x + -tan.z * side * (track.width / 2 + 8);
+    const bz = p.z + tan.x * side * (track.width / 2 + 8);
+    const flag = makeBanner(rng, mats, spec.theme.palette, bannerCloth);
+    flag.position.set(bx, yAt(bx, bz), bz);
+    flag.rotation.y = Math.atan2(tan.x, tan.z);
+    group.add(flag);
   }
 
   // grandstands with instanced crowds
