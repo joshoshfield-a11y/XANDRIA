@@ -15,7 +15,7 @@ export const SPLASH_DURATION_MS = 3000;
 /** Production generator URL used as the splash link target when the caller
  *  doesn't supply one (e.g. a standalone exported file opened from disk). */
 export const DEFAULT_GENERATOR_URL =
-  'https://xandria-8g3x2x35h-taylorchristian-mattheisens-projects.vercel.app';
+  'https://xandria-taylorchristian-mattheisens-projects.vercel.app';
 
 /**
  * Pure flag resolution. `search` is a location.search-style string
