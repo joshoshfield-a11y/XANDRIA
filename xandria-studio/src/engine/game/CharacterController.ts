@@ -7,6 +7,8 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { toV3 } from '../core/Physics';
+import { surfaceProps, type SurfaceProps, type SurfaceProvider } from '../physics/Surfaces';
+import { wadingState, SplashDetector } from '../physics/Water';
 import { makeHumanoid, type CharacterRig } from '../gfx/Characters';
 import { resolveSkinDef, applySkin } from '../gfx/Skins';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
@@ -36,6 +38,18 @@ export class CharacterController {
   camYaw = 0;
   private stepAcc = 0;
   private wasGrounded = true;
+  /** physics wave: current ground surface id (data-driven, see physics/Surfaces) */
+  surfaceId = 'stone';
+  /** physics wave: footstep FX tag for the current surface */
+  footstepFX: SurfaceProps['footstepFX'] = 'dust';
+  /** physics wave: true when wading (feet wet, head dry) */
+  wading = false;
+  /** physics wave: 0..1 submerged fraction of the capsule */
+  submerged = 0;
+  /** physics wave: smoothed planar acceleration (m/s²) — feeds the animation post-pass */
+  planarAccel = 0;
+  private planarSpeed = 0;
+  private splash = new SplashDetector();
   private tmpV = new THREE.Vector3();
   /** landing squash (polish wave): 1→0 progress + impact-scaled depth, fed to rig.animate as `land` */
   private landT = 0;
@@ -96,7 +110,7 @@ export class CharacterController {
     const ax = input.axes;
     const run = this.spec.abilities.includes('sprint') && input.pressed('sprint');
     const boost = this.speedBoostT > 0 ? 1.5 : 1;
-    const targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost;
+    let targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost;
 
     const sin = Math.sin(camYaw), cos = Math.cos(camYaw);
     const dir = new THREE.Vector3(ax.x * cos - ax.y * sin, 0, -ax.x * sin - ax.y * cos);
@@ -119,6 +133,35 @@ export class CharacterController {
     }
     this.wasGrounded = this.grounded;
 
+    // ---- physics wave: surface-dependent movement + water (additive) ----
+    // Data-driven: the terrain reports a surface id; we only multiply the
+    // existing accel/stop terms. Default 'stone' keeps the shipped feel.
+    const terr = this.engine.terrain as unknown as SurfaceProvider | undefined;
+    let surfId = 'stone';
+    let wlvl: number | null = null;
+    if (terr && typeof terr.surfaceAt === 'function') {
+      surfId = terr.surfaceAt(b.position.x, b.position.z);
+      if (typeof terr.waterLevelAt === 'function') wlvl = terr.waterLevelAt(b.position.x, b.position.z);
+    }
+    const surf = surfaceProps(surfId);
+    this.surfaceId = surfId;
+    this.footstepFX = surf.footstepFX;
+    // water: submerged fraction of the capsule, splash edges, wading drag
+    const ws = wadingState(b.position.y, 0.85, wlvl);
+    this.submerged = ws.submerged;
+    this.wading = ws.wading;
+    const edge = this.splash.update(ws.submerged);
+    if (edge) {
+      _splashV.set(b.position.x, wlvl ?? b.position.y, b.position.z);
+      this.engine.particles.burst(_splashV, {
+        count: edge === 'enter' ? 22 : 12,
+        color: '#cfeaff', color2: '#5aa7e0', speed: 3.2, life: 0.7,
+        size: 1.9, gravity: 6, up: 3.2, blending: 'normal',
+      });
+    }
+    const wadeK = ws.submerged > 0.02 ? 1 - 0.6 * Math.min(1, ws.submerged * 1.5) : 1;
+    targetSpeed *= wadeK;
+
     // dash
     this.dashCd -= dt;
     if (this.spec.abilities.includes('dash') && input.justPressed('dash') && this.dashCd <= 0) {
@@ -137,9 +180,12 @@ export class CharacterController {
     } else if (moving) {
       dir.normalize();
       const want = dir.multiplyScalar(targetSpeed);
-      const accel = this.grounded ? 40 : 14;
-      cur.x = THREE.MathUtils.damp(cur.x, want.x, accel / 8, dt);
-      cur.z = THREE.MathUtils.damp(cur.z, want.z, accel / 8, dt);
+      // physics wave: surface accel multiplier + traction on the damp rate,
+      // wading drag on top. 'stone' + dry keeps the shipped numbers exactly.
+      const accel = (this.grounded ? 40 : 14) * surf.accelMul * (0.45 + 0.55 * wadeK);
+      const grip = 0.5 + 0.5 * surf.traction;
+      cur.x = THREE.MathUtils.damp(cur.x, want.x, (accel / 8) * grip, dt);
+      cur.z = THREE.MathUtils.damp(cur.z, want.z, (accel / 8) * grip, dt);
       b.velocity.x = cur.x; b.velocity.z = cur.z;
       this.yaw = Math.atan2(want.x, want.z);
       // footsteps
@@ -148,8 +194,21 @@ export class CharacterController {
         if (this.stepAcc > 2.2) { this.stepAcc = 0; this.events.onStep?.(); }
       }
     } else if (this.grounded) {
-      b.velocity.x = THREE.MathUtils.damp(b.velocity.x, 0, 12, dt);
-      b.velocity.z = THREE.MathUtils.damp(b.velocity.z, 0, 12, dt);
+      b.velocity.x = THREE.MathUtils.damp(b.velocity.x, 0, 12 * surf.stopMul, dt);
+      b.velocity.z = THREE.MathUtils.damp(b.velocity.z, 0, 12 * surf.stopMul, dt);
+      // physics wave: extra water drag when standing in water
+      if (wadeK < 1) {
+        const wd = Math.max(0, 1 - 3 * (1 - wadeK) * dt);
+        b.velocity.x *= wd; b.velocity.z *= wd;
+      }
+    }
+
+    // physics wave: smoothed planar acceleration for the animation post-pass
+    {
+      const nv = Math.hypot(b.velocity.x, b.velocity.z);
+      const inst = Math.abs(nv - this.planarSpeed) / Math.max(dt, 1e-4);
+      this.planarSpeed = nv;
+      this.planarAccel += (inst - this.planarAccel) * Math.min(1, dt * 8);
     }
 
     // jump
@@ -195,3 +254,6 @@ export class CharacterController {
 
   swing() { this.attackT = 1; }
 }
+
+/** physics wave: splash-particle scratch (hot path stays allocation-free) */
+const _splashV = new THREE.Vector3();

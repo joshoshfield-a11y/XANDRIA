@@ -17,6 +17,12 @@ export class Terrain {
   private waterMat?: THREE.MeshStandardMaterial;
   readonly maxHeight: number;
   walls: CANNON.Body[] = [];
+  /** physics wave: surface-id derivation noise (seeded, independent of the
+   *  height noise) + optional biome surface overrides (read via cast — the
+   *  schema stays untouched and validation ignores unknown subfields). */
+  private surfNoise: Noise2D;
+  private bioSurface: string | undefined;
+  private bioGround: string;
 
   constructor(spec: GameSpec, physics: Physics, mats: MaterialLibrary, scene: THREE.Scene, opts: { flatRadius?: number; flatCenters?: THREE.Vector3[] } = {}) {
     const t = spec.world.terrain;
@@ -25,7 +31,11 @@ export class Terrain {
     this.cell = this.size / (this.res - 1);
     this.maxHeight = t.maxHeight;
     const noise = new Noise2D(spec.meta.seed);
+    this.surfNoise = new Noise2D((spec.meta.seed ^ 0x5f3a17) >>> 0);
     const bio = spec.custom?.biome;
+    const bioFree = bio as { surface?: string; groundSurface?: string } | undefined;
+    this.bioSurface = bioFree?.surface;
+    this.bioGround = bioFree?.groundSurface ?? 'stone';
     const freq = bio?.terrainFrequency ?? 1;
     const hscale = bio?.heightScale ?? 1;
     const h: number[][] = [];
@@ -191,6 +201,38 @@ export class Terrain {
   }
 
   slopeAt(x: number, z: number): number { return 1 - this.normalAt(x, z).y; }
+
+  /**
+   * Physics wave: water surface Y at (x, z), or null when this terrain has no
+   * water. The plane is level, so the level is position-independent.
+   */
+  waterLevelAt(x: number, z: number): number | null {
+    void x; void z;
+    return this.water ? this.water.position.y : null;
+  }
+
+  /**
+   * Physics wave: surface id at (x, z) for the data-driven surface table
+   * (engine/physics/Surfaces.ts). Derivation, in priority order:
+   *   1. explicit biome override (custom.biome.surface)
+   *   2. below (water level + margin) → 'shallow'
+   *   3. steep slope → 'rock'
+   *   4. moisture/patch noise → 'mud' | 'sand' | 'gravel'
+   *   5. biome ground default (custom.biome.groundSurface ?? 'stone')
+   * New biomes add table rows, not controller branches.
+   */
+  surfaceAt(x: number, z: number): string {
+    if (this.bioSurface) return this.bioSurface;
+    const wl = this.waterLevelAt(x, z);
+    if (wl !== null && this.heightAt(x, z) < wl + 0.15) return 'shallow';
+    if (this.slopeAt(x, z) > 0.45) return 'rock';
+    const n = this.surfNoise.get(x * 0.02, z * 0.02);
+    const m = this.surfNoise.get(x * 0.05 + 31.7, z * 0.05 - 11.2);
+    if (m > 0.45) return 'mud';
+    if (n > 0.35) return 'sand';
+    if (n < -0.45) return 'gravel';
+    return this.bioGround;
+  }
 
   inBounds(x: number, z: number, margin = 6): boolean {
     const half = this.size / 2 - margin;
