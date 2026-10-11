@@ -3,11 +3,11 @@
   "name": "input-monkey",
   "genre": "topdown",
   "passed": true,
-  "durationMs": 64464,
+  "durationMs": 64644,
   "metrics": {
-    "injections": 180,
+    "injections": 190,
     "nanFindings": 0
   },
   "errors": [],
-  "notes": "mulberry32 seed=1004; ~300ms cadence for 60s; 'pause'/'reset' excluded from the action pool (pause stalls the sim, reset rebuilds the run); frame 7 -> 54 (advancing=true); nanScan paths: none."
+  "notes": "mulberry32 seed=1004; ~300ms cadence for 60s; 'pause'/'reset' excluded from the action pool (pause stalls the sim, reset rebuilds the run); frame 8 -> 96 (advancing=true); nanScan paths: none."
 }

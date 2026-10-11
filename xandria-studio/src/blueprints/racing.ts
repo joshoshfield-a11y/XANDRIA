@@ -10,6 +10,7 @@ import { VehicleController } from '../engine/game/VehicleController';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
+import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
 import {
@@ -96,6 +97,21 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   // scatter away from the track
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
   const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion, engine, quality: engine.effectiveQuality() });
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
+  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+    exclusion: trackExclusion, quality: engine.effectiveQuality(),
+  });
+  scatterAmberGlow(scene, rng.fork(0xe9a1), {
+    mats: engine.mats,
+    groundY: (x, z) => terrain.heightAt(x, z),
+    half: terrain.size / 2 - 10,
+    exclusion: trackExclusion,
+    quality: engine.effectiveQuality(),
+  });
+  terrain.setWaterSun(
+    engine.sky.sun.position.clone().sub(engine.sky.sun.target.position).normalize(),
+    spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn' ? '#ffb46b' : '#cfe8ff',
+  );
   // polish (LOOK crew): living light — trackside chevron posts breathe
   engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 1.6), 0.14, 2.4);
   // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
@@ -193,7 +209,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   // checkpoint XP: award once per gate per lap, in forward-crossing order
   const CP_T = [0.25, 0.5, 0.75];
   let nextCp = 0;
-  const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z));
+  const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z),
+    { physics: engine.physics, skipBody: car.chassis });
   // polish wave (#12): smoothed camera roll fed by the exposed drift angle
   let camRoll = 0;
 

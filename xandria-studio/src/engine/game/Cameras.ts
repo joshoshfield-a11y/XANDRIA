@@ -1,6 +1,9 @@
 /** Camera rigs: third-person orbit, first-person, top-down, side-scroll, vehicle chase. */
 import * as THREE from 'three';
+import type { Body } from 'cannon-es';
 import type { Input } from '../core/Input';
+import { GROUP } from '../core/Physics';
+import type { Physics } from '../core/Physics';
 import type { CameraKind } from '@spec';
 
 export interface CameraRig {
@@ -12,7 +15,32 @@ export interface CameraRig {
   camera: THREE.PerspectiveCamera;
 }
 
-export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera, input: Input, groundY?: (x: number, z: number) => number): CameraRig {
+/**
+ * Camera collision options. When supplied, every non-first-person rig probes
+ * the physics world each frame with a ray from the look target toward the
+ * desired camera position (`Physics.raycast(from, to, mask, skipBody)`) and
+ * clamps the boom to (hit − margin) so walls and terrain never swallow the
+ * camera. Pass the player/avatar body as `skipBody` — the probe starts at the
+ * look target, which is usually inside the avatar's own body, and the
+ * wave-beta raycast fix made skipBody a true exclusion (not a post-filter),
+ * so the probe sees past the avatar to the real occluder.
+ *
+ * Blueprints wire this as:
+ *   makeCameraRig(kind, engine.camera, input, groundY, { physics: engine.physics, skipBody: avatarBody })
+ */
+export interface CameraCollisionOpts {
+  physics: Physics;
+  skipBody?: Body;
+  /** collision mask for the probe (default GROUP.WORLD) */
+  mask?: number;
+}
+
+/** camera-to-wall safety margin (meters) */
+const COLL_MARGIN = 0.45;
+/** regrow speed of the boom after an occlusion clears (m/s of boom fraction) */
+const REGROW_RATE = 3.0;
+
+export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera, input: Input, groundY?: (x: number, z: number) => number, collision?: CameraCollisionOpts): CameraRig {
   let yaw = 0, pitch = kind === 'top-down' ? -1.25 : -0.32;
   let shakeT = 0, shakeAmp = 0;
   const pos = new THREE.Vector3();
@@ -21,7 +49,43 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
   let fovBase = camera.fov;
   let initialized = false;
 
+  // rig-local scratch — the whole update path stays allocation-free
+  const _v = new THREE.Vector3();
+  const _dir = new THREE.Vector3();
+
+  // collision-probe state
+  let allowT = 1;      // smoothed fraction of the desired boom length
+  let probeTarget = 1; // last raycast result (refreshed every other frame)
+  let tick = 0;
+
   const dist = kind === 'third-person' ? 7.5 : kind === 'chase' ? 9 : kind === 'top-down' ? 26 : kind === 'side' ? 13 : 0;
+
+  /** Clamp `want` along the look→want segment to the last probe result.
+   *  Shrinks instantly (a wall crossing the boom never traps the camera
+   *  inside geometry), regrows slowly (no popping when the wall passes).
+   *  Raycasts every other frame — the smoothing hides the 30 Hz probe. */
+  const applyCollision = (dt: number, from: THREE.Vector3, want: THREE.Vector3) => {
+    if (!collision) return;
+    if ((tick++ & 1) === 0) {
+      const segLen = from.distanceTo(want);
+      probeTarget = 1;
+      if (segLen > 1e-3) {
+        const hit = collision.physics.raycast(from, want, collision.mask ?? GROUP.WORLD, collision.skipBody);
+        if (hit && hit.distance < segLen - 0.01) {
+          probeTarget = Math.max(0.12, (hit.distance - COLL_MARGIN) / segLen);
+        }
+      }
+    }
+    if (probeTarget < allowT) allowT = probeTarget;
+    else if (probeTarget > allowT) allowT = Math.min(probeTarget, allowT + dt * REGROW_RATE);
+    if (allowT < 1) {
+      const segLen = from.distanceTo(want);
+      if (segLen > 1e-3) {
+        _dir.copy(want).sub(from).divideScalar(segLen);
+        want.copy(from).addScaledVector(_dir, segLen * allowT);
+      }
+    }
+  };
 
   return {
     camera,
@@ -40,7 +104,9 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
       pitch = Math.max(pitchMin, Math.min(pitchMax, pitch));
 
       if (kind === 'first-person') {
-        pos.copy(targetPos).add(new THREE.Vector3(0, 1.62, 0));
+        // exempt from collision: the eye sits at the head, walls are the level's problem
+        pos.copy(targetPos);
+        pos.y += 1.62;
         camera.position.copy(pos);
         camera.rotation.set(0, 0, 0, 'YXZ');
         camera.rotation.order = 'YXZ';
@@ -48,11 +114,13 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
         camera.rotation.x = pitch;
       } else if (kind === 'side') {
         // side scroll: look along +z, follow x/y
-        const want = new THREE.Vector3(targetPos.x, targetPos.y + 2.2, targetPos.z + dist);
-        if (!initialized) { smooth.copy(want); initialized = true; }
-        smooth.lerp(want, 1 - Math.pow(0.001, dt));
-        camera.position.copy(smooth);
+        const lift = kind === 'side' ? 2.2 : 0;
+        pos.set(targetPos.x, targetPos.y + lift, targetPos.z + dist);
         look.set(targetPos.x + targetVel.x * 0.35, targetPos.y + 1.4, targetPos.z);
+        applyCollision(dt, look, pos);
+        if (!initialized) { smooth.copy(pos); initialized = true; }
+        smooth.lerp(pos, 1 - Math.pow(0.001, dt));
+        camera.position.copy(smooth);
         camera.lookAt(look);
       } else {
         const effDist = kind === 'chase' ? dist + Math.min(6, targetVel.length() * 0.12) : dist;
@@ -73,7 +141,13 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
           targetPos.y + height,
           targetPos.z - fwdZ * effDist,
         );
-        if (kind === 'top-down') pos.copy(targetPos).add(new THREE.Vector3(0, dist, 0.01));
+        if (kind === 'top-down') { pos.copy(targetPos); pos.y += dist; pos.z += 0.01; }
+        // look target first: the collision probe starts here
+        look.copy(targetPos);
+        look.y += kind === 'chase' ? 1.6 : 1.2;
+        if (kind === 'chase') look.addScaledVector(targetVel, 0.14);
+        // camera collision: pull the boom in when a wall/terrain blocks the view
+        applyCollision(dt, look, pos);
         // never sink under terrain
         if (groundY) {
           const gy = groundY(pos.x, pos.z) + 0.9;
@@ -82,8 +156,6 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
         if (!initialized) { smooth.copy(pos); initialized = true; }
         smooth.lerp(pos, 1 - Math.pow(0.0005, dt));
         camera.position.copy(smooth);
-        look.copy(targetPos).add(new THREE.Vector3(0, kind === 'chase' ? 1.6 : 1.2, 0));
-        if (kind === 'chase') look.addScaledVector(targetVel, 0.14);
         camera.lookAt(look);
       }
 

@@ -17,6 +17,12 @@ export class Terrain {
   private waterMat?: THREE.MeshStandardMaterial;
   readonly maxHeight: number;
   walls: CANNON.Body[] = [];
+  /** physics wave: surface-id derivation noise (seeded, independent of the
+   *  height noise) + optional biome surface overrides (read via cast — the
+   *  schema stays untouched and validation ignores unknown subfields). */
+  private surfNoise: Noise2D;
+  private bioSurface: string | undefined;
+  private bioGround: string;
 
   constructor(spec: GameSpec, physics: Physics, mats: MaterialLibrary, scene: THREE.Scene, opts: { flatRadius?: number; flatCenters?: THREE.Vector3[] } = {}) {
     const t = spec.world.terrain;
@@ -25,7 +31,11 @@ export class Terrain {
     this.cell = this.size / (this.res - 1);
     this.maxHeight = t.maxHeight;
     const noise = new Noise2D(spec.meta.seed);
+    this.surfNoise = new Noise2D((spec.meta.seed ^ 0x5f3a17) >>> 0);
     const bio = spec.custom?.biome;
+    const bioFree = bio as { surface?: string; groundSurface?: string } | undefined;
+    this.bioSurface = bioFree?.surface;
+    this.bioGround = bioFree?.groundSurface ?? 'stone';
     const freq = bio?.terrainFrequency ?? 1;
     const hscale = bio?.heightScale ?? 1;
     const h: number[][] = [];
@@ -106,8 +116,7 @@ export class Terrain {
       if (ny < 0.75) { const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1); tmp.setRGB(colors[k * 3], colors[k * 3 + 1], colors[k * 3 + 2]).lerp(cRock, f); colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b; }
     }
     geo.attributes.color.needsUpdate = true;
-    const kind = MaterialLibrary.groundKind(spec.theme.environment);
-    const mat = mats.standard(kind, '#ffffff', { alt: shade('#ffffff', -0.1), repeat: this.size / 8, roughness: 0.95 });
+    const mat = mats.biomeGround(spec.theme.environment, { repeat: this.size / 8, roughness: 0.95 });
     mat.vertexColors = true;
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
@@ -142,22 +151,39 @@ export class Terrain {
     }
 
     // ---- water plane (polish wave: animated fake specular — a time-driven
-    // normal ripple in onBeforeCompile; no planar reflections, one uniform)
+    // normal ripple in onBeforeCompile; env-art pass: sun-aligned directional
+    // glint so the water throws a warm dusk sparkle toward the sun. No planar
+    // reflections — two uniforms and one pow(), no per-frame CPU cost.)
     if (t.water) {
       const wm = new THREE.MeshStandardMaterial({ color: spec.theme.environment === 'volcanic' ? '#ff5a1f' : '#2a6fb0', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3, emissive: spec.theme.environment === 'volcanic' ? '#ff3300' : '#000000', emissiveIntensity: 0.8 });
       wm.userData.uTime = { value: 0 };
-      wm.customProgramCacheKey = () => 'xandria-water-v1';
+      // default glint: low warm sun (dusk look); blueprints refine it from the
+      // real sky sun via setWaterSun() right after createSky().
+      wm.userData.uSunDirW = { value: new THREE.Vector3(0.55, 0.28, 0.45).normalize() };
+      wm.userData.uGlint = { value: new THREE.Color('#ffb46b') };
+      wm.customProgramCacheKey = () => 'xandria-water-v2';
       wm.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = wm.userData.uTime;
+        shader.uniforms.uSunDirW = wm.userData.uSunDirW;
+        shader.uniforms.uGlint = wm.userData.uGlint;
         shader.vertexShader = shader.vertexShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
-          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;');
+          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW; varying vec3 vWPos;')
+          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         shader.fragmentShader = shader.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW;')
+          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; varying vec2 vUvW; varying vec3 vWPos;')
           .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
             float wv1 = sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
             float wv2 = sin((vUvW.x + vUvW.y) * 34.0 - uTime * 2.2);
-            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`);
+            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`)
+          .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+            {
+              vec3 Vw = normalize(cameraPosition - vWPos);
+              vec3 Hv = normalize(normalize(uSunDirW) + Vw);
+              float wspec = pow(max(dot(normalize(normal), Hv), 0.0), 90.0);
+              float shimmer = 0.5 + 0.5 * sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
+              totalEmissiveRadiance += uGlint * wspec * (0.25 + 0.75 * shimmer);
+            }`);
       };
       this.waterMat = wm;
       this.water = new THREE.Mesh(new THREE.PlaneGeometry(this.size * 3, this.size * 3), wm);
@@ -170,6 +196,25 @@ export class Terrain {
   /** Advance the water ripple clock. Called per frame only when water exists. */
   updateWater(dt: number) {
     if (this.waterMat) (this.waterMat.userData.uTime as { value: number }).value += dt;
+  }
+
+  /**
+   * Align the water's fake sun glint with the real sky sun. Call once after
+   * createSky() — e.g. `terrain.setWaterSun(sunDirFromSky, dusk ? '#ffb46b' : '#cfe8ff')`.
+   * Never throws; ignores bad input.
+   */
+  setWaterSun(dir: THREE.Vector3 | null | undefined, tint: string | null | undefined): void {
+    if (!this.waterMat) return;
+    try {
+      if (dir && Number.isFinite(dir.x + dir.y + dir.z)) {
+        (this.waterMat.userData.uSunDirW as { value: THREE.Vector3 }).value.copy(dir).normalize();
+      }
+      if (typeof tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(tint)) {
+        (this.waterMat.userData.uGlint as { value: THREE.Color }).value.set(tint);
+      }
+    } catch {
+      // water glint is cosmetic — never break the world over it
+    }
   }
 
   /** Bilinear height sample at world (x,z). */
@@ -191,6 +236,38 @@ export class Terrain {
   }
 
   slopeAt(x: number, z: number): number { return 1 - this.normalAt(x, z).y; }
+
+  /**
+   * Physics wave: water surface Y at (x, z), or null when this terrain has no
+   * water. The plane is level, so the level is position-independent.
+   */
+  waterLevelAt(x: number, z: number): number | null {
+    void x; void z;
+    return this.water ? this.water.position.y : null;
+  }
+
+  /**
+   * Physics wave: surface id at (x, z) for the data-driven surface table
+   * (engine/physics/Surfaces.ts). Derivation, in priority order:
+   *   1. explicit biome override (custom.biome.surface)
+   *   2. below (water level + margin) → 'shallow'
+   *   3. steep slope → 'rock'
+   *   4. moisture/patch noise → 'mud' | 'sand' | 'gravel'
+   *   5. biome ground default (custom.biome.groundSurface ?? 'stone')
+   * New biomes add table rows, not controller branches.
+   */
+  surfaceAt(x: number, z: number): string {
+    if (this.bioSurface) return this.bioSurface;
+    const wl = this.waterLevelAt(x, z);
+    if (wl !== null && this.heightAt(x, z) < wl + 0.15) return 'shallow';
+    if (this.slopeAt(x, z) > 0.45) return 'rock';
+    const n = this.surfNoise.get(x * 0.02, z * 0.02);
+    const m = this.surfNoise.get(x * 0.05 + 31.7, z * 0.05 - 11.2);
+    if (m > 0.45) return 'mud';
+    if (n > 0.35) return 'sand';
+    if (n < -0.45) return 'gravel';
+    return this.bioGround;
+  }
 
   inBounds(x: number, z: number, margin = 6): boolean {
     const half = this.size / 2 - margin;

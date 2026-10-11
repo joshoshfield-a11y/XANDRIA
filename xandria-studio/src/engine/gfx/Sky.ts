@@ -117,6 +117,8 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   const fogColor = new THREE.Color(palette.fog);
   if (night) fogColor.multiplyScalar(0.35);
   fogColor.multiplyScalar(grade.fogLuminance);
+  // Env-art dusk preset: warm amber haze — the reference vistas are ALL dusk.
+  if (grade.fogTint) fogColor.lerp(new THREE.Color(grade.fogTint), 0.35);
   const density = (weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035) * grade.fogDensity;
   scene.fog = new THREE.FogExp2(fogColor.getHex(), density);
   scene.background = fogColor;

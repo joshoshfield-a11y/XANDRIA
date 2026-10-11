@@ -3,7 +3,7 @@
   "name": "invalid-action-probe",
   "genre": "racing",
   "passed": true,
-  "durationMs": 4692,
+  "durationMs": 6730,
   "metrics": {
     "injections": 1,
     "nanFindings": 0

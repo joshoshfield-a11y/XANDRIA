@@ -9,6 +9,7 @@ import { Rng } from '../core/Rng';
 import { GROUP, type Physics } from '../core/Physics';
 import type { MaterialLibrary } from '../gfx/Materials';
 import type { Terrain } from './Terrain';
+import { placeLandmarks, type LandmarkOpts, type LandmarkResult, type LandmarkKind } from '../gfx/Landmarks';
 
 export class Structures {
   group = new THREE.Group();
@@ -83,8 +84,7 @@ export class Structures {
   }
 
   /** Perimeter wall ring for arenas (visual + physical). */
-  arenaWalls(center: THREE.Vector3, radius: number, height: number) {
-    const segs = Math.max(12, Math.round(radius / 4));
+  arenaWalls(center: THREE.Vector3, radius: number, height: number) {    const segs = Math.max(12, Math.round(radius / 4));
     const mat = this.mats.standard('panel', '#4a5058', { roughness: 0.7 });
     for (let i = 0; i < segs; i++) {
       const a0 = (i / segs) * Math.PI * 2;
@@ -93,6 +93,45 @@ export class Structures {
       const chord = 2 * radius * Math.sin(Math.PI / segs);
       this.addBox([chord + 0.5, height, 1], [x, center.y + height / 2, z], mat, { ry: -a0 + Math.PI / 2 });
     }
+  }
+
+  /**
+   * Environment art-direction pass: place the per-environment landmark mix
+   * (beam towers, ruin arches, bridges) from gfx/Landmarks. Density follows
+   * the environment table (desert→canyon arches, plains→ruin fields,
+   * volcanic→beam towers, islands→bridges) scaled by the quality tier;
+   * `kinds` overrides individual counts. Adds static physics colliders for
+   * each landmark. Returns the placement report.
+   *
+   * Blueprint hook: `structures.landmarks(spec, terrain, scene, seed, {
+   *   exclusion: [...] })` — one line, right after Scatter.
+   */
+  landmarks(spec: GameSpec, terrain: Terrain, scene: THREE.Scene, seed: number, opts: {
+    exclusion?: Array<{ x: number; z: number; r: number }>;
+    kinds?: Partial<Record<LandmarkKind, number>>;
+    quality?: 'retro' | 'standard' | 'high';
+    maxRealLights?: number;
+  } = {}): LandmarkResult {
+    const rng = new Rng((seed ^ 0x1a4d) >>> 0);
+    const pal = spec.theme.palette;
+    const t = spec.world.terrain;
+    const landmarkOpts: LandmarkOpts = {
+      mats: this.mats,
+      pal: { primary: pal.primary, secondary: pal.secondary, accent: pal.accent, rock: pal.rock, ground: pal.ground },
+      heightAt: (x, z) => terrain.heightAt(x, z),
+      genre: spec.meta.genre,
+      env: spec.theme.environment,
+      quality: opts.quality,
+      half: terrain.size / 2 - 12,
+      exclusion: opts.exclusion,
+      kinds: opts.kinds,
+      waterLevel: t.water ? t.waterLevel : undefined,
+      maxRealLights: opts.maxRealLights,
+      addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },
+    };
+    const result = placeLandmarks(scene, rng, landmarkOpts);
+    this.group.add(result.group);
+    return result;
   }
 
   /**

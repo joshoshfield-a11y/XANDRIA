@@ -3,11 +3,11 @@
   "name": "input-monkey",
   "genre": "platformer",
   "passed": true,
-  "durationMs": 63703,
+  "durationMs": 64161,
   "metrics": {
-    "injections": 177,
+    "injections": 190,
     "nanFindings": 0
   },
   "errors": [],
-  "notes": "mulberry32 seed=1003; ~300ms cadence for 60s; 'pause'/'reset' excluded from the action pool (pause stalls the sim, reset rebuilds the run); frame 7 -> 46 (advancing=true); nanScan paths: none."
+  "notes": "mulberry32 seed=1003; ~300ms cadence for 60s; 'pause'/'reset' excluded from the action pool (pause stalls the sim, reset rebuilds the run); frame 8 -> 81 (advancing=true); nanScan paths: none."
 }

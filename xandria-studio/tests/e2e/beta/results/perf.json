@@ -2,15 +2,9 @@
   "suite": "perf",
   "name": "perf-regression",
   "passed": true,
-  "durationMs": 198608,
+  "durationMs": 14533,
   "metrics": {
     "combos": {
-      "topdown/retro": {
-        "medianMs": 1320.1,
-        "baselineMs": 1314,
-        "deltaPct": 0.0046,
-        "pass": true
-      },
       "tp-action/high": {
         "medianMs": 4036.15,
         "baselineMs": null,
@@ -94,15 +88,21 @@
         "baselineMs": null,
         "deltaPct": null,
         "pass": true
+      },
+      "topdown/retro": {
+        "medianMs": 1320.1,
+        "baselineMs": 1314,
+        "deltaPct": 0.0046,
+        "pass": true
       }
     }
   },
   "errors": [],
   "notes": [
-    "baseline established",
+    "compared against existing baseline",
     "measurement: rAF delta hook; 20s warmup discarded; 150s collection window, up to 120 frames, median reported; valid combo needs >= 30 frames",
     "SwiftShader headless: absolute ms are meaningless; only relative deltas vs baseline count",
-    "machine load at suite start (1/5/15m): 4.91/5.15/6.21 — sibling beta workstreams shared this box; compare future runs at similar load",
+    "machine load at suite start (1/5/15m): 2.69/3.07/4.51 — sibling beta workstreams shared this box; compare future runs at similar load",
     "quality forced pre-boot via localStorage seed (xandria.settings.v1); renderer AA flag still follows the spec hint (known blind spot)",
     "idle scene, same intent per genre, no input during measurement; ?test=1 fixed 1/60 sim dt; generator deterministic per intent"
   ]

@@ -3,10 +3,12 @@
  * from the spec palette + seed. Sized for the PS2-era look (256px, nearest-ish filtering optional).
  */
 import * as THREE from 'three';
-import type { GameSpec, Palette } from '@spec';
+import type { GameSpec, Palette, Environment } from '@spec';
 import { Noise2D, Rng } from '../core/Rng';
 
-export type TexKind = 'ground' | 'rock' | 'metal' | 'brick' | 'wood' | 'grid' | 'sand' | 'snow' | 'lava' | 'asphalt' | 'concrete' | 'crystal' | 'panel';
+export type TexKind = 'ground' | 'rock' | 'metal' | 'brick' | 'wood' | 'grid' | 'sand' | 'snow' | 'lava' | 'asphalt' | 'concrete' | 'crystal' | 'panel'
+  /** env-art pass: cracked desert earth, glittering snow, ember-cracked basalt, darkened wet sand */
+  | 'cracked' | 'snowdrift' | 'emberrock' | 'wetsand';
 
 export class MaterialLibrary {
   private cache = new Map<string, THREE.Texture>();
@@ -106,6 +108,40 @@ export class MaterialLibrary {
             t = (f + 1) / 2; extra = Math.abs(n.get(u * 25, v * 25)) * 0.3;
             break;
           }
+          case 'cracked': {
+            // desert cracked earth: dark crack veins on a sand base
+            const r = Math.abs(n.fbm(u * 7, v * 7, 4));
+            const crack = r < 0.09 ? 1 : 0;
+            const f = n.fbm(u * 8, v * 8, 4);
+            t = (f + 1) / 2;
+            extra = n.get(u * 60, v * 60) * 0.06 - crack * 0.35;
+            break;
+          }
+          case 'snowdrift': {
+            // snow with deterministic sparkle glints
+            const f = n.fbm(u * 8, v * 8, 4);
+            t = (f + 1) / 2;
+            extra = n.get(u * 60, v * 60) * 0.06 + 0.15
+              + (n.get(u * 230 + 7.3, v * 230 + 3.1) > 0.82 ? 0.55 : 0);
+            break;
+          }
+          case 'emberrock': {
+            // volcanic basalt: dark plates, crack veins painted bright (the
+            // emissiveMap twin carries the actual glow — see emissiveMap())
+            const r = Math.abs(n.fbm(u * 6, v * 6, 4));
+            const crack = r < 0.11 ? 1 : 0;
+            const f = n.fbm(u * 6, v * 6, 5, 2.2, 0.55);
+            t = Math.pow((f + 1) / 2, 1.3);
+            extra = -0.25 + n.get(u * 90, v * 90) * 0.06 + crack * 0.45;
+            break;
+          }
+          case 'wetsand': {
+            // coast wet sand: sand darkened and smoothed
+            const f = n.fbm(u * 6, v * 6, 3);
+            t = (f + 1) / 2;
+            extra = n.get(u * 60, v * 60) * 0.04 - 0.14;
+            break;
+          }
         }
         tmp.copy(base).lerp(alt, t).offsetHSL(0, 0, extra);
         heights[y * size + x] = t;
@@ -170,6 +206,99 @@ export class MaterialLibrary {
     const key = `nrm:${kind}:${baseHex}:${opts.alt ?? ''}:${opts.size ?? 256}`;
     this.texture(kind, baseHex, opts); // ensures the normal twin is built
     return this.cache.get(key)!;
+  }
+
+  /**
+   * Emissive twin for ember-style textures: black everywhere except the
+   * crack veins, which glow. Currently only 'emberrock' has veins; other
+   * kinds return a plain black texture. Deterministic, cached.
+   */
+  emissiveMap(kind: TexKind, opts: { size?: number; repeat?: number; glowHex?: string } = {}): THREE.Texture {
+    const size = opts.size ?? 256;
+    const key = `em:${kind}:${opts.glowHex ?? '#ff7a1a'}:${size}`;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const img = ctx.createImageData(size, size);
+    const d = img.data;
+    const n = this.noise;
+    const glow = new THREE.Color(opts.glowHex ?? '#ff7a1a');
+    const gr = Math.round(glow.r * 255), gg = Math.round(glow.g * 255), gb = Math.round(glow.b * 255);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size, v = y / size;
+        let e = 0;
+        if (kind === 'emberrock') {
+          const r = Math.abs(n.fbm(u * 6, v * 6, 4));
+          if (r < 0.11) e = 1 - r / 0.11; // hot core, cooler edges
+        }
+        const i = (y * size + x) * 4;
+        d[i] = gr * e; d[i + 1] = gg * e; d[i + 2] = gb * e; d[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    // emissive maps stay linear — never sRGB
+    tex.anisotropy = 4;
+    if (this.pixelated) { tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipMapNearestFilter; }
+    if (opts.repeat) tex.repeat.set(opts.repeat, opts.repeat);
+    this.cache.set(key, tex);
+    return tex;
+  }
+
+  /**
+   * Environment art-direction pass: richer per-biome ground treatments.
+   * Desert/wasteland → cracked earth; arctic → glittering snow;
+   * volcanic → ember-cracked basalt (emissive veins); islands → darkened wet
+   * sand. Everything else falls back to the existing groundKind mapping.
+   * Cached like standard() — callers must not dispose the result.
+   */
+  biomeGround(env: Environment, opts: { repeat?: number; roughness?: number } = {}): THREE.MeshStandardMaterial {
+    const key = `biome:${env}:${opts.repeat ?? 0}:${opts.roughness ?? 0}`;
+    const hit = this.matCache.get(key);
+    if (hit) return hit as THREE.MeshStandardMaterial;
+    const rep = { repeat: opts.repeat };
+    let m: THREE.MeshStandardMaterial;
+    if (env === 'desert' || env === 'wasteland') {
+      m = new THREE.MeshStandardMaterial({
+        map: this.texture('cracked', '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        normalMap: this.normalMap('cracked', '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        roughness: opts.roughness ?? 0.95,
+      });
+    } else if (env === 'arctic') {
+      m = new THREE.MeshStandardMaterial({
+        map: this.texture('snowdrift', '#ffffff', { alt: shade('#ffffff', -0.06), ...rep }),
+        normalMap: this.normalMap('snowdrift', '#ffffff', { alt: shade('#ffffff', -0.06), ...rep }),
+        roughness: opts.roughness ?? 0.7,
+      });
+    } else if (env === 'volcanic') {
+      m = new THREE.MeshStandardMaterial({
+        map: this.texture('emberrock', '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        normalMap: this.normalMap('emberrock', '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        emissiveMap: this.emissiveMap('emberrock', { ...rep }),
+        emissive: new THREE.Color('#ff5a1a'),
+        emissiveIntensity: 1.1,
+        roughness: opts.roughness ?? 0.95,
+      });
+    } else if (env === 'islands') {
+      m = new THREE.MeshStandardMaterial({
+        map: this.texture('wetsand', '#ffffff', { alt: shade('#ffffff', -0.08), ...rep }),
+        normalMap: this.normalMap('wetsand', '#ffffff', { alt: shade('#ffffff', -0.08), ...rep }),
+        roughness: opts.roughness ?? 0.85,
+      });
+    } else {
+      const kind = MaterialLibrary.groundKind(env);
+      m = new THREE.MeshStandardMaterial({
+        map: this.texture(kind, '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        normalMap: this.normalMap(kind, '#ffffff', { alt: shade('#ffffff', -0.1), ...rep }),
+        roughness: opts.roughness ?? 0.95,
+      });
+    }
+    this.matCache.set(key, m);
+    return m;
   }
 
   standard(kind: TexKind, hex: string, opts: { alt?: string; repeat?: number; roughness?: number; metalness?: number; emissive?: string; emissiveIntensity?: number } = {}): THREE.MeshStandardMaterial {
