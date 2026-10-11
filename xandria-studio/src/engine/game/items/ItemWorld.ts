@@ -377,7 +377,6 @@ export class ItemWorld {
   }
 
   /**
->>>>>>> origin/feature/inv-physics
    * Thrown/dropped item — a REAL cannon-es body (mass ~0.5, restitution ~0.35,
    * sleep enabled) that bounces, rolls and settles. When the body sleeps it
    * is swapped to presentation mode (bob+spin, no body).
