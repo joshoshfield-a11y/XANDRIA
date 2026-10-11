@@ -47,7 +47,8 @@ function modEngine(seed = 7) {
     scene: { add() {}, remove() {} },
     audio: { play() {} },
     particles: { explosion() {}, magic() {} },
-    juice: { shake() {} },
+    // polish wave: stub mirrors the real Juice surface used by EnemyAI
+    juice: { shake() {}, combatHit() {}, impact() {}, deathFX() {}, muzzle() {}, hitStop() {}, burst() {} },
     terrain: null,
   };
 }
@@ -117,6 +118,10 @@ describe('Modding — custom enemy kinds', () => {
     e.damage(99999);
     expect(e.alive).toBe(false);
     expect(kills).toEqual(['walker']);
+    // ANIMATION wave: the ragdoll-lite corpse tumbles ~1.5s before the roster
+    // entry is swept — the kill counts at death, cleanup still happens.
+    expect(mgr.enemies).toHaveLength(1);
+    for (let i = 0; i < 120; i++) mgr.update(1 / 60, new THREE.Vector3(100, 0, 100), i / 60);
     expect(mgr.enemies).toHaveLength(0); // roster cleanup still works
   });
 });

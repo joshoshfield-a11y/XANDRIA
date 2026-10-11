@@ -33,6 +33,8 @@ export class Juice {
   private items: DmgItem[] = [];
   private cursor = 0;
   private tmp = new THREE.Vector3();
+  /** Optional pooled flash-light hook (wired by Engine once Sky exists). */
+  private flashLight: ((color: THREE.ColorRepresentation, pos: THREE.Vector3, intensity?: number, distance?: number, duration?: number) => void) | null = null;
 
   constructor(
     private container: HTMLElement,
@@ -50,6 +52,11 @@ export class Juice {
       this.layer.appendChild(el);
       this.items.push({ el, life: 0, max: 1, wp: new THREE.Vector3() });
     }
+  }
+
+  /** Wire the pooled flash-light pool (called by Engine once Sky exists). */
+  setFlash(fn: NonNullable<Juice['flashLight']>): void {
+    this.flashLight = fn;
   }
 
   /** Screenshake impulse, 0..1. Stacks up to 1. */
@@ -79,9 +86,47 @@ export class Juice {
   /** Particle burst at a world position (delegates to the pooled Points system). */
   burst(
     pos: THREE.Vector3,
-    opts: { count?: number; color?: string; color2?: string; speed?: number; life?: number; size?: number; gravity?: number; up?: number } = {},
+    opts: { count?: number; color?: string; color2?: string; speed?: number; life?: number; size?: number; gravity?: number; up?: number; blending?: 'additive' | 'normal'; grow?: number } = {},
   ): void {
     this.particles.burst(pos, opts);
+  }
+
+  /**
+   * Polish wave: per-hit combat feedback. Sparks + smoke puff + small shake —
+   * call from every damage event so combat hits READ. (Melee already adds its
+   * own hit-stop + damage numbers on top of this.)
+   */
+  combatHit(pos: THREE.Vector3, scale = 1): void {
+    this.particles.sparks(pos, '#ffe08a', Math.round(7 * scale));
+    this.particles.smokePuff(pos, Math.max(2, Math.round(3 * scale)));
+    this.shake(0.08 * scale);
+  }
+
+  /** Projectile impact: punchier than a bare spark burst — smoke + shake. */
+  impact(pos: THREE.Vector3, scale = 1, sparkColor = '#ffe08a'): void {
+    this.particles.impactFX(pos, scale, sparkColor);
+    this.shake(0.12 * scale);
+  }
+
+  /** Muzzle flash + a wisp of (real, alpha-blended) gun smoke. */
+  muzzle(pos: THREE.Vector3): void {
+    this.particles.burst(pos, { count: 8, color: '#ffdd66', color2: '#ff8833', speed: 5, life: 0.14, size: 1.8, gravity: 0 });
+    this.particles.smokePuff(pos, 4, '#9a9a92');
+    this.flashLight?.('#ffcc55', pos, 8, 14, 0.12);
+  }
+
+  /** Enemy death: explosion + smoke column + shake + brief hit-stop. */
+  deathFX(pos: THREE.Vector3, scale = 1): void {
+    this.particles.explosion(pos, scale);
+    this.particles.smokePuff(pos, Math.round(6 * scale), '#5a564c');
+    this.shake(Math.min(0.4, 0.25 * scale));
+    this.hitStop(60);
+    this.flashLight?.('#ff7733', pos, 12 * scale, 18, 0.2);
+  }
+
+  /** Drift-smoke helper (vehicle crew may also call particles.burst() directly). */
+  driftSmoke(pos: THREE.Vector3): void {
+    this.particles.smokePuff(pos, 3, '#7a7568');
   }
 
   /** Pickup sparkle trail puff. */

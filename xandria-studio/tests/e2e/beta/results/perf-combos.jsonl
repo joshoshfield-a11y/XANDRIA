@@ -1,0 +1,16 @@
+{"key":"tp-action/high","medianMs":4036.15,"frames":36,"effectiveQuality":"high","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"tp-action/standard","medianMs":4080.55,"frames":34,"effectiveQuality":"standard","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"tp-action/retro","medianMs":2597.15,"frames":52,"effectiveQuality":"retro","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"fps-arena/high","medianMs":3674.6,"frames":40,"effectiveQuality":"high","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"fps-arena/standard","medianMs":3929.5,"frames":38,"effectiveQuality":"standard","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"fps-arena/retro","medianMs":2521,"frames":62,"effectiveQuality":"retro","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"racing/high","medianMs":3575.3,"frames":37,"effectiveQuality":"high","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"racing/standard","medianMs":4432.7,"frames":34,"effectiveQuality":"standard","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"racing/retro","medianMs":2924.7,"frames":49,"effectiveQuality":"retro","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"platformer/high","medianMs":4972.15,"frames":34,"effectiveQuality":"high","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"platformer/standard","medianMs":4394.5,"frames":37,"effectiveQuality":"standard","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"platformer/retro","medianMs":2527.5,"frames":59,"effectiveQuality":"retro","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"topdown/high","medianMs":3375.55,"frames":48,"effectiveQuality":"high","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"topdown/standard","medianMs":2644,"frames":57,"effectiveQuality":"standard","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"topdown/retro","medianMs":1314,"frames":104,"effectiveQuality":"retro","baselineMs":null,"deltaPct":null,"pass":true,"error":null}
+{"key":"topdown/retro","medianMs":1320.1,"frames":108,"effectiveQuality":"retro","baselineMs":1314,"deltaPct":0.0046,"pass":true,"error":null}

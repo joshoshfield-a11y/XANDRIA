@@ -1,0 +1,22 @@
+{
+  "suite": "bots",
+  "name": "topdown",
+  "genre": "top-down-shooter",
+  "passed": true,
+  "durationMs": 379102,
+  "metrics": {
+    "frames": 180,
+    "scoreStart": 0,
+    "scoreEnd": 800,
+    "progressStart": 0,
+    "progressEnd": 0,
+    "softlockWindows": 19
+  },
+  "errors": [],
+  "notes": [
+    "baseline frame=4 score=0 progress=0",
+    "auto-dismissed blocking modal (.lvlopt)",
+    "reached 180 rendered frames"
+  ],
+  "summary": "errors:0 | score 0→800 | progress 0→0 | softlock 0/19 | nan:0 | frames:180"
+}

@@ -1,0 +1,21 @@
+{
+  "suite": "bots",
+  "name": "fps-arena",
+  "genre": "fps-arena",
+  "passed": true,
+  "durationMs": 438896,
+  "metrics": {
+    "frames": 180,
+    "scoreStart": 0,
+    "scoreEnd": 100,
+    "progressStart": 0,
+    "progressEnd": 1,
+    "softlockWindows": 22
+  },
+  "errors": [],
+  "notes": [
+    "baseline frame=7 score=0 progress=0",
+    "reached 180 rendered frames"
+  ],
+  "summary": "errors:0 | score 0→100 | progress 0→1 | softlock 0/22 | nan:0 | frames:180"
+}

@@ -142,6 +142,9 @@ export class Engine {
 
     this.sky = createSky(spec, this.scene, this.effectiveQuality());
     this.renderer.toneMappingExposure = this.sky.exposure;
+    // Wire the pooled flash-light pool into juice (muzzle flashes, explosions).
+    this.juice.setFlash((color, pos, intensity, distance, duration) =>
+      this.sky.lightLife.flash(color, pos, intensity, distance, duration));
     this.terrainOpts = { flatCenters: opts.flatCenters, flatRadius: opts.flatRadius, noTerrain: opts.noTerrain };
     if (!opts.noTerrain) {
       this.terrain = new Terrain(spec, this.physics, this.mats, this.scene, {
@@ -615,7 +618,8 @@ export class Engine {
     // deterministic state
     this.rng.reseed(this.spec.meta.seed);
     this.particles.reset(this.spec.meta.seed ^ 0x9a77);
-    this.particles.setWeather(this.spec.theme.weather, this.spec.meta.seed);
+    // polish wave: weather counts scale with quality tier + per-genre mood
+    this.particles.setWeather(this.spec.theme.weather, this.spec.meta.seed, this.effectiveQuality(), this.spec.meta.genre);
     // HUD / juice / input
     this.hud.resetRun();
     this.juice.reset();

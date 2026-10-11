@@ -1,0 +1,109 @@
+{
+  "suite": "perf",
+  "name": "perf-regression",
+  "passed": true,
+  "durationMs": 198608,
+  "metrics": {
+    "combos": {
+      "topdown/retro": {
+        "medianMs": 1320.1,
+        "baselineMs": 1314,
+        "deltaPct": 0.0046,
+        "pass": true
+      },
+      "tp-action/high": {
+        "medianMs": 4036.15,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "tp-action/standard": {
+        "medianMs": 4080.55,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "tp-action/retro": {
+        "medianMs": 2597.15,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "fps-arena/high": {
+        "medianMs": 3674.6,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "fps-arena/standard": {
+        "medianMs": 3929.5,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "fps-arena/retro": {
+        "medianMs": 2521,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "racing/high": {
+        "medianMs": 3575.3,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "racing/standard": {
+        "medianMs": 4432.7,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "racing/retro": {
+        "medianMs": 2924.7,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "platformer/high": {
+        "medianMs": 4972.15,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "platformer/standard": {
+        "medianMs": 4394.5,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "platformer/retro": {
+        "medianMs": 2527.5,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "topdown/high": {
+        "medianMs": 3375.55,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      },
+      "topdown/standard": {
+        "medianMs": 2644,
+        "baselineMs": null,
+        "deltaPct": null,
+        "pass": true
+      }
+    }
+  },
+  "errors": [],
+  "notes": [
+    "baseline established",
+    "measurement: rAF delta hook; 20s warmup discarded; 150s collection window, up to 120 frames, median reported; valid combo needs >= 30 frames",
+    "SwiftShader headless: absolute ms are meaningless; only relative deltas vs baseline count",
+    "machine load at suite start (1/5/15m): 4.91/5.15/6.21 — sibling beta workstreams shared this box; compare future runs at similar load",
+    "quality forced pre-boot via localStorage seed (xandria.settings.v1); renderer AA flag still follows the spec hint (known blind spot)",
+    "idle scene, same intent per genre, no input during measurement; ?test=1 fixed 1/60 sim dt; generator deterministic per intent"
+  ]
+}

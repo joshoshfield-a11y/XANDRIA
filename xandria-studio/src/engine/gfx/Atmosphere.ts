@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import type { GameSpec } from '@spec';
+import { gradeAtmosphere } from './GenreGrade';
 
 export interface AtmosphereRig {
   dome: THREE.Mesh;
@@ -44,6 +45,20 @@ export function createAtmosphere(spec: GameSpec): AtmosphereRig {
   u.mieCoefficient.value = mieCoefficient;
   u.mieDirectionalG.value = mieDirectionalG;
   u.sunPosition.value.copy(sunDir);
+
+  // Beauty wave: the Preetham horizon band renders near-white at the authored
+  // turbidity (measured on a CPU port of the shader). Scale the shader output
+  // per genre so the sky holds color instead of clipping to white. Compile-time
+  // constant — no new uniforms, no per-frame cost.
+  const skyBright = gradeAtmosphere(spec.meta.genre, timeOfDay).sky;
+  if (skyBright !== 1) {
+    const mat = sky.material as THREE.ShaderMaterial;
+    const patched = mat.fragmentShader.replace(
+      'vec4( retColor, 1.0 )',
+      `vec4( retColor * ${skyBright.toFixed(3)}, 1.0 )`,
+    );
+    if (patched !== mat.fragmentShader) mat.fragmentShader = patched;
+  }
 
   sky.frustumCulled = false;
   return {

@@ -9,6 +9,7 @@ import { makeCameraRig } from '../engine/game/Cameras';
 import { VehicleController } from '../engine/game/VehicleController';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
+import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
 import {
@@ -32,6 +33,7 @@ import { makeCar } from '../engine/gfx/Characters';
 import { Rng } from '../engine/core/Rng';
 import { toV3 } from '../engine/core/Physics';
 import { Pickups } from '../engine/game/Pickups';
+import { DebrisField } from '../engine/gfx/AssetBridge';
 
 interface AiCar {
   mesh: THREE.Group;
@@ -93,7 +95,15 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
 
   // scatter away from the track
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
-  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion, engine });
+  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion, engine, quality: engine.effectiveQuality() });
+  // polish (LOOK crew): living light — trackside chevron posts breathe
+  engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 1.6), 0.14, 2.4);
+  // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
+  attachLightShafts(engine);
+
+  // interactive trackside debris: scatters when hit, self-cleans after 7 s —
+  // never blocks the line and never interferes with respawn validation
+  const debris = new DebrisField(engine, track, terrain);
 
   // player vehicle at start line, facing along track
   const car = new VehicleController(engine, track.startPos.clone().add(new THREE.Vector3(0, 1, 0)), track.startHeading, spec.theme.palette.primary);
@@ -184,6 +194,8 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   const CP_T = [0.25, 0.5, 0.75];
   let nextCp = 0;
   const camRig = makeCameraRig('chase', engine.camera, input, (x, z) => terrain.heightAt(x, z));
+  // polish wave (#12): smoothed camera roll fed by the exposed drift angle
+  let camRoll = 0;
 
   const samples = track.curve.getSpacedPoints(300);
   const nearestT = (p: THREE.Vector3): number => {
@@ -255,6 +267,7 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     fx.tick(dt, spec);
     fxHud.update(fx, raceTime);
     updateDressing(dt, raceTime);
+    debris.update(dt);
 
     // AI follow the curve with rubber-banding (N4: wrap the delta — an AI just
     // across the start/finish line must not get a full-lap speed spike/drop)
@@ -276,7 +289,11 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
     hud.setProgress(`LAP ${Math.min(playerLap, lapsNeeded)} / ${lapsNeeded}${bestLap < Infinity ? ` · BEST ${bestLap.toFixed(1)}s` : ''}`);
 
     camRig.update(dt, car.position, toV3(car.chassis.velocity), car.heading);
+    // #12: drift roll — a touch of camera lean while sliding (applied after the
+    // rig's lookAt, so it never fights the chase easing)
+    camRoll = THREE.MathUtils.damp(camRoll, THREE.MathUtils.clamp(-car.driftAngle * 0.09, -0.07, 0.07), 6, dt);
+    camRig.camera.rotateZ(camRoll);
   });
 
-  return { car, aiCars, objectives, assets, track };
+  return { car, aiCars, objectives, assets, track, debris };
 }

@@ -42,6 +42,7 @@ import {
 } from './fx';
 import { ChapterDresser } from './dressing';
 import { Scatter } from '../engine/world/Scatter';
+import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { Structures } from '../engine/world/Structures';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
@@ -76,7 +77,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: [{ x: 0, z: 0, r: 12 }],
     engine,
+    quality: engine.effectiveQuality(),
   });
+  // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
+  attachLightShafts(engine);
 
   // --- combat systems
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
@@ -236,10 +240,14 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     ? new THREE.PointLight(new THREE.Color(spec.theme.palette.accent), 2, 30)
     : null;
   if (bossAura) scene.add(bossAura);
+  // polish (LOOK crew): living light — boss aura breathes
+  if (bossAura) engine.sky.lightLife.flicker(bossAura, 0.22, 1.8);
 
   engine.onUpdate((dt) => {
     const t = engine.time;
-    avatar.ctrl.camYaw = camRig.yaw;
+    // controller's "forward" is (-sin,-cos) but the third-person rig looks along
+    // (+sin,+cos): offset by PI so W walks away from the camera
+    avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
 
     // attack input (melee damage scales with the damage upgrade multiplier)

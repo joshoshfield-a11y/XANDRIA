@@ -42,6 +42,8 @@ import {
 } from './fx';
 import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
+import { Scatter } from '../engine/world/Scatter';
+import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { PlayerAvatar } from './common';
 
 export function buildFpsArena(engine: Engine, spec: GameSpec) {
@@ -81,7 +83,21 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     ring.rotation.x = Math.PI / 2;
     ring.position.y = terrain.heightAt(0, 0) + 5.2;
     scene.add(ring);
+    // polish (LOOK crew): living light — the neon ring breathes
+    engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 2), 0.12, 1.5);
   }
+
+  // beauty wave: per-genre hero props (pylons + cover crates); the arena
+  // dressing above stays untouched, this only adds scatter
+  new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
+    heroesOnly: true,
+    exclusion: [{ x: 0, z: 0, r: 10 }],
+    quality: engine.effectiveQuality(),
+  });
+  // polish (LOOK crew): living light — neon pylons hum
+  engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 2.2), 0.16, 2.1);
+  // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
+  attachLightShafts(engine);
 
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
   let avatar: PlayerAvatar;

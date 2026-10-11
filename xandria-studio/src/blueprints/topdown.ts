@@ -42,6 +42,7 @@ import {
 import { ChapterDresser } from './dressing';
 import { Structures } from '../engine/world/Structures';
 import { Scatter } from '../engine/world/Scatter';
+import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { PlayerAvatar } from './common';
 
 export function buildTopDown(engine: Engine, spec: GameSpec) {
@@ -72,8 +73,14 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   scene.add(structures.group);
   new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: [{ x: 0, z: 0, r: arenaR + 6 }],
+    heroExclusion: [{ x: 0, z: 0, r: 8 }],
     engine,
+    quality: engine.effectiveQuality(),
   });
+  // polish (LOOK crew): living light — horde-lane glow pylons hum
+  engine.sky.lightLife.pulse(engine.mats.glow(spec.theme.palette.accent, 2.0), 0.16, 2.0);
+  // polish wave: cheap god-ray-ish light shafts (quality-scaled, day/dusk only)
+  attachLightShafts(engine);
 
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
   let avatar: PlayerAvatar;

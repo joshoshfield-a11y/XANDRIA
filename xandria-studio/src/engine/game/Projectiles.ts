@@ -20,6 +20,7 @@ export class Projectiles {
   pool: Projectile[] = [];
   onHit: (p: Projectile, hitBody: CANNON.Body | null, point: THREE.Vector3) => void = () => {};
   private matCache = new Map<string, THREE.Material>();
+  private tmpV = new THREE.Vector3();
   constructor(private engine: Engine, private color = '#7af7ff') {
     const geo = new THREE.SphereGeometry(0.14, 6, 6);
     const mat = engine.mats.glow(color, 2.5);
@@ -79,9 +80,10 @@ export class Projectiles {
       p.life -= dt;
       const pos = toV3(p.body.position);
       if (p.life <= 0 || pos.y < -80) { this.kill(p); continue; }
-      // trail
+      // trail (raw pos — visual only)
       if (this.engine.frame % 2 === 0) this.engine.particles.trail(pos, p.color);
-      p.mesh.position.copy(pos);
+      // render-interpolated mesh position; collision scan below keeps raw `pos`
+      p.mesh.position.copy(this.engine.physics.interpolatedPosition(p.body, this.tmpV));
     }
     // collision via contact events — cheap scan: raycast along motion each frame
     for (const p of this.pool) {
@@ -94,7 +96,8 @@ export class Projectiles {
       const hit = this.engine.physics.raycast(from, to, p.body.collisionFilterMask, p.body);
       if (hit && hit.distance <= speed * dt * 2 + 0.2) {
         this.onHit(p, hit.body, hit.point);
-        this.engine.particles.sparks(hit.point, p.friendly ? '#8df2ff' : '#ff9a5c', 8);
+        // polish wave: impacts read — sparks + smoke + shake, not sparks alone
+        this.engine.juice.impact(hit.point, p.friendly ? 0.9 : 1.1, p.friendly ? '#8df2ff' : '#ff9a5c');
         this.kill(p);
       }
     }

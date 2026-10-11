@@ -1,0 +1,13 @@
+{
+  "suite": "fuzz",
+  "name": "input-monkey",
+  "genre": "tp-action",
+  "passed": true,
+  "durationMs": 64542,
+  "metrics": {
+    "injections": 184,
+    "nanFindings": 0
+  },
+  "errors": [],
+  "notes": "mulberry32 seed=1000; ~300ms cadence for 60s; 'pause'/'reset' excluded from the action pool (pause stalls the sim, reset rebuilds the run); frame 7 -> 41 (advancing=true); nanScan paths: none."
+}
