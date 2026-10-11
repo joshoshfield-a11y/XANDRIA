@@ -20,6 +20,7 @@ export class Projectiles {
   pool: Projectile[] = [];
   onHit: (p: Projectile, hitBody: CANNON.Body | null, point: THREE.Vector3) => void = () => {};
   private matCache = new Map<string, THREE.Material>();
+  private tmpV = new THREE.Vector3();
   constructor(private engine: Engine, private color = '#7af7ff') {
     const geo = new THREE.SphereGeometry(0.14, 6, 6);
     const mat = engine.mats.glow(color, 2.5);
@@ -79,9 +80,10 @@ export class Projectiles {
       p.life -= dt;
       const pos = toV3(p.body.position);
       if (p.life <= 0 || pos.y < -80) { this.kill(p); continue; }
-      // trail
+      // trail (raw pos — visual only)
       if (this.engine.frame % 2 === 0) this.engine.particles.trail(pos, p.color);
-      p.mesh.position.copy(pos);
+      // render-interpolated mesh position; collision scan below keeps raw `pos`
+      p.mesh.position.copy(this.engine.physics.interpolatedPosition(p.body, this.tmpV));
     }
     // collision via contact events — cheap scan: raycast along motion each frame
     for (const p of this.pool) {
