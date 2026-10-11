@@ -15,7 +15,16 @@ export class VehicleController {
   wheels: THREE.Mesh[];
   boost = 1;          // 0..1 boost meter
   private boosting = false;
-  private lastSafe = new THREE.Vector3();
+  // Respawn safety: ring of known-good snapshots. A snapshot is recorded only
+  // while moving, upright, and with no recent barrier contact — so driving
+  // INTO a trap at speed can never poison the respawn point (the old
+  // single-point lastSafe did exactly that: R/reset respawned into the trap).
+  private history: { x: number; y: number; z: number; heading: number }[] = [];
+  private spawnPos = new THREE.Vector3();
+  private spawnHeading = 0;
+  private lastContactT = -Infinity;
+  private lastRecordT = -Infinity;
+  private nowT = 0;
   private safeTimer = 0;
   speed = 0;
 
@@ -64,7 +73,10 @@ export class VehicleController {
     // wheels authored with origin at ground; shift mesh so origin ≈ chassis center
     this.mesh.children.forEach((c) => { c.position.y -= 0.35; });
     engine.scene.add(this.mesh);
-    this.lastSafe.copy(spawn);
+    this.spawnPos.copy(spawn);
+    this.spawnHeading = heading;
+    // any barrier contact invalidates "safe" recording for a short window
+    this.chassis.addEventListener('collide', () => { this.lastContactT = this.nowT; });
   }
 
   get position(): THREE.Vector3 { return toV3(this.chassis.position); }
@@ -76,6 +88,7 @@ export class VehicleController {
   }
 
   update(dt: number, input: { axes: { x: number; y: number }; boost: boolean; brake: boolean; reset: boolean }) {
+    this.nowT += dt;
     const v = this.chassis.velocity;
     this.speed = Math.sqrt(v.x * v.x + v.z * v.z);
     const vSign = this.forwardSpeed() >= -0.5 ? 1 : -1;
@@ -114,7 +127,15 @@ export class VehicleController {
     const flipped = worldUp.y < 0.2;
     if (flipped) this.safeTimer += dt; else this.safeTimer = 0;
     if (input.reset || this.safeTimer > 1.6) this.respawn();
-    if (!flipped && this.speed > 3) this.lastSafe.copy(this.chassis.position);
+    // record a safe snapshot: moving, upright, and no recent contact.
+    // throttled to 2 Hz, ring-capped — the respawn point can never be inside
+    // a trap the car just drove into.
+    if (!flipped && this.speed > 3 && this.nowT - this.lastContactT > 1.5 && this.nowT - this.lastRecordT > 0.5) {
+      this.lastRecordT = this.nowT;
+      const p = this.chassis.position;
+      this.history.push({ x: p.x, y: p.y, z: p.z, heading: this.heading });
+      if (this.history.length > 24) this.history.shift();
+    }
 
     // sync visuals
     this.mesh.position.copy(toV3(this.chassis.position));
@@ -140,11 +161,30 @@ export class VehicleController {
     return fwd.x * v.x + fwd.y * v.y + fwd.z * v.z;
   }
 
+  /**
+   * Respawn at the newest known-good snapshot meaningfully away from the
+   * current (wedged) position; falls back to the constructor spawn when no
+   * snapshot qualifies. The car is re-oriented along its travel direction at
+   * the snapshot — never kept on the crash heading. History is truncated at
+   * the chosen snapshot so a second reset walks further back, and a respawn
+   * can never return the car to the trap it just left.
+   */
   respawn() {
-    this.chassis.position.set(this.lastSafe.x, this.lastSafe.y + 2, this.lastSafe.z);
+    const p = this.chassis.position;
+    let pick: { x: number; y: number; z: number; heading: number } | null = null;
+    let pickIdx = -1;
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const h = this.history[i];
+      const dx = h.x - p.x, dz = h.z - p.z;
+      if (dx * dx + dz * dz > 25) { pick = h; pickIdx = i; break; } // >5 m away
+    }
+    const t = pick ?? { x: this.spawnPos.x, y: this.spawnPos.y, z: this.spawnPos.z, heading: this.spawnHeading };
+    this.chassis.position.set(t.x, t.y + 2, t.z);
     this.chassis.velocity.setZero();
     this.chassis.angularVelocity.setZero();
-    this.chassis.quaternion.setFromEuler(0, this.heading, 0);
+    this.chassis.quaternion.setFromEuler(0, t.heading, 0);
     this.safeTimer = 0;
+    if (pickIdx >= 0) this.history.length = pickIdx + 1;
+    else this.history.length = 0;
   }
 }

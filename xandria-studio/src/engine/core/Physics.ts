@@ -205,8 +205,23 @@ export class Physics {
   raycast(from: THREE.Vector3, to: THREE.Vector3, mask = -1, skipBody?: CANNON.Body): RayHit | null {
     const result = new CANNON.RaycastResult();
     const ray = new CANNON.Ray(new CANNON.Vec3(from.x, from.y, from.z), new CANNON.Vec3(to.x, to.y, to.z));
-    ray.intersectWorld(this.world, { mode: CANNON.Ray.CLOSEST, result, skipBackfaces: true, collisionFilterMask: mask, collisionFilterGroup: -1, checkCollisionResponse: false } as any);
-    if (!result.hasHit || (skipBody && result.body === skipBody)) return null;
+    if (skipBody) {
+      // cannon-es Ray has no body exclusion: intersect the filtered list directly.
+      // The old post-filter returned null whenever the skipped body was the
+      // closest hit — which silently broke any probe starting inside the
+      // skipped body (the CharacterController ground probe starts inside the
+      // player capsule, so `grounded` was never true and jumping died after
+      // the first double jump).
+      ray.mode = CANNON.Ray.CLOSEST;
+      ray.skipBackfaces = true;
+      ray.collisionFilterMask = mask;
+      ray.collisionFilterGroup = -1;
+      ray.checkCollisionResponse = false;
+      ray.intersectBodies(this.world.bodies.filter((b) => b !== skipBody), result);
+    } else {
+      ray.intersectWorld(this.world, { mode: CANNON.Ray.CLOSEST, result, skipBackfaces: true, collisionFilterMask: mask, collisionFilterGroup: -1, checkCollisionResponse: false } as any);
+    }
+    if (!result.hasHit) return null;
     return {
       point: new THREE.Vector3(result.hitPointWorld.x, result.hitPointWorld.y, result.hitPointWorld.z),
       normal: new THREE.Vector3(result.hitNormalWorld.x, result.hitNormalWorld.y, result.hitNormalWorld.z),
