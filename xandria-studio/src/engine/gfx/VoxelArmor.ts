@@ -22,10 +22,16 @@
  *  - torso     → chest plate + trim + belt
  *  - legs      → greaves + greave trim
  *  - accessory → pauldrons + vambraces + scarf (when the set has one)
+ *
+ * Standalone cape: applyVoxelCape / clearVoxelCape (follow-up wave A) — a
+ * seeded, segmented cloth chain on the torso pivot, driven by the rig's
+ * existing animate() cloth math. It is deliberately outside the slot contract
+ * above: clearVoxelArmor never touches cape pieces.
  */
 import * as THREE from 'three';
 import type { CharacterRig } from './Characters';
-import type { EquipSlot } from '@spec';
+import { VOXEL_ARMOR_SET_IDS, type EquipSlot } from '@spec';
+import { Rng } from '../core/Rng';
 
 /** Pivots armor may parent to. 'root' is reserved for future sets. */
 export type VoxelArmorPivot =
@@ -110,6 +116,19 @@ export function registeredVoxelArmorSetIds(): string[] {
 export function resolveVoxelArmorSet(id: string | undefined): VoxelArmorSetDef | undefined {
   if (!id) return undefined;
   return customSets.get(id) ?? VOXEL_ARMOR_SETS[id];
+}
+
+/**
+ * Deterministically pick a built-in armor set id from a seed (mulberry32 via
+ * the engine Rng — the same PRNG everything procedural derives from).
+ * Same seed → same set, every session. Used by the Studio "seeded random"
+ * armor choice and by generators that want a set without naming one.
+ * Only built-in ids are eligible: runtime-registered custom sets are excluded
+ * so a set picked today still resolves on a vanilla build.
+ */
+export function pickVoxelArmorSetId(seed: number): string {
+  const ids: readonly string[] = VOXEL_ARMOR_SET_IDS;
+  return new Rng(seed).pick(ids);
 }
 
 /**
@@ -439,6 +458,262 @@ function defineSets() {
 defineSets();
 
 // ---------------------------------------------------------------------------
+// voxel cape: standalone seeded cloth piece (follow-up wave A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Standalone cape/hood-cloth piece for the voxel armor system.
+ *
+ * NOT part of the five armor sets — it has its own lifecycle
+ * (applyVoxelCape / clearVoxelCape) so it can dress any humanoid rig (player
+ * or enemy) with or without armor shells underneath.
+ *
+ * Cloth: a chain of pivots hanging off the torso pivot, each carrying a thin
+ * blocky panel — the voxel answer to the polish wave's segmented plane cape.
+ * The pivots register in rig.limbs.cape, so the rig's EXISTING animate() cloth
+ * math (speed trail + detuned-sine flutter) drives them; this file builds no
+ * animation of its own. Turning carries the cape automatically because the
+ * chain is parented to the torso pivot.
+ *
+ * Seeded: the variant pick and the per-segment width jitter both derive from
+ * opts.seed — same seed → same cape, every session. Pass `variant`
+ * explicitly to override the pick.
+ *
+ * Lifecycle vs armor: cape pieces carry userData.capePiece and are SKIPPED by
+ * clearVoxelArmor — applying or clearing armor sets never touches the cape.
+ * Re-applying a cape replaces the previous one (any origin). A pre-existing
+ * polish-wave cape chain is detached and stashed while the voxel cape is on,
+ * and restored by clearVoxelCape.
+ */
+
+export type VoxelCapeVariant = 'full' | 'half' | 'mantle' | 'tattered' | 'hooded';
+export const VOXEL_CAPE_VARIANTS: readonly VoxelCapeVariant[] = ['full', 'half', 'mantle', 'tattered', 'hooded'];
+
+export interface ApplyVoxelCapeOpts {
+  /** seed → variant pick + per-segment jitter. Same seed → same cape. Default 1. */
+  seed?: number;
+  /** explicit variant; overrides the seeded pick */
+  variant?: VoxelCapeVariant;
+  /** cloth palette; defaults to a dark neutral that sits under any armor set */
+  palette?: VoxelArmorPalette;
+  /** optional glowing hem-strip color (#rrggbb); omitted → no glow */
+  glowColor?: string;
+  /** origin tag, same contract as armor pieces; default 'skin' */
+  origin?: VoxelArmorOrigin;
+}
+
+interface CapeSpec { segs: number; length: number; width: number; jitter: number; hood: boolean }
+const CAPE_SPECS: Record<VoxelCapeVariant, CapeSpec> = {
+  full: { segs: 4, length: 1.18, width: 0.95, jitter: 0.03, hood: false }, // long, to the knees
+  half: { segs: 3, length: 0.80, width: 0.90, jitter: 0.03, hood: false }, // mid-back
+  mantle: { segs: 2, length: 0.46, width: 1.00, jitter: 0.02, hood: false }, // short shoulder drape
+  tattered: { segs: 4, length: 1.02, width: 0.92, jitter: 0.14, hood: false }, // jagged hem
+  hooded: { segs: 3, length: 0.88, width: 0.90, jitter: 0.03, hood: true }, // + back-of-head cowl
+};
+
+const DEFAULT_CAPE_PALETTE: VoxelArmorPalette = { shell: '#262a33', trim: '#9aa0ad', dark: '#14181e' };
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+/** Explicit variant wins; otherwise a seeded pick over the five variants. Never throws. */
+export function resolveVoxelCapeVariant(seed = 1, variant?: VoxelCapeVariant): VoxelCapeVariant {
+  try {
+    if (variant && (VOXEL_CAPE_VARIANTS as readonly string[]).includes(variant)) return variant;
+    return new Rng((seed ?? 1) >>> 0).pick(VOXEL_CAPE_VARIANTS);
+  } catch {
+    return 'full';
+  }
+}
+
+/** Polish-wave cape chains replaced by a voxel cape, stashed per rig for restore on clear. */
+const stashedPolishCapes = new WeakMap<CharacterRig, { holder: THREE.Object3D; pivots: THREE.Object3D[] }>();
+
+function tagCapePiece(mesh: THREE.Mesh, slot: 'accessory' | 'head', origin: VoxelArmorOrigin): void {
+  mesh.userData.armorPiece = true; // visible to armor scans, but capePiece exempts it from clearVoxelArmor
+  mesh.userData.capePiece = true;
+  mesh.userData.armorSet = 'cape';
+  mesh.userData.armorSlot = slot;
+  mesh.userData.armorOrigin = origin;
+}
+
+/** Dispose a detached subtree's geometries and its OWNED materials only (shared ones survive). */
+function disposeDetached(root: THREE.Object3D): void {
+  try {
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
+    root.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      if (m.geometry) geos.add(m.geometry);
+      const mm = Array.isArray(m.material) ? m.material : [m.material];
+      for (const mat of mm) {
+        if (mat && (mat as THREE.Material).userData?.owned) mats.add(mat as THREE.Material);
+      }
+    });
+    for (const g of geos) { try { g.dispose(); } catch { /* decorative */ } }
+    for (const m of mats) { try { m.dispose(); } catch { /* decorative */ } }
+  } catch { /* decorative */ }
+}
+
+/**
+ * Dress a rig in a seeded voxel cape. Replaces any previous cape (any origin).
+ * Never throws; rigs without a torso pivot (drones, bare adapters) are silent
+ * no-ops. Player and enemy rigs are both makeHumanoid CharacterRigs, so both
+ * render the cape and the rig's animate() swings it with run speed.
+ */
+export function applyVoxelCape(rig: CharacterRig, opts: ApplyVoxelCapeOpts = {}): void {
+  try {
+    if (!rig?.group) return;
+    const torso = pivotFor(rig, 'torso');
+    if (!torso) return;
+    const m = measurePivot(rig, 'torso', 'self');
+    if (!m) return;
+    const origin = opts.origin ?? 'skin';
+    const seed = opts.seed ?? 1;
+    const variant = resolveVoxelCapeVariant(seed, opts.variant);
+    const spec = CAPE_SPECS[variant];
+    const rng = new Rng(seed >>> 0);
+
+    clearVoxelCape(rig); // replace semantics
+
+    // Detach a pre-existing polish-wave cape chain (stash it for restore on clear).
+    const existing = rig.limbs.cape;
+    if (existing && existing.length > 0 &&
+      !existing.every((p) => (p as { userData?: Record<string, unknown> }).userData?.capePivot === true)) {
+      const holder = existing[0].parent;
+      if (holder && holder !== torso) {
+        holder.parent?.remove(holder);
+        disposeDetached(holder);
+        stashedPolishCapes.set(rig, { holder, pivots: existing });
+      }
+    }
+
+    const pal = opts.palette ?? DEFAULT_CAPE_PALETTE;
+    const shell = makeMat(pal.shell, 0.8, 0.15);
+    const trim = makeMat(pal.trim, 0.45, 0.5);
+    const dark = makeMat(pal.dark, 0.9, 0.05);
+    const glow = typeof opts.glowColor === 'string' && HEX6_RE.test(opts.glowColor)
+      ? makeMat('#111111', 0.3, 0.0, opts.glowColor, 1.6)
+      : null;
+
+    // Static root at the shoulders; the SEGs below it are the driven chain.
+    const root = new THREE.Group();
+    root.position.set(0, m.cy + m.sy * 0.40, m.cz - m.sz * 0.52);
+    root.rotation.x = 0.10;
+    root.userData.capePivot = true;
+    root.userData.capeRoot = true;
+    root.userData.armorOrigin = origin;
+    torso.add(root);
+
+    const segLen = spec.length / spec.segs;
+    const pivots: THREE.Object3D[] = [];
+    const widths: number[] = [];
+    let parent: THREE.Object3D = root;
+    for (let i = 0; i < spec.segs; i++) {
+      const pivot = new THREE.Group();
+      pivot.position.set(0, i === 0 ? 0 : -segLen, 0);
+      pivot.userData.capePivot = true;
+      pivot.userData.armorOrigin = origin;
+      const w = Math.max(0.05, m.sx * (spec.width - 0.07 * i) * (1 + (rng.next() * 2 - 1) * spec.jitter));
+      widths.push(w);
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(w, segLen * 1.18, 0.055), shell);
+      panel.position.y = -segLen * 0.5;
+      panel.castShadow = true;
+      tagCapePiece(panel, 'accessory', origin);
+      pivot.add(panel);
+      parent.add(pivot);
+      parent = pivot;
+      pivots.push(pivot);
+    }
+
+    // Shoulder clasps (trim).
+    for (const side of [1, -1] as const) {
+      const clasp = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.07, 0.05), trim);
+      clasp.position.set(side * m.sx * 0.26, 0, 0.05);
+      clasp.castShadow = true;
+      tagCapePiece(clasp, 'accessory', origin);
+      root.add(clasp);
+    }
+
+    // Optional glowing hem strip on the last segment.
+    if (glow && pivots.length > 0) {
+      const hem = new THREE.Mesh(new THREE.BoxGeometry(widths[widths.length - 1] * 0.85, 0.05, 0.065), glow);
+      hem.position.y = -segLen * 1.02;
+      tagCapePiece(hem, 'accessory', origin);
+      pivots[pivots.length - 1].add(hem);
+    }
+
+    // Hooded variant: back-of-head cowl drape on the head pivot (face stays open).
+    if (spec.hood) {
+      const head = pivotFor(rig, 'head');
+      const hm = head ? measurePivot(rig, 'head', 'subtree') : null;
+      if (head && hm) {
+        const drape = new THREE.Mesh(new THREE.BoxGeometry(hm.sx * 1.05, hm.sy * 1.05, 0.07), dark);
+        drape.position.set(hm.cx, hm.cy + hm.sy * 0.05, hm.cz - hm.sz * 0.45);
+        drape.castShadow = true;
+        tagCapePiece(drape, 'head', origin);
+        head.add(drape);
+      }
+    }
+
+    // Register the chain where the rig's animate() reads it live.
+    rig.limbs.cape = pivots;
+  } catch { /* the cape is decorative — never break the sim */ }
+}
+
+/**
+ * Strip the voxel cape from a rig: panels, pivots, and the limbs.cape
+ * registration. A stashed polish-wave cape is restored when no voxel chain
+ * remains. Never throws.
+ */
+export function clearVoxelCape(rig: CharacterRig, origin?: VoxelArmorOrigin): void {
+  try {
+    if (!rig?.group) return;
+    const hits: THREE.Mesh[] = [];
+    const pivots: THREE.Object3D[] = [];
+    rig.group.traverse((o) => {
+      const ud = (o as { userData?: Record<string, unknown> }).userData;
+      if (!ud || (origin !== undefined && ud.armorOrigin !== origin)) return;
+      if ((o as THREE.Mesh).isMesh) {
+        if (ud.capePiece === true) hits.push(o as THREE.Mesh);
+      } else if (ud.capePivot === true) {
+        pivots.push(o);
+      }
+    });
+    const mats = new Set<THREE.Material>();
+    for (const mesh of hits) {
+      mesh.parent?.remove(mesh);
+      mesh.geometry.dispose();
+      const mm = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mm) if (mat) mats.add(mat as THREE.Material);
+    }
+    for (const mat of mats) { try { mat.dispose(); } catch { /* decorative */ } }
+    for (const p of pivots) p.parent?.remove(p);
+    // Rebuild the driven chain: drop the removed voxel pivots (honoring the
+    // origin filter); when no voxel chain remains, restore a stashed
+    // polish-wave cape if there is one.
+    const before = rig.limbs.cape ?? [];
+    const isVoxel = (p: THREE.Object3D) =>
+      (p as { userData?: Record<string, unknown> }).userData?.capePivot === true;
+    const removed = (p: THREE.Object3D) =>
+      isVoxel(p) && (origin === undefined ||
+        (p as { userData?: Record<string, unknown> }).userData?.armorOrigin === origin);
+    const kept = before.filter((p) => !removed(p));
+    const stashed = stashedPolishCapes.get(rig);
+    const anyVoxelLeft = kept.some(isVoxel);
+    if (!anyVoxelLeft && stashed) {
+      const torso = pivotFor(rig, 'torso');
+      if (torso && stashed.holder.parent !== torso) torso.add(stashed.holder);
+      rig.limbs.cape = stashed.pivots;
+      stashedPolishCapes.delete(rig);
+    } else if (kept.length === 0) {
+      delete rig.limbs.cape;
+    } else if (kept.length !== before.length) {
+      rig.limbs.cape = kept;
+    }
+  } catch { /* clearing the cape never throws */ }
+}
+
+// ---------------------------------------------------------------------------
 // apply / clear
 // ---------------------------------------------------------------------------
 
@@ -474,7 +749,9 @@ export function applyVoxelArmorSlot(
 
 /**
  * Strip armor pieces from a rig. Slot and/or origin narrow the removal;
- * both undefined clears everything. Never throws.
+ * both undefined clears everything. The standalone voxel cape
+ * (userData.capePiece) is NEVER touched here — it has its own lifecycle
+ * (applyVoxelCape / clearVoxelCape). Never throws.
  */
 export function clearVoxelArmor(rig: CharacterRig, slot?: VoxelArmorSlot, origin?: VoxelArmorOrigin): void {
   try {
@@ -483,7 +760,7 @@ export function clearVoxelArmor(rig: CharacterRig, slot?: VoxelArmorSlot, origin
     rig.group.traverse((o) => {
       const m = o as THREE.Mesh;
       const ud = (o as { userData?: Record<string, unknown> }).userData;
-      if (m.isMesh && ud?.armorPiece === true &&
+      if (m.isMesh && ud?.armorPiece === true && ud?.capePiece !== true &&
         (slot === undefined || ud.armorSlot === slot) &&
         (origin === undefined || ud.armorOrigin === origin)) {
         hits.push(m);

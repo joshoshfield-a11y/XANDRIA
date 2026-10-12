@@ -6,8 +6,8 @@
  * source is imported or modified.
  *
  * Loop: lib.readWorld() every ~400ms real time, apply a per-genre policy,
- * until engine.frame advances TARGET_FRAMES rendered frames, or a real-time
- * cap hits. NOTE on frame counting: ?test=1 runs 10 sim substeps per rendered
+ * until engine.frame advances the genre's frame budget (180 default, 300 for
+ * racing — see GENRE_FRAMES) of rendered frames, or a real-time cap hits. NOTE on frame counting: ?test=1 runs 10 sim substeps per rendered
  * frame and engine.frame counts RENDERED frames.
  *
  * RUNTIME ADJUSTMENT (2026-10-10): headless SwiftShader here renders
@@ -15,6 +15,9 @@
  * ~45+ real minutes per genre. Target is 180 rendered frames (~30 sim-seconds)
  * or the 12-minute real-time cap, whichever comes first — enough for a
  * competent bot to demonstrate genuine progress. Set BOT_FRAMES to override.
+ * Racing gets 300 frames / 14-minute cap / 18-minute timeout (2026-10-11):
+ * the seeded 827 m track needs ~40 sim-sec for a genuine lap at the bot's
+ * safe cruise pace — 180 frames can only "lap" via start-line dithering.
  *
  * Env overrides (for smoke tests): BOT_FRAMES, BOT_REAL_CAP_MS.
  *
@@ -37,8 +40,15 @@ import * as lib from './lib';
 // ---------------------------------------------------------------- constants
 
 const TICK_MS = 400;
-const TARGET_FRAMES = Number(process.env.BOT_FRAMES ?? 180); // 180 rendered frames ≈ 30 sim-seconds @10 substeps/frame
-const REAL_CAP_MS = Number(process.env.BOT_REAL_CAP_MS ?? 12 * 60 * 1000);
+// Per-genre frame budgets. Racing needs 300: 180 frames = 30 sim-seconds at
+// 10 substeps/frame, but the seeded 827 m track needs ~40 sim-sec for a
+// genuine lap at the bot's safe 20 m/s cruise — 180 frames can only ever
+// "complete" a lap via start-line dithering artifacts, not real driving.
+const GENRE_FRAMES: Record<string, number> = { racing: 300 };
+const GENRE_CAP_MS: Record<string, number> = { racing: 14 * 60 * 1000 };
+const GENRE_TIMEOUT_MIN: Record<string, number> = { racing: 18 };
+const TARGET_FRAMES_DEFAULT = 180;
+const REAL_CAP_MS_DEFAULT = 12 * 60 * 1000;
 const WINDOW_MS = 20_000;
 const RESULTS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'results');
 
@@ -142,19 +152,114 @@ async function installBotHelpers(page: Page): Promise<void> {
       X.engine.input.setPointerPos(c[0] / c[3], c[1] / c[3]);
       return true;
     };
-    /** Racing: target point on the track centerline, a little ahead of the car. */
-    B.raceTarget = (): { x: number; z: number } => {
+    /**
+     * Racing telemetry + pure-pursuit target, computed in-browser in one shot
+     * (one page.evaluate per tick instead of several round trips).
+     *
+     * The old fixed 3-sample lookahead (~16 m) was far too close at boost
+     * speeds: the car oscillated, scraped barriers, and on some runs never
+     * finished the lap it had nearly completed during calibration. The new
+     * target walks forward along the centerline by a speed-scaled lookahead
+     * (pure pursuit), and the policy also gets curvature-ahead, the nearest
+     * curve param (same convention as the game's own nearestT), a wrong-way
+     * flag, and the distance to the next checkpoint gate.
+     */
+    B.raceState = (backup: boolean): {
+      px: number; pz: number; speed: number;
+      tx: number; tz: number; err: number; curveAhead: number; curveFar: number;
+      playerT: number; wrongWay: boolean; distToCp: number; nextCp: number;
+      aiD: number; steerU: number;
+    } => {
       const track = X.blueprint.track;
-      const p = X.blueprint.car.chassis.position;
-      if (!B.raceSamples) B.raceSamples = track.curve.getSpacedPoints(150);
+      const ch = X.blueprint.car.chassis;
+      if (!B.raceSamples) {
+        B.raceSamples = track.curve.getSpacedPoints(300);
+        B.raceTrackLen = track.curve.getLength();
+      }
       const S = B.raceSamples as { x: number; z: number }[];
+      const N = S.length;
+      const px = ch.position.x, pz = ch.position.z;
+      const vx = ch.velocity.x, vz = ch.velocity.z;
+      const speed = Math.hypot(vx, vz);
       let bi = 0, bd = Infinity;
-      for (let i = 0; i < S.length; i++) {
-        const d = (S[i].x - p.x) ** 2 + (S[i].z - p.z) ** 2;
+      for (let i = 0; i < N; i++) {
+        const d = (S[i].x - px) ** 2 + (S[i].z - pz) ** 2;
         if (d < bd) { bd = d; bi = i; }
       }
-      const ahead = S[(bi + Math.max(2, Math.floor(S.length * 0.02))) % S.length];
-      return { x: ahead.x, z: ahead.z };
+      const playerT = bi / N;
+      // pure-pursuit lookahead, speed-scaled. When backing up (car faces
+      // backward at spawn), walk the centerline BACKWARD so the target is
+      // ahead in the direction the car faces.
+      const L = Math.min(45, Math.max(8, 8 + speed * 0.8));
+      const walk = (from: number, dist: number): number => {
+        let acc = 0;
+        for (let k = 1; k <= N; k++) {
+          const a = S[(from + k - 1) % N], b = S[(from + k) % N];
+          acc += Math.hypot(b.x - a.x, b.z - a.z);
+          if (acc >= dist) return (from + k) % N;
+        }
+        return from;
+      };
+      const walkBack = (from: number, dist: number): number => {
+        let acc = 0;
+        for (let k = 1; k <= N; k++) {
+          const a = S[(((from - k + 1) % N) + N) % N], b = S[(((from - k) % N) + N) % N];
+          acc += Math.hypot(b.x - a.x, b.z - a.z);
+          if (acc >= dist) return (((from - k) % N) + N) % N;
+        }
+        return from;
+      };
+      const w = backup ? walkBack : walk;
+      const ti = w(bi, L);
+      const fi = w(ti, L);
+      const gi = w(fi, L); // one more lookahead for early braking decisions
+      const tgt = S[ti], f = S[fi], g = S[gi];
+      // curvature ahead: angle between (car→target) and (target→further)
+      const d1x = tgt.x - px, d1z = tgt.z - pz;
+      const d2x = f.x - tgt.x, d2z = f.z - tgt.z;
+      const m1 = Math.hypot(d1x, d1z) || 1, m2 = Math.hypot(d2x, d2z) || 1;
+      const cosA = Math.max(-1, Math.min(1, (d1x * d2x + d1z * d2z) / (m1 * m2)));
+      const curveAhead = Math.acos(cosA);
+      // far curvature (for early braking): angle between (target→further)
+      // and (further→even further) — sees turns 2L..3L ahead
+      const e1x = f.x - tgt.x, e1z = f.z - tgt.z;
+      const e2x = g.x - f.x, e2z = g.z - f.z;
+      const n1 = Math.hypot(e1x, e1z) || 1, n2 = Math.hypot(e2x, e2z) || 1;
+      const cosB = Math.max(-1, Math.min(1, (e1x * e2x + e1z * e2z) / (n1 * n2)));
+      const curveFar = Math.acos(cosB);
+      // heading error to target (car forward = local -z → bearing yaw+PI)
+      const q = ch.quaternion;
+      const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+      const err = B.wrapPi(Math.atan2(tgt.x - px, tgt.z - pz) - (yaw + Math.PI));
+      // wrong-way: velocity opposes the track tangent at the nearest point
+      const tA = S[(bi + 2) % N], tB = S[(bi - 2 + N) % N];
+      let gx = tA.x - tB.x, gz = tA.z - tB.z;
+      const gm = Math.hypot(gx, gz) || 1; gx /= gm; gz /= gm;
+      const wrongWay = speed > 4 && (vx * gx + vz * gz) < 0;
+      // next checkpoint gate (gates at t = 0.25/0.5/0.75, then the lap wrap)
+      let nextCp = 1.0;
+      for (const c of [0.25, 0.5, 0.75]) if (c > playerT + 0.01) { nextCp = c; break; }
+      const distToCp = (nextCp - playerT) * (B.raceTrackLen as number);
+      // nearest AI car (collision-avoidance + diagnostics)
+      let aiD = Infinity;
+      for (const a of (X.blueprint.aiCars || [])) {
+        const mp = a.mesh.position;
+        const d = Math.hypot(mp.x - px, mp.z - pz);
+        if (d < aiD) aiD = d;
+      }
+      // Geometric pure-pursuit steering: δ = atan(2·wheelbase·sin(err)/L),
+      // normalized by the speed-sensitive maxSteer (mirrors
+      // VehicleController). Proportional — no bang-bang weaving.
+      // steerU > 0 ⇒ steer left ⇒ injected as axes.x = -steerU.
+      // NOTE: sin(err)≈0 at err≈π (facing exactly away) — the geometric
+      // formula gives ~zero steering there. The Node policy overrides with
+      // full lock for |err|>1.0 (see below), so this is only used for
+      // fine tracking.
+      const wheelbase = 2.3;
+      const delta = Math.atan2(2 * wheelbase * Math.sin(err), L);
+      const maxSteer = 0.55 / (1 + speed * 0.045);
+      const steerU = Math.max(-1, Math.min(1, delta / maxSteer));
+      return { px, pz, speed, tx: tgt.x, tz: tgt.z, err, curveAhead, curveFar, playerT, wrongWay, distToCp, nextCp, aiD, steerU };
     };
   });
 }
@@ -290,109 +395,228 @@ function platformerPolicy(): Policy {
 }
 
 /**
- * Racing: full throttle + boost, bang-bang steering toward a lookahead point
- * on the track centerline (X.blueprint.track.curve IS exposed). Steering sign
- * is calibrated empirically at init ('left' Δheading). Tap 'reset' if stuck.
+ * Racing: pure-pursuit steering toward a speed-scaled lookahead point on the
+ * track centerline (X.blueprint.track.curve IS exposed), with speed control:
+ * boost only when roughly straight, coast (lift throttle — engine braking
+ * applies, no handbrake: brake is a drift initiator) on very sharp turns at
+ * speed. Wrong-way driving is detected and recovered by steering the car
+ * around (err ≈ π saturates the bang-bang steer). Tap 'reset' if stuck.
  *
- * Calibration is TWO-SIDED and verified: a single-sided Δheading measurement
- * is unreliable here — at ~0.3 fps the car can clip a barrier or catch air
- * during the measurement window, flipping the apparent sign (observed across
- * runs: -0.738 vs +0.921 for the same input). So we measure 'left' AND 'right'
- * on the smooth velocity heading (not the bump-noisy chassis quaternion) and
- * only accept the result if both phases moved >3 m at >4 m/s, both |Δ|>0.05,
- * and the signs oppose. Otherwise we fall back to +1 (the natural mapping:
- * target left of nose → press left → car turns left), which drove a full lap
- * in the verified run.
+ * Steering-sign calibration is TWO-SIDED and verified: a single-sided
+ * Δheading measurement is unreliable here — at ~0.6 fps the car can clip a
+ * barrier or catch air during the measurement window, flipping the apparent
+ * sign (observed across runs: -0.738 vs +0.921 for the same input). So we
+ * measure 'left' AND 'right' on the smooth velocity heading (not the
+ * bump-noisy chassis quaternion) and only accept the result if both phases
+ * moved >3 m at >4 m/s, both |Δ|>0.05, and the signs oppose. Up to 3
+ * attempts (rebuild speed between them); otherwise fall back to +1 — the
+ * analytic mapping (err>0 ⇒ target left of nose ⇒ press 'left'; derived from
+ * VehicleController's steer = -axes.x·maxSteer and cannon-es' +steer = left),
+ * which drove a full lap in the verified run.
  */
 function racingPolicy(): Policy {
   return {
     async init(page, ctx) {
-      const drive = (acts: string[]) => page.evaluate(
-        (a) => (window as any).__XANDRIA__.engine.input.inject(a, null), acts);
-      // Frame-based waits: at ~0.3 fps a wall-clock wait is less than one
-      // rendered frame, so calibration phases must count frames.
-      const waitFrames = async (n: number) => {
-        const f0 = await page.evaluate(() => (window as any).__XANDRIA__.engine.frame as number);
-        const t0 = Date.now();
-        for (;;) {
-          const s = await lib.readWorld(page);
-          if (s.state === 'paused') await dismissModal(page, ctx.notes);
-          if (s.frame - f0 >= n || Date.now() - t0 > 180_000) return;
-          await page.waitForTimeout(1000);
-        }
-      };
-      const vel = () => page.evaluate(() => {
-        const c = (window as any).__XANDRIA__.blueprint.car.chassis;
-        return { hx: c.velocity.x, hz: c.velocity.z, sp: Math.hypot(c.velocity.x, c.velocity.z), px: c.position.x, pz: c.position.z };
+      // Steering sign: analytic leftSign=+1 (err>0 ⇒ target left of nose ⇒
+      // press 'left'). Derived from VehicleController (steer=-axes.x·maxSteer;
+      // 'left' ⇒ axes.x=-1 ⇒ +steer) and cannon-es (+steer rotates the wheels
+      // left about +y), and confirmed by the pre-hardening bot's verified
+      // full lap on this default. The old empirical calibration is GONE:
+      // at ~0.6 fps its full-lock full-speed phases always ended with the car
+      // crashed off the racing line (v≈0, nearestT jumping discontinuously
+      // across the infield — the "score 300 at baseline" was 3 gates awarded
+      // via that jump, not real driving), poisoning the whole run: the car
+      // then spent 180 frames dithering near the finish, clipping the start
+      // gantry post, instead of driving the lap from the start line.
+      ctx.data.leftSign = 1;
+      ctx.notes.push('steer sign: analytic leftSign=+1 (empirical calibration removed — it crashed the car off-track)');
+      const facts = await page.evaluate(() => {
+        const X = (window as any).__XANDRIA__;
+        return { len: X.blueprint.track.curve.getLength() as number, width: X.blueprint.track.width as number };
       });
-      const headOf = (hx: number, hz: number) => Math.atan2(hx, hz);
-
-      await drive(['forward']);
-      await waitFrames(8); // build speed on the start straight
-      const v0 = await vel();
-      await drive(['forward', 'left']);
-      await waitFrames(10);
-      const v1 = await vel();
-      await drive(['forward', 'right']);
-      await waitFrames(10);
-      const v2 = await vel();
-      await drive([]);
-
-      const d1 = wrapPi(headOf(v1.hx, v1.hz) - headOf(v0.hx, v0.hz));
-      const d2 = wrapPi(headOf(v2.hx, v2.hz) - headOf(v1.hx, v1.hz));
-      const moved1 = Math.hypot(v1.px - v0.px, v1.pz - v0.pz);
-      const moved2 = Math.hypot(v2.px - v1.px, v2.pz - v1.pz);
-      const ok = v0.sp > 4 && v1.sp > 4 && v2.sp > 4
-        && moved1 > 3 && moved2 > 3
-        && Math.abs(d1) > 0.05 && Math.abs(d2) > 0.05
-        && Math.sign(d1) === -Math.sign(d2);
-      const sign = ok ? Math.sign(d1) : 1;
-      ctx.data.leftSign = sign;
-      ctx.notes.push(
-        `steer calibration: left Δ=${d1.toFixed(3)} right Δ=${d2.toFixed(3)} ` +
-        `moved=${moved1.toFixed(1)}/${moved2.toFixed(1)}m ` +
-        `speed=${v0.sp.toFixed(1)}/${v1.sp.toFixed(1)}/${v2.sp.toFixed(1)}m/s ` +
-        `→ ${ok ? 'VERIFIED' : 'UNVERIFIED, default +1'} leftSign=${sign}`);
+      ctx.notes.push(`track length=${facts.len.toFixed(0)}m width=${facts.width}m`);
+      ctx.data.trackLen = facts.len;
+      ctx.data.distDrivenM = 0;
+      ctx.data.lastPlayerT = undefined;
       ctx.data.lastCheck = null;
       ctx.data.lastResetFrame = -1e9;
+      ctx.data.wrongStreak = 0;
+      ctx.data.wrongWayTotal = 0;
+      ctx.data.maxPlayerT = 0;
+      ctx.data.minDistToCp = Infinity;
+      ctx.data.checkpoints = 0;
+      ctx.data.resets = 0;
+      ctx.data.escapeUntilFrame = -1;
+      ctx.data.resetPos = null;
+      ctx.data.uturnMode = false;
+      ctx.data.lastScore = (await lib.readWorld(page)).score;
     },
     async tick(page, snap, tickIdx, ctx) {
-      const p = snap.player;
-      if (!p || !Number.isFinite(p.x)) return false;
-      const tgt = await page.evaluate(() => (window as any).__BOT__.raceTarget());
-      // car forward = local -z → bearing convention atan2(x,z) gives yaw+PI
-      const err = wrapPi(Math.atan2(tgt.x - p.x, tgt.z - p.z) - (p.yaw + Math.PI));
+      const backingUp = !!ctx.data.backingUp;
+      const st = await page.evaluate((b) => (window as any).__BOT__.raceState(b), backingUp);
       const leftSign = (ctx.data.leftSign as number) ?? 1;
-      const acts = ['forward', 'boost'];
-      if (err * leftSign > 0.15) acts.push('left');
-      else if (err * leftSign < -0.15) acts.push('right');
-      await page.evaluate((a) => (window as any).__XANDRIA__.engine.input.inject(a, null), acts);
-      // position trail for post-run trap analysis (every ~30 s wall)
+
+      // Backup phase: at spawn the car faces backward. Drive 30 m "backward"
+      // (in -t, which is forward in the direction the car faces) to get room
+      // for the U-turn, then turn around with plenty of longitudinal space.
+      if (!ctx.data.backedUp && Math.abs(st.err) > 2.4 && !backingUp) {
+        ctx.data.backingUp = true;
+        ctx.data.backupSx = st.px; ctx.data.backupSz = st.pz;
+      }
+      if (backingUp) {
+        const dx = st.px - (ctx.data.backupSx as number);
+        const dz = st.pz - (ctx.data.backupSz as number);
+        if (Math.hypot(dx, dz) > 30) {
+          ctx.data.backingUp = false;
+          ctx.data.backedUp = true;
+        }
+      }
+
+      // Genuine-driving odometer: forward meters along the track, wrap-aware.
+      // Deltas >41 m in one tick are nearestT discontinuities (infield jumps),
+      // not driving — ignored. Reversing is not counted either.
+      const lpT = ctx.data.lastPlayerT as number | undefined;
+      if (typeof lpT === 'number') {
+        let dpt = st.playerT - lpT;
+        if (dpt < -0.5) dpt += 1; else if (dpt > 0.5) dpt -= 1;
+        if (dpt > 0 && dpt < 0.05) {
+          ctx.data.distDrivenM = (ctx.data.distDrivenM as number) + dpt * (ctx.data.trackLen as number);
+        }
+      }
+      ctx.data.lastPlayerT = st.playerT;
+
+      // Post-reset escape maneuver: respawn drops the car at a safe snapshot,
+      // but the pure-pursuit target can route straight back into the same
+      // barrier pocket (observed: re-pin within 4 frames of a reset). For a
+      // bounded window after each bot-initiated reset, reverse out with
+      // mirrored steering until the car is >8 m from its post-reset spot
+      // (or the frame budget for the maneuver expires), then resume pursuit.
+      if (!ctx.data.resetPos && (ctx.data.escapeUntilFrame as number) >= 0) {
+        ctx.data.resetPos = { x: st.px, z: st.pz };
+      }
+      const rp = ctx.data.resetPos as { x: number; z: number } | null;
+      if (rp && snap.frame < (ctx.data.escapeUntilFrame as number)
+          && dist2(rp.x, rp.z, st.px, st.pz) < 8) {
+        // reverse out with mirrored proportional steering (steering mirrors
+        // in reverse: negate steerU) and moderate reverse throttle
+        await page.evaluate(
+          ([x, y]) => (window as any).__XANDRIA__.engine.input.inject([], { lx: x, ly: y }),
+          [st.steerU, 0.5] as const,
+        );
+        return false;
+      }
+      if (rp) {
+        const wasEscaping = (ctx.data.escapeUntilFrame as number) >= 0;
+        ctx.data.resetPos = null;
+        ctx.data.escapeUntilFrame = -1;
+        if (wasEscaping) ctx.notes.push(`post-reset escape complete at frame ${snap.frame}`);
+      }
+
+      // checkpoint-crossing detection via score jumps (+100 per gate, +500/lap)
+      if (snap.score > (ctx.data.lastScore as number)) {
+        ctx.data.checkpoints = (ctx.data.checkpoints as number) + 1;
+        ctx.notes.push(`checkpoint #${ctx.data.checkpoints} crossed at frame ${snap.frame} (score ${ctx.data.lastScore}→${snap.score})`);
+      }
+      ctx.data.lastScore = snap.score;
+      if (st.playerT > (ctx.data.maxPlayerT as number)) ctx.data.maxPlayerT = st.playerT;
+      if (st.distToCp < (ctx.data.minDistToCp as number)) ctx.data.minDistToCp = st.distToCp;
+
+      // --- adaptive cruise: target speed from upcoming curvature ---
+      // The car hits ~49 m/s on plain throttle but the 70° pre-finish turn
+      // needs ~10 m/s. A fixed cruise either crashes (too fast) or can't lap
+      // in the frame budget (too slow). Target speed follows curveAhead:
+      // fast on straights, slow in turns. 'brake' is a drift initiator, so
+      // it is ONLY used in the brakeZone (|err| < 0.1 ⇒ no steering ⇒ no
+      // drift kick — pure deceleration in a straight line). Boost is
+      // deliberately unused: it only adds crash energy.
+      const curve = st.curveAhead;
+      // Anticipate: the max of near and (discounted) far curvature, so the
+      // target speed drops BEFORE the hairpin, not when we're in it.
+      const c = Math.max(curve, st.curveFar * 0.8);
+      let target = 25;
+      if (c > 1.0) target = 8;
+      else if (c > 0.6) target = 12;
+      else if (c > 0.3) target = 18;
+      // U-turn: facing away from the target (spawn faces backward) — turn
+      // slowly so the car doesn't slide into the barrier mid-turn. Latched:
+      // the |err|>2.4 entry condition alone releases mid-turn (err falls as
+      // the car rotates, speed jumps back up, the arc goes wide and beaches
+      // U-turn via wiggle (K-turn): a 180° arc needs ~15 m but the track is
+      // 12 m, so a single forward arc pins on the barrier. Instead, alternate
+      // forward/reverse with full lock — each segment rotates the nose ~90°
+      // in place, and the car keeps moving (no softlock). Mirrored steering
+      // when reversing keeps the nose rotating the same way.
+      // 5 m/s: turn radius ≈ wheelbase/tan(maxSteer) ≈ 4.8 m, so the 180°
+      // arc (≈9.6 m across) fits the 12 m track.
+      if (Math.abs(st.err) > 2.4) ctx.data.uturnMode = true;
+      else if (Math.abs(st.err) < 0.5) ctx.data.uturnMode = false;
+      if (ctx.data.uturnMode || Math.abs(st.err) > 0.5) target = Math.min(target, 5);
+      // AI traffic: don't rear-end a slower car directly ahead — lift.
+      if (st.aiD < 12 && st.speed > 14) target = Math.min(target, 10);
+      // Brake when well above target and straight enough not to drift.
+      // (No curve<0.4 gate: if a hairpin is ahead we must slow NOW, even if
+      // we're already at its entry — the |err| gate keeps it drift-free.)
+      const brakeZone = st.speed > target + 6 && Math.abs(st.err) < 0.15;
+      // --- proportional control via continuous axes injection ---
+      // steerU (+ = left) from geometric pure-pursuit; throttle proportional
+      // to the speed deficit. inject([], {lx, ly}): axes.x = lx (steer =
+      // -axes.x·maxSteer ⇒ lx = -steerU), axes.y = -ly, throttle = -axes.y
+      // ⇒ ly = -throttleCmd. Verified empirically in-probe.
+      // Full lock for large errors: the geometric formula has a singularity
+      // at err≈π (sin π = 0 ⇒ no steering when facing exactly away).
+      const steerMag = Math.abs(st.err) > 1.0 ? 1 : Math.abs(st.steerU);
+      const steerU = Math.sign(st.err) * steerMag;
+      const throttleCmd = Math.max(0, Math.min(1, (target - st.speed) * 0.25));
+      const lx = -steerU;
+      const ly = -throttleCmd;
+      const brakeActs = brakeZone ? ['brake'] : [];
+      await page.evaluate(
+        ([a, x, y]) => (window as any).__XANDRIA__.engine.input.inject(a, { lx: x, ly: y }),
+        [brakeActs, lx, ly] as const,
+      );
+
+      // wrong-way recovery: pure-pursuit already steers the car around
+      // (err≈π saturates steerU); note on the 3rd consecutive tick
+      if (st.wrongWay) {
+        ctx.data.wrongStreak = (ctx.data.wrongStreak as number) + 1;
+        ctx.data.wrongWayTotal = (ctx.data.wrongWayTotal as number) + 1;
+        if ((ctx.data.wrongStreak as number) === 3) {
+          ctx.notes.push(`wrong-way driving at frame ${snap.frame} (playerT=${st.playerT.toFixed(2)}) — steering to turn around`);
+        }
+      } else {
+        ctx.data.wrongStreak = 0;
+      }
+
+      // position trail for post-run analysis (every ~30 s wall)
       if (tickIdx % 75 === 0) {
-        ctx.notes.push(`trail f${snap.frame} pos=(${p.x.toFixed(1)},${p.z.toFixed(1)}) yaw=${p.yaw.toFixed(2)}`);
+        ctx.notes.push(
+          `trail f${snap.frame} pos=(${st.px.toFixed(1)},${st.pz.toFixed(1)}) ` +
+          `spd=${st.speed.toFixed(1)} t=${st.playerT.toFixed(2)} dCp=${st.distToCp.toFixed(0)}m ` +
+          `err=${st.err.toFixed(2)} curve=${st.curveAhead.toFixed(2)} aiD=${st.aiD.toFixed(0)}m` +
+          `${st.wrongWay ? ' WRONGWAY' : ''}`);
       }
       // Stuck detection is WALL-CLOCK based, matching the softlock assertion's
-      // 20 s wall windows. A frame-count detector is unusable here: at
-      // ~0.2 fps, 12 rendered frames ≈ 60 s wall, so every crash would sit
-      // through 2-3 softlock windows before the reset fired. Instead: if the
-      // car moved <1 m in the last ~12 s wall AND the sim advanced ≥2 frames
-      // in that span (don't conclude "stuck" across a render stall) AND ≥3
-      // frames elapsed since the last reset (post-respawn acceleration grace),
-      // tap reset.
-      const STUCK_MS = 12_000;
+      // 20 s wall windows. 5 s: a pinned car must be reset fast — a slow
+      // U-turn pin was eating whole 20 s windows even with 8 s detection.
+      // 5 s ≈ 3 frames; a healthy car covers 15+ m in that time, so <1 m is
+      // unambiguous. False positives just cost a reset (safe respawn).
+      const STUCK_MS = 5_000;
       const lc = ctx.data.lastCheck as { t: number; x: number; z: number; f: number } | null;
       const nowMs = Date.now();
       const lastResetF = (ctx.data.lastResetFrame as number) ?? -1e9;
       if (!lc || nowMs - lc.t >= STUCK_MS) {
         if (lc
-            && dist2(lc.x, lc.z, p.x, p.z) < 1
+            && dist2(lc.x, lc.z, st.px, st.pz) < 1
             && snap.frame - lc.f >= 2
             && snap.frame - lastResetF >= 3) {
           await tap(page, 'reset');
           ctx.data.lastResetFrame = snap.frame;
+          ctx.data.resets = (ctx.data.resets as number) + 1;
+          ctx.data.escapeUntilFrame = snap.frame + 6; // bounded reverse-out window
+          ctx.data.resetPos = null; // captured on the next tick (post-respawn)
           ctx.notes.push(`stuck (<1m in ${STUCK_MS / 1000}s wall) — tapped 'reset' at frame ${snap.frame}`);
         }
-        ctx.data.lastCheck = { t: nowMs, x: p.x, z: p.z, f: snap.frame };
+        ctx.data.lastCheck = { t: nowMs, x: st.px, z: st.pz, f: snap.frame };
       }
       return false;
     },
@@ -404,6 +628,11 @@ function racingPolicy(): Policy {
 interface BotMetrics {
   frames: number; scoreStart: number; scoreEnd: number;
   progressStart: number; progressEnd: number; softlockWindows: number;
+  /** Racing diagnostics (populated by racingPolicy via ctx.data). */
+  checkpoints?: number; minDistToCpM?: number; maxPlayerT?: number;
+  wrongWayTicks?: number; resets?: number; steerSign?: number;
+  /** Forward meters driven along the track (wrap-aware, jumps ignored). */
+  distDrivenM?: number;
 }
 interface BotReport {
   suite: 'bots'; name: string; genre: string; passed: boolean; durationMs: number;
@@ -447,6 +676,8 @@ async function runBot(
   const ticks: TickRec[] = [];
   let snap0: lib.WorldSnapshot | null = null;
   let fatal = '';
+  const targetFrames = Number(process.env.BOT_FRAMES ?? GENRE_FRAMES[def.name] ?? TARGET_FRAMES_DEFAULT);
+  const realCapMs = Number(process.env.BOT_REAL_CAP_MS ?? GENRE_CAP_MS[def.name] ?? REAL_CAP_MS_DEFAULT);
 
   try {
     await lib.boot(page, def.intent, def.genre);
@@ -456,7 +687,7 @@ async function runBot(
     if (policy.init) await policy.init(page, ctx);
     snap0 = await lib.readWorld(page);
     notes.push(`baseline frame=${snap0.frame} score=${snap0.score} progress=${snap0.progress}`);
-    const frameTarget = snap0.frame + TARGET_FRAMES;
+    const frameTarget = snap0.frame + targetFrames;
     let i = 0;
     for (;;) {
       const snap = await lib.readWorld(page);
@@ -470,8 +701,8 @@ async function runBot(
         notes.push(`engine left 'playing' → '${snap.state}'; stopping bot`);
         break;
       }
-      if (snap.frame >= frameTarget) { notes.push(`reached ${TARGET_FRAMES} rendered frames`); break; }
-      if (now - started > REAL_CAP_MS) { notes.push('hit real-time cap; stopping bot'); break; }
+      if (snap.frame >= frameTarget) { notes.push(`reached ${targetFrames} rendered frames`); break; }
+      if (now - started > realCapMs) { notes.push('hit real-time cap; stopping bot'); break; }
       let engaging = false;
       try {
         engaging = await policy.tick(page, snap, i, ctx);
@@ -521,6 +752,16 @@ async function runBot(
     metrics: {
       frames, scoreStart: score0, scoreEnd: score1,
       progressStart: p0, progressEnd: p1, softlockWindows: lock.windows,
+      // racing diagnostics, when the policy recorded them
+      ...(typeof ctx.data.checkpoints === 'number' ? {
+        checkpoints: ctx.data.checkpoints as number,
+        minDistToCpM: ctx.data.minDistToCp as number,
+        maxPlayerT: ctx.data.maxPlayerT as number,
+        wrongWayTicks: ctx.data.wrongWayTotal as number,
+        resets: ctx.data.resets as number,
+        steerSign: ctx.data.leftSign as number,
+        distDrivenM: Math.round(ctx.data.distDrivenM as number),
+      } : {}),
     },
     errors: cap.errors,
     notes,
@@ -538,7 +779,7 @@ const POLICIES: Record<string, () => Policy> = {
 
 for (const g of lib.GENRES) {
   test(`bot ${g.name}: ${g.genre} playthrough`, async ({ page }) => {
-    test.setTimeout(15 * 60 * 1000);
+    test.setTimeout((GENRE_TIMEOUT_MIN[g.name] ?? 15) * 60 * 1000);
     const report = await runBot(page, g, POLICIES[g.name]);
     mkdirSync(RESULTS_DIR, { recursive: true });
     writeFileSync(join(RESULTS_DIR, `bots-${g.name}.json`), JSON.stringify(report, null, 2) + '\n');

@@ -221,9 +221,12 @@ describe('Weather quality scaling + genre mood', () => {
 });
 
 describe('Grass', () => {
-  function buildTerrain(env: string): { terrain: Terrain; spec: any; scene: THREE.Scene } {
+  function buildTerrain(env: string, biomeId?: string): { terrain: Terrain; spec: any; scene: THREE.Scene } {
     const spec: any = generateSpec('a heroic knight adventure', { seed: 99 });
     spec.theme.environment = env;
+    if (biomeId) {
+      spec.custom = { ...(spec.custom ?? {}), biome: { ...(spec.custom?.biome ?? {}), biomeId } };
+    }
     const physics = new Physics(spec.world.gravity);
     const mats = new MaterialLibrary(spec);
     const scene = new THREE.Scene();
@@ -231,22 +234,24 @@ describe('Grass', () => {
     return { terrain, spec, scene };
   }
 
-  it('forest at high has more tufts than retro, none for neon-city', () => {
-    const h = buildTerrain('forest');
+  it('forest at high has more tufts than retro, none for volcanic', () => {
+    // biomes pinned via the Studio override: grass density is biome-driven
+    // (workstream C), not environment-driven
+    const h = buildTerrain('forest', 'forest');
     const gHigh = new Grass(h.spec, h.terrain, h.scene, { quality: 'high' });
-    const r = buildTerrain('forest');
+    const r = buildTerrain('forest', 'forest');
     const gRetro = new Grass(r.spec, r.terrain, r.scene, { quality: 'retro' });
     expect(gHigh.count).toBeGreaterThan(gRetro.count);
     expect(gRetro.count).toBeGreaterThan(0);
-    const c = buildTerrain('neon-city');
-    const gCity = new Grass(c.spec, c.terrain, c.scene, { quality: 'high' });
-    expect(gCity.count).toBe(0);
+    const v = buildTerrain('volcanic', 'volcanic');
+    const gVolc = new Grass(v.spec, v.terrain, v.scene, { quality: 'high' });
+    expect(gVolc.count).toBe(0);
   });
 
-  it('desert is sparse vs forest (same tier)', () => {
-    const f = buildTerrain('forest');
+  it('desert-canyon is sparse vs forest (same tier)', () => {
+    const f = buildTerrain('forest', 'forest');
     const gf = new Grass(f.spec, f.terrain, f.scene, { quality: 'standard' });
-    const d = buildTerrain('desert');
+    const d = buildTerrain('desert', 'desert-canyon');
     const gd = new Grass(d.spec, d.terrain, d.scene, { quality: 'standard' });
     expect(gd.count).toBeGreaterThan(0);
     expect(gd.count).toBeLessThan(gf.count);

@@ -3,6 +3,7 @@
  * props cost one draw call each. Placement respects slope, water and exclusion zones (spawn, track).
  */
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import type { Terrain } from './Terrain';
@@ -10,6 +11,7 @@ import type { MaterialLibrary } from '../gfx/Materials';
 import { GROUP, type Physics } from '../core/Physics';
 import { Vegetation } from './Vegetation';
 import { Grass } from './Grass';
+import { resolveBiomeDef, effectiveScatter, type BiomeDef } from './Biomes';
 import type { Engine } from '../Engine';
 
 export interface ScatterOptions {
@@ -25,7 +27,7 @@ export interface ScatterOptions {
   heroExclusion?: Array<{ x: number; z: number; r: number }>;
 }
 
-interface InstanceSet { mesh: THREE.InstancedMesh; positions: THREE.Vector3[]; radius: number }
+interface InstanceSet { mesh: THREE.InstancedMesh; positions: THREE.Vector3[]; radius: number; tag: 'base' | 'genre-hero' | 'biome' }
 
 const _camTmp = new THREE.Vector3();
 
@@ -77,7 +79,7 @@ export class Scatter {
     const addSet = (
       geo: THREE.BufferGeometry, mat: THREE.Material, count: number,
       scaleFn: () => THREE.Vector3, collideR: number, yOff: number | (() => number) = 0, physical = false,
-      tilt = 0, place?: () => THREE.Vector3 | null,
+      tilt = 0, place?: () => THREE.Vector3 | null, tag: 'base' | 'genre-hero' | 'biome' = 'base',
     ) => {
       if (count <= 0) return;
       const inst = new THREE.InstancedMesh(geo, mat, count);
@@ -106,20 +108,25 @@ export class Scatter {
       inst.count = placed;
       inst.instanceMatrix.needsUpdate = true;
       scene.add(inst);
-      this.sets.push({ mesh: inst, positions, radius: collideR });
+      this.sets.push({ mesh: inst, positions, radius: collideR, tag });
     };
 
     const density = sc.density;
+    // Workstream C: base-set toggles are the generator's OR'd with the
+    // biome's prop sets — a biome can ADD sets (desert cacti, arctic pines)
+    // but never removes the generator's gameplay-aware choices.
+    const biome = resolveBiomeDef(spec);
+    const eff = effectiveScatter(spec, biome);
     // trees scale with world area: ~1 per 90m² in forests, sparser elsewhere
     // (heroesOnly skips the authored base sets — the blueprint dresses the world itself)
     const heroGate = heroesOnly ? 0 : 1;
     const area = terrain.size * terrain.size;
     const perTree = env === 'forest' || env === 'jungle' ? 90
       : env === 'city' || env === 'neon-city' || env === 'arena' ? 6000 : 650;
-    const treeCount = sc.trees ? Math.min(2200, Math.round((area / perTree) * density)) * heroGate : 0;
-    const rockCount = sc.rocks ? Math.round(70 * density) * heroGate : 0;
-    const crysCount = sc.crystals ? Math.round(50 * density) * heroGate : 0;
-    const ruinCount = sc.ruins ? Math.round(24 * density) * heroGate : 0;
+    const treeCount = eff.trees ? Math.min(2200, Math.round((area / perTree) * density)) * heroGate : 0;
+    const rockCount = eff.rocks ? Math.round(70 * density) * heroGate : 0;
+    const crysCount = eff.crystals ? Math.round(50 * density) * heroGate : 0;
+    const ruinCount = eff.ruins ? Math.round(24 * density) * heroGate : 0;
 
     // trees: full vegetation system — species per environment, LOD tiers, GPU wind
     if (treeCount > 0) {
@@ -185,6 +192,12 @@ export class Scatter {
     }
 
     this.scatterHeroes(spec, terrain, mats, rng, addSet, heroTryPlace, quality, density, half);
+    // Workstream C: per-biome hero prop sets (instanced, quality-scaled,
+    // baked — no per-frame cost). Skipped under heroesOnly: a blueprint that
+    // dresses the world itself gets genre heroes only, like the base sets.
+    if (!heroesOnly) {
+      this.scatterBiomeProps(biome, mats, rng, addSet, heroTryPlace, quality, density);
+    }
   }
 
   /**
@@ -200,7 +213,8 @@ export class Scatter {
     rng: Rng,
     addSet: (geo: THREE.BufferGeometry, mat: THREE.Material, count: number,
       scaleFn: () => THREE.Vector3, collideR: number, yOff?: number | (() => number),
-      physical?: boolean, tilt?: number, place?: () => THREE.Vector3 | null) => void,
+      physical?: boolean, tilt?: number, place?: () => THREE.Vector3 | null,
+      tag?: 'base' | 'genre-hero' | 'biome') => void,
     tryPlace: (r: number) => THREE.Vector3 | null,
     quality: 'retro' | 'standard' | 'high', density: number, half: number,
   ) {
@@ -222,7 +236,7 @@ export class Scatter {
       scaleFn: () => THREE.Vector3, collideR: number, yOff: number | (() => number) = 0,
       physical = false, tilt = 0, place?: () => THREE.Vector3 | null,
     ) => addSet(geo, mat, count, scaleFn, collideR, yOff, physical, tilt,
-      place ?? (() => tryPlace(collideR)));
+      place ?? (() => tryPlace(collideR)), 'genre-hero');
 
     if (genre === 'third-person-action') {
       // weathered standing stones, tilted with age
@@ -284,6 +298,113 @@ export class Scatter {
       clampFootprint(py, 8);
       hAddSet(py, mats.glow(pal.accent, 2.0), hCount(20),
         () => new THREE.Vector3(1, rng.range(0.9, 1.2), 1), 0.5, 1.7, false);
+    }
+  }
+
+  /**
+   * Workstream C: per-biome hero prop sets. Every set is one InstancedMesh
+   * (one draw call), seeded placement, terrain-grounded, quality-scaled
+   * counts (high 1.0 / standard 0.6 / retro 0.35), baked at build time — no
+   * per-frame updates. Materials come from the MaterialLibrary cache
+   * (shared). The amber lantern posts run in every biome: they are the
+   * signature AMBER glow motif from the art-direction refs.
+   */
+  private scatterBiomeProps(
+    biome: BiomeDef, mats: MaterialLibrary,
+    rng: Rng,
+    addSet: (geo: THREE.BufferGeometry, mat: THREE.Material, count: number,
+      scaleFn: () => THREE.Vector3, collideR: number, yOff?: number | (() => number),
+      physical?: boolean, tilt?: number, place?: () => THREE.Vector3 | null,
+      tag?: 'base' | 'genre-hero' | 'biome') => void,
+    tryPlace: (r: number) => THREE.Vector3 | null,
+    quality: 'retro' | 'standard' | 'high', density: number,
+  ) {
+    const qMul = quality === 'high' ? 1 : quality === 'standard' ? 0.6 : 0.35;
+    const bCount = (base: number) => Math.max(0, Math.round(base * density * qMul));
+    const bAddSet = (
+      geo: THREE.BufferGeometry, mat: THREE.Material, count: number,
+      scaleFn: () => THREE.Vector3, collideR: number, yOff: number | (() => number) = 0,
+      physical = false, tilt = 0,
+    ) => addSet(geo, mat, count, scaleFn, collideR, yOff, physical, tilt,
+      () => tryPlace(collideR), 'biome');
+
+    // Signature motif, every biome: amber lantern posts (post + orb merged to
+    // a single geometry — one draw call). Sparse — they mark ruin approaches.
+    {
+      const post = new THREE.CylinderGeometry(0.09, 0.12, 2.4, 6);
+      post.translate(0, 1.2, 0);
+      const orb = new THREE.SphereGeometry(0.22, 8, 6);
+      orb.translate(0, 2.55, 0);
+      const g = mergeGeometries([post, orb]);
+      bAddSet(g, mats.glow('#ffb43c', 2.0), bCount(14),
+        () => new THREE.Vector3(1, rng.range(0.9, 1.15), 1), 0.35, 0, false);
+    }
+
+    const id = biome.id;
+    if (id === 'desert-canyon') {
+      // sandstone fins, tilted by the wind
+      bAddSet(new THREE.BoxGeometry(0.7, 5, 2.2),
+        mats.standard('rock', '#b06a3c', { roughness: 1 }), bCount(22),
+        () => { const s = rng.range(0.7, 1.5); return new THREE.Vector3(s, s * rng.range(0.8, 1.3), s); },
+        0.8, 1.6, true, 0.16);
+    } else if (id === 'forest') {
+      // fallen logs
+      const log = new THREE.CylinderGeometry(0.32, 0.4, 4.2, 7);
+      log.rotateZ(Math.PI / 2);
+      bAddSet(log, mats.standard('wood', '#5a4230', { roughness: 1 }), bCount(14),
+        () => { const s = rng.range(0.8, 1.3); return new THREE.Vector3(s, s, s); },
+        1.0, 0.35, true);
+      // amber glowcaps on the forest floor
+      bAddSet(new THREE.SphereGeometry(0.3, 8, 6),
+        mats.glow('#ffb43c', 1.2), bCount(22),
+        () => new THREE.Vector3(rng.range(0.7, 1.6), rng.range(0.6, 1), rng.range(0.7, 1.6)),
+        0, 0.1, false);
+    } else if (id === 'snow') {
+      // ice shards, faint blue sheen
+      bAddSet(new THREE.OctahedronGeometry(0.9, 0),
+        mats.flat('#bfe0ff', { roughness: 0.25, metalness: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.35 }),
+        bCount(24),
+        () => { const s = rng.range(0.6, 1.8); return new THREE.Vector3(s * 0.6, s, s * 0.6); },
+        0.5, 0.4, false, 0.2);
+    } else if (id === 'volcanic') {
+      // basalt columns
+      bAddSet(new THREE.CylinderGeometry(0.55, 0.7, 5, 6),
+        mats.standard('rock', '#2a2522', { roughness: 1 }), bCount(24),
+        () => { const s = rng.range(0.7, 1.4); return new THREE.Vector3(s, s * rng.range(0.7, 1.2), s); },
+        0.8, 1.5, true, 0.08);
+      // ember vents, half-buried
+      bAddSet(new THREE.SphereGeometry(0.4, 8, 6),
+        mats.glow('#ff7a2e', 2.2), bCount(16),
+        () => new THREE.Vector3(rng.range(0.8, 1.4), 0.6, rng.range(0.8, 1.4)),
+        0, 0.05, false);
+    } else if (id === 'coastline') {
+      // pier pilings
+      bAddSet(new THREE.CylinderGeometry(0.22, 0.26, 3.2, 7),
+        mats.standard('wood', '#6a5a44', { roughness: 1 }), bCount(18),
+        () => new THREE.Vector3(1, rng.range(0.8, 1.2), 1), 0.5, 1.0, true);
+      // driftwood
+      const dw = new THREE.CylinderGeometry(0.25, 0.32, 3.6, 7);
+      dw.rotateZ(Math.PI / 2);
+      bAddSet(dw, mats.standard('wood', '#8a7a64', { roughness: 1 }), bCount(12),
+        () => { const s = rng.range(0.8, 1.4); return new THREE.Vector3(s, s, s); },
+        0.8, 0.3, true, 0.1);
+    } else if (id === 'caves') {
+      // stalagmites
+      bAddSet(new THREE.ConeGeometry(0.7, 3.4, 7),
+        mats.standard('rock', '#2a3438', { roughness: 1 }), bCount(26),
+        () => { const s = rng.range(0.7, 1.6); return new THREE.Vector3(s, s, s); },
+        0.7, 1.0, true);
+      // teal glow crystals
+      bAddSet(new THREE.OctahedronGeometry(0.55, 0),
+        mats.glow('#59d8ff', 1.6), bCount(22),
+        () => { const s = rng.range(0.6, 1.5); return new THREE.Vector3(s * 0.7, s, s * 0.7); },
+        0, 0.3, false);
+    } else {
+      // plains: waystones
+      bAddSet(new THREE.BoxGeometry(0.9, 2.2, 0.6),
+        mats.standard('rock', '#8a8578', { roughness: 1 }), bCount(16),
+        () => { const s = rng.range(0.8, 1.3); return new THREE.Vector3(s, s, s); },
+        0.6, 0.7, true, 0.12);
     }
   }
 

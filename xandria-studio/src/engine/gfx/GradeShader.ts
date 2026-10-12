@@ -5,6 +5,26 @@
  * Runs after bloom on standard/high tiers only — retro keeps its own shader.
  * Per-genre parameters ride the GenreGrade system (GenreGrade.grade).
  *
+ * This pass is ALWAYS the last pass in the chain when present (PostFX adds it
+ * after bloom and never adds anything after it), so it also performs the
+ * output transform: ACES tone mapping (via renderer.toneMappingExposure, which
+ * Engine sets to the per-genre sky.exposure every frame) + sRGB encoding.
+ *
+ * D1 root-cause fix (fog/sky overexposure): in three r152+, tone mapping and
+ * output color-space conversion apply ONLY when rendering to the screen through
+ * materials that include the tonemapping/colorspace chunks (WebGLPrograms sets
+ * toneMapping=NoToneMapping for any non-null render target). The chain renders
+ * the scene into a HalfFloat target, so without these includes the pass wrote
+ * linear HDR values straight to the canvas: the Preetham horizon band
+ * (linear ~1.36-1.71) and bright fog colors clipped straight to white, and the
+ * per-genre exposure tuning was silently dead on standard/high. The beauty
+ * wave's mitigations (sky shader x0.45-0.55, fogLuminance<1, bloom threshold
+ * 1.0) pushed values below the clip point, but ACES is what makes
+ * overexposure structurally impossible — highlights now roll off instead of
+ * clipping. No new passes, no new uniforms; the WebGLProgram prefix already
+ * injects the tone-mapping/colorspace pars + the live toneMappingExposure
+ * uniform for screen passes, so shader cost is unchanged.
+ *
  * Cost: one fullscreen pass, ~1-2% GPU on the mobile floor.
  */
 import * as THREE from 'three';
@@ -46,6 +66,13 @@ export const GradeShader = {
       vec2 q = vUv - vec2(0.5);
       c *= clamp(1.0 - dot(q, q) * vignette, 0.0, 1.0);
       gl_FragColor = vec4(c, 1.0);
+      // D1: output transform — ACES tone mapping (uses the live
+      // renderer.toneMappingExposure = per-genre sky.exposure) + sRGB encode.
+      // This pass is always last, so these chunks resolve against the screen
+      // (TONE_MAPPING defined, outputColorSpace = sRGB). Highlights roll off
+      // instead of clipping to white.
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
     }
   `,
 };

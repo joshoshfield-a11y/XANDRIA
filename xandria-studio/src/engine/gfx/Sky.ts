@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
-import { gradeAtmosphere } from './GenreGrade';
+import { gradeAtmosphere, type BiomeDefLike } from './GenreGrade';
 import { LightLife } from './LightLife';
 import { Rng } from '../core/Rng';
 
@@ -24,7 +24,17 @@ export interface SkyRig {
   dispose(): void;
 }
 
-export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' | 'standard' | 'high' = 'retro'): SkyRig {
+export function createSky(
+  spec: GameSpec,
+  scene: THREE.Scene,
+  quality: 'retro' | 'standard' | 'high' = 'retro',
+  /**
+   * Biome override for the atmosphere grade. Defaults to spec.theme.environment.
+   * Workstream C seam: pass its BiomeDef here once Biomes.ts lands — the
+   * BiomeDefLike fogColor/fogDensity/waterTint wire through automatically.
+   */
+  biome?: string | BiomeDefLike | null,
+): SkyRig {
   const { palette, timeOfDay, weather, environment } = spec.theme;
   const group = new THREE.Group();
   const top = new THREE.Color(palette.sky);
@@ -33,7 +43,9 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
   // Beauty wave: per-genre atmosphere grade (exposure, fog, lights, clouds).
   // Night grades to identity — the night visibility floor must not regress.
-  const grade = gradeAtmosphere(spec.meta.genre, timeOfDay);
+  // Graphics wave D2: the biome id layers per-biome cinematic dusk grading
+  // over the genre grade (BiomeDefLike seam in GenreGrade).
+  const grade = gradeAtmosphere(spec.meta.genre, timeOfDay, biome ?? spec.theme.environment);
   if (night) { top.multiplyScalar(0.25); bottom.multiplyScalar(0.35); }
   if (dusk) { bottom.lerp(new THREE.Color('#ff9a5c'), 0.45); top.multiplyScalar(0.7); }
 
@@ -70,21 +82,39 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
     group.add(dome);
   }
 
-  // Clouds: a few flat translucent discs drifting
+  // Clouds: a few flat translucent discs drifting.
   // FIX: seeded RNG (was Math.random) so world generation is fully deterministic.
+  // Draw-call diet (graphics follow-up, worker D): one InstancedMesh of a unit
+  // circle instead of one Mesh per cloud (10–26 draws → 1). The per-cloud
+  // radius w and squash sy are baked into the instance matrix as scale
+  // (w, w·sy, w) under the same -90° X rotation — vertex-for-vertex identical
+  // to the old per-mesh path (see derivation in the D handoff). The cloudGroup
+  // drift still applies — instances are static relative to their group.
   const rng = new Rng(spec.meta.seed ^ 0xc10d5);
   const cloudGroup = new THREE.Group();
+  let cloudMesh: THREE.InstancedMesh | null = null;
   if (weather !== 'clear' || environment !== 'space-station') {
     const cm = new THREE.MeshBasicMaterial({ color: night ? '#3a4460' : grade.cloudColor, transparent: true, opacity: (weather === 'storm' ? 0.85 : 0.55) * grade.clouds, depthWrite: false, fog: false });
     const count = weather === 'clear' ? 10 : 26;
+    cloudMesh = new THREE.InstancedMesh(new THREE.CircleGeometry(1, 12), cm, count);
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+    const pos = new THREE.Vector3();
+    const scl = new THREE.Vector3();
     for (let i = 0; i < count; i++) {
+      // rng sequence identical to the old per-mesh path: w, x, y, z, squash
       const w = 60 + rng.range(0, 120);
-      const c = new THREE.Mesh(new THREE.CircleGeometry(w, 12), cm);
-      c.rotation.x = -Math.PI / 2;
-      c.position.set(rng.range(-700, 700), 180 + rng.range(0, 80), rng.range(-700, 700));
-      c.scale.set(1, 0.5 + rng.next(), 1);
-      cloudGroup.add(c);
+      pos.set(rng.range(-700, 700), 180 + rng.range(0, 80), rng.range(-700, 700));
+      const sy = 0.5 + rng.next();
+      scl.set(w, w * sy, w);
+      m4.compose(pos, q, scl);
+      cloudMesh.setMatrixAt(i, m4);
     }
+    cloudMesh.instanceMatrix.needsUpdate = true;
+    cloudMesh.castShadow = false;
+    cloudMesh.receiveShadow = false;
+    cloudMesh.computeBoundingSphere();
+    cloudGroup.add(cloudMesh);
   }
   group.add(cloudGroup);
 
@@ -114,12 +144,15 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
 
   // Fog — density and luminance graded per genre so backgrounds hold detail
   // instead of blowing out to white (night keeps the 0.35 darkening, grade is identity).
-  const fogColor = new THREE.Color(palette.fog);
+  // D2: a BiomeDefLike fog color/density (workstream C's BiomeDef) overrides the
+  // palette/weather-derived values when present.
+  const fogColor = new THREE.Color(grade.biomeFog ?? palette.fog);
   if (night) fogColor.multiplyScalar(0.35);
   fogColor.multiplyScalar(grade.fogLuminance);
   // Env-art dusk preset: warm amber haze — the reference vistas are ALL dusk.
   if (grade.fogTint) fogColor.lerp(new THREE.Color(grade.fogTint), 0.35);
-  const density = (weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035) * grade.fogDensity;
+  const density = grade.biomeFogDensity
+    ?? (weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035) * grade.fogDensity;
   scene.fog = new THREE.FogExp2(fogColor.getHex(), density);
   scene.background = fogColor;
 
@@ -145,6 +178,12 @@ export function createSky(spec: GameSpec, scene: THREE.Scene, quality: 'retro' |
       sun.target.position.copy(target);
       sun.target.updateMatrixWorld();
     },
-    dispose() { scene.remove(group); dome.geometry.dispose(); if (skyMat) skyMat.dispose(); if (atmo) atmo.dispose(); },
+    dispose() {
+      scene.remove(group);
+      dome.geometry.dispose();
+      if (cloudMesh) { cloudMesh.geometry.dispose(); cloudMesh.dispose(); }
+      if (skyMat) skyMat.dispose();
+      if (atmo) atmo.dispose();
+    },
   };
 }

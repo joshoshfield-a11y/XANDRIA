@@ -9,6 +9,7 @@ import { Rng } from '../core/Rng';
 import { GROUP, type Physics } from '../core/Physics';
 import type { MaterialLibrary } from '../gfx/Materials';
 import type { Terrain } from './Terrain';
+import { resolveBiomeDef } from './Biomes';
 import { placeLandmarks, type LandmarkOpts, type LandmarkResult, type LandmarkKind } from '../gfx/Landmarks';
 
 export class Structures {
@@ -96,12 +97,12 @@ export class Structures {
   }
 
   /**
-   * Environment art-direction pass: place the per-environment landmark mix
-   * (beam towers, ruin arches, bridges) from gfx/Landmarks. Density follows
-   * the environment table (desert→canyon arches, plains→ruin fields,
-   * volcanic→beam towers, islands→bridges) scaled by the quality tier;
-   * `kinds` overrides individual counts. Adds static physics colliders for
-   * each landmark. Returns the placement report.
+   * Environment art-direction pass: 1–3 seeded landmarks per world
+   * (beam towers, ruin arches, bridges) from gfx/Landmarks. Kinds follow the
+   * environment mix × genre bias (desert→arches, volcanic→towers,
+   * racing→bridges, …); every landmark registers instanced amber rune strips
+   * + lamp posts. `kinds` forces explicit per-kind counts. Adds static
+   * physics colliders for each landmark. Returns the placement report.
    *
    * Blueprint hook: `structures.landmarks(spec, terrain, scene, seed, {
    *   exclusion: [...] })` — one line, right after Scatter.
@@ -115,6 +116,10 @@ export class Structures {
     const rng = new Rng((seed ^ 0x1a4d) >>> 0);
     const pal = spec.theme.palette;
     const t = spec.world.terrain;
+    // Workstream C: the biome's authored landmark mix is the default `kinds`
+    // (desert canyons → arches, volcanic → beam towers, coastline → bridges);
+    // an explicit opts.kinds still wins.
+    const biome = resolveBiomeDef(spec);
     const landmarkOpts: LandmarkOpts = {
       mats: this.mats,
       pal: { primary: pal.primary, secondary: pal.secondary, accent: pal.accent, rock: pal.rock, ground: pal.ground },
@@ -124,7 +129,7 @@ export class Structures {
       quality: opts.quality,
       half: terrain.size / 2 - 12,
       exclusion: opts.exclusion,
-      kinds: opts.kinds,
+      kinds: opts.kinds ?? biome.landmarks,
       waterLevel: t.water ? t.waterLevel : undefined,
       maxRealLights: opts.maxRealLights,
       addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },

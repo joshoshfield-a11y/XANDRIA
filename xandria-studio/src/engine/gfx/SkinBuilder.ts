@@ -98,6 +98,26 @@ export class SkinBuilder {
     return this;
   }
 
+  /**
+   * Voxel armor set id rendered on the rig when the skin is applied
+   * (a built-in VOXEL_ARMOR_SET_IDS id, or a custom id registered at runtime
+   * and passed to validateSpec via ValidateSpecOptions.customArmorSets).
+   * The 4 art-direction sets: nomad, raider, guardian, scout.
+   */
+  armor(setId: string): this {
+    this.def.armor = setId;
+    return this;
+  }
+
+  /**
+   * Emissive visor slit override on the armor helm (#rrggbb, 0..5 intensity).
+   * Only rendered when `armor` is present; overrides the set's default slit.
+   */
+  visor(color: string, intensity = 2): this {
+    this.def.visor = { color, intensity };
+    return this;
+  }
+
   /** The finished def — plain JSON-serializable object. Never throws. */
   build(): SkinDef {
     return { ...this.def, palette: this.def.palette ? { ...this.def.palette } : undefined };
@@ -184,6 +204,15 @@ export class ItemSkinBuilder {
 
   textureRoles(roles: ItemSkinRole[]): this {
     this.def.textureRoles = [...roles];
+    return this;
+  }
+
+  /**
+   * Voxel armor set id rendered when an armor-slot item carrying this skin is
+   * equipped (see engine/gfx/VoxelArmor.ts). Same id rules as SkinDef.armor.
+   */
+  armor(setId: string): this {
+    this.def.armor = setId;
     return this;
   }
 

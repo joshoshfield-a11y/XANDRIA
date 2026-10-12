@@ -198,8 +198,10 @@ describe('Scatter hero props', () => {
     const alloc = (quality: 'retro' | 'standard' | 'high') => {
       const w = buildWorld('desert racing grand prix', 42);
       const s = new Scatter(w.spec, w.terrain, w.mats, w.physics, w.scene, { quality });
-      // hero sets are appended after the base sets; racing has base rocks only
-      return s.sets.slice(1).map((set) => (set.mesh.instanceMatrix.array as Float32Array).length / 16);
+      // genre-hero sets only (base rocks + workstream-C biome sets excluded)
+      return s.sets
+        .filter((set) => set.tag === 'genre-hero')
+        .map((set) => (set.mesh.instanceMatrix.array as Float32Array).length / 16);
     };
     const retro = alloc('retro');
     const standard = alloc('standard');
@@ -236,7 +238,7 @@ describe('Scatter hero props', () => {
       heroExclusion: [{ x: 0, z: 0, r: 8 }],
       quality: 'high',
     });
-    const heroSets = s.sets.slice(1);
+    const heroSets = s.sets.filter((set) => set.tag === 'genre-hero');
     expect(heroSets.length).toBe(2);
     let inside = 0;
     for (const set of heroSets) {
@@ -272,6 +274,19 @@ describe('Scatter hero props', () => {
 });
 
 describe('Terrain patchiness', () => {
+  // Workstream C: the biome treatment blends the spec palette toward the
+  // biome's authored palette, and the auto biome rolls per seed/genre — pin
+  // the biome so these tests measure the patch mechanism, not the roll.
+  function buildPinnedWorld() {
+    const w = buildWorld('sword adventure in ancient ruins', 99);
+    w.spec.custom = { ...(w.spec.custom ?? {}), biome: { ...(w.spec.custom?.biome ?? {}), biomeId: 'plains' } };
+    const physics = new Physics(w.spec.world.gravity);
+    const mats = new MaterialLibrary(w.spec);
+    const scene = new THREE.Scene();
+    const terrain = new Terrain(w.spec, physics, mats, scene);
+    return terrain;
+  }
+
   it('vertex colors are deterministic per seed', () => {
     const w1 = buildWorld('sword adventure in ancient ruins', 99);
     const w2 = buildWorld('sword adventure in ancient ruins', 99);
@@ -282,8 +297,8 @@ describe('Terrain patchiness', () => {
   });
 
   it('patchiness adds color variation across the terrain', () => {
-    const w = buildWorld('sword adventure in ancient ruins', 99);
-    const c = w.terrain.mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+    const terrain = buildPinnedWorld();
+    const c = terrain.mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
     const arr = c.array as Float32Array;
     let min = Infinity, max = -Infinity;
     for (let i = 0; i < arr.length; i += 3) {

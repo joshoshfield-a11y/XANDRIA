@@ -8,13 +8,13 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
+import { resolveBiomeDef } from './Biomes';
 import type { Terrain } from './Terrain';
 
 // environments where ground grass reads naturally (fraction of full density)
-const GRASS_ENV: Record<string, number> = {
-  forest: 1, jungle: 1, dreamscape: 1, islands: 0.9, ruins: 0.8,
-  desert: 0.25, wasteland: 0.25, arctic: 0.2,
-};
+// Workstream C: superseded by the biome treatment's authored scatter.grass —
+// kept as documentation of the old mapping (forest/jungle/dreamscape 1,
+// islands 0.9, ruins 0.8, desert/wasteland 0.25, arctic 0.2, else 0).
 const QUALITY_COUNT = { high: 4500, standard: 2200, retro: 800 } as const;
 
 export interface GrassOptions {
@@ -32,8 +32,10 @@ export class Grass {
   get count(): number { return this._count; }
 
   constructor(spec: GameSpec, terrain: Terrain, scene: THREE.Scene, opts: GrassOptions = {}) {
-    const density = GRASS_ENV[spec.theme.environment] ?? 0;
-    if (density <= 0) return; // city / neon-city / space-station / volcanic / arena: no grass
+    // Workstream C: grass density comes from the resolved biome treatment
+    // (volcanic/caves get none; forest/coastline/plains are lush).
+    const density = resolveBiomeDef(spec).scatter.grass;
+    if (density <= 0) return; // volcanic / caves: no grass
     const quality = opts.quality ?? 'retro';
     const rng = new Rng(spec.meta.seed ^ 0x6a55);
     const target = Math.round(QUALITY_COUNT[quality] * density);

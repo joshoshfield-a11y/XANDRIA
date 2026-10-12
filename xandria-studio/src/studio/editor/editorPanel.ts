@@ -7,10 +7,11 @@
  * styling is scoped under `.xed-` to coexist with the Studio shell.
  */
 import {
-  MOODS, ENVIRONMENTS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
+  MOODS, ENVIRONMENTS, BIOME_IDS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
   CHARACTER_PIVOTS,
   type GameSpec, type ObjectiveStage, type EnemySpec, type Weapon,
   type CharacterPivot, type SkinDef, type ItemSkinDef, type ItemDef,
+  type BiomeId,
 } from '@spec';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -440,6 +441,17 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     host.appendChild(field('ENVIRONMENT', select(ENVIRONMENTS, s.theme.environment, (sp, v) => {
       sp.theme.environment = v as GameSpec['theme']['environment'];
     }, true)));
+
+    // Workstream C: biome override. Auto = resolved per seed/genre (see
+    // engine/world/Biomes.ts); picking a biome forces one of the 7 authored
+    // treatments (ground, water, flora, props, landmarks).
+    const curBiome = s.custom?.biome?.biomeId ?? 'auto';
+    host.appendChild(field('BIOME — OVERRIDE', select(['auto', ...BIOME_IDS], curBiome, (sp, v) => {
+      sp.custom = sp.custom ?? {};
+      sp.custom.biome = sp.custom.biome ?? {};
+      if (v === 'auto') delete sp.custom.biome.biomeId;
+      else sp.custom.biome.biomeId = v as BiomeId;
+    }, true), 'Auto picks the biome from seed + genre. Override forces one look.'));
 
     host.appendChild(h(`<div class="xed-ns">PALETTE — APPLY ENVIRONMENT LOOK</div>`));
     const sw = h(`<div class="xed-swatches"></div>`);
@@ -996,6 +1008,14 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
             sp.custom.items.skins = sp.custom.items.skins ?? {};
             sp.custom.items.skins[id] = def as ItemSkinDef;
           }
+        }, false);
+      },
+      // worker E: opt-in seeded auto-armor flag (custom.armor.auto)
+      onAutoArmor: (enabled) => {
+        commit((sp) => {
+          sp.custom = sp.custom ?? {};
+          sp.custom.armor = sp.custom.armor ?? {};
+          sp.custom.armor.auto = enabled;
         }, false);
       },
     });

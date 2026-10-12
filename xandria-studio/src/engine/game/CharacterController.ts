@@ -11,7 +11,7 @@ import { surfaceProps, type SurfaceProps, type SurfaceProvider } from '../physic
 import { wadingState, SplashDetector } from '../physics/Water';
 import { AnimationAdjust } from '../physics/AnimationAdjust';
 import { makeHumanoid, type CharacterRig } from '../gfx/Characters';
-import { resolveSkinDef, applySkin } from '../gfx/Skins';
+import { resolveSkinDef, applySkin, skinOptionsForSpec } from '../gfx/Skins';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { PlayerSpec } from '@spec';
 
@@ -75,7 +75,7 @@ export class CharacterController {
     // palette-derived `colors` param; an import-model URL swaps the rig async.
     const slot = engine.spec.custom?.characters?.player;
     const skinDef = resolveSkinDef(engine.spec, slot?.skin);
-    if (skinDef) applySkin(this.rig, skinDef);
+    if (skinDef) applySkin(this.rig, skinDef, skinOptionsForSpec(engine.spec));
     engine.scene.add(this.rig.group);
     if (slot?.model) void this.swapToModel(slot.model, slot.boneMap);
     engine.physics.addStepHandler((dt) => this.fixedUpdate(dt));
@@ -91,7 +91,7 @@ export class CharacterController {
     const rig = await loadRigFromURL(url, boneMap);
     if (!rig) return; // procedural fallback stands
     const skinDef = resolveSkinDef(this.engine.spec, this.engine.spec.custom?.characters?.player?.skin);
-    if (skinDef) applySkin(rig, skinDef);
+    if (skinDef) applySkin(rig, skinDef, skinOptionsForSpec(this.engine.spec));
     const old = this.rig;
     this.engine.scene.remove(old.group);
     old.dispose();

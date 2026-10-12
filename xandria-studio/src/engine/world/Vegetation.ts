@@ -10,6 +10,7 @@ import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import type { Terrain } from './Terrain';
 import type { MaterialLibrary } from '../gfx/Materials';
+import { resolveBiomeDef, effectiveScatter } from './Biomes';
 import { GROUP, type Physics } from '../core/Physics';
 
 type SpeciesId = 'pine' | 'oak' | 'palm' | 'cactus' | 'deadtree' | 'mushroom' | 'crystalflora';
@@ -201,10 +202,17 @@ export class Vegetation {
     if (opts.count <= 0) return;
     const rng = new Rng(spec.meta.seed ^ 0xbe09);
     const mix = spec.custom?.biome?.floraMix;
-    const mixed = mix ? speciesFromMix(mix) : [];
-    const species = (mixed.length > 0 ? mixed : speciesFor(spec.theme.environment)).filter((s) => {
-      // crystalflora doubles as crystal scatter; respect that toggle
-      if (s === 'crystalflora') return spec.world.scatter.crystals;
+    // Workstream C: explicit floraMix wins; otherwise the resolved biome's
+    // authored species mix; otherwise the legacy per-environment table.
+    const biome = resolveBiomeDef(spec);
+    const override = mix ? speciesFromMix(mix) : [];
+    const biomeMix = speciesFromMix(biome.flora);
+    const eff = effectiveScatter(spec, biome);
+    const species = (override.length > 0 ? override
+      : biomeMix.length > 0 ? biomeMix
+      : speciesFor(spec.theme.environment)).filter((s) => {
+      // crystalflora doubles as crystal scatter; respect the effective toggle
+      if (s === 'crystalflora') return eff.crystals;
       return true;
     });
     const excluded = (x: number, z: number, r = 0) =>
@@ -333,7 +341,13 @@ export class Vegetation {
       }
     }
     for (const t of this.tiers) {
-      t.mesh.count = counts.get(key(t)) ?? 0;
+      const n = counts.get(key(t)) ?? 0;
+      t.mesh.count = n;
+      // Draw-call diet (graphics follow-up, worker D): tiers holding zero
+      // instances draw nothing — hide them so they cost no draw call at all
+      // (main or shadow pass). Rebucket runs every 0.3s, so visibility tracks
+      // the camera.
+      t.mesh.visible = n > 0;
       t.mesh.instanceMatrix.needsUpdate = true;
     }
   }

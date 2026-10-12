@@ -10,6 +10,7 @@ import { Rng } from './core/Rng';
 import { Physics } from './core/Physics';
 import { Input } from './core/Input';
 import { AudioEngine } from './core/Audio';
+import { PerfMonitor } from './core/Perf';
 import { MaterialLibrary } from './gfx/Materials';
 import { createSky, type SkyRig } from './gfx/Sky';
 import { Particles } from './gfx/Particles';
@@ -64,6 +65,14 @@ export class Engine {
   readonly juice: Juice;
   /** modding surface: hook taps + custom enemy/upgrade registries (additive) */
   readonly hooks: Modding;
+  /**
+   * Workstream E: thin perf instrumentation for the future PerformanceManager
+   * (W3.3). Read-only counters — frame time + rolling variance, renderer.info
+   * (draw calls / triangles / geometries / textures / programs), physics step
+   * cost. Nothing here ever adapts quality (audit W0: instrumentation only).
+   * Reachable from the console as __XANDRIA__.engine.perf.
+   */
+  readonly perf = new PerfMonitor();
   sky!: SkyRig;
   terrain!: Terrain;
   assetBridge: AssetBridge;
@@ -81,6 +90,8 @@ export class Engine {
   private rafId = 0;
   private started = false;
   private resizeObs: ResizeObserver;
+  /** live perf debug overlay element (workstream E, ?perfoverlay=1); null when hidden */
+  private perfOverlayEl: HTMLElement | null = null;
   /** blueprint rebuild fn, registered by the runtime bootstrap (enables in-place restart) */
   private runBuilder: ((e: Engine) => unknown) | null = null;
   private playerAvatar: PlayerAvatar | null = null;
@@ -123,6 +134,13 @@ export class Engine {
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(container.clientWidth || innerWidth, container.clientHeight || innerHeight);
     container.appendChild(this.renderer.domElement);
+    // Workstream E (instrumentation): renderer.info resets per render call by
+    // default, which with the PostFX composer leaves only the LAST pass's
+    // counters. The documented three.js pattern for multi-pass rendering is
+    // autoReset=false + one manual reset per frame (done in step()), giving
+    // honest per-frame draw calls / triangles. (The if-guard no-ops on unit-test
+    // renderer stubs, which carry no info object.)
+    if (this.renderer.info) this.renderer.info.autoReset = false;
 
     this.camera = new THREE.PerspectiveCamera(66, (container.clientWidth || innerWidth) / (container.clientHeight || innerHeight), 0.1, 1400);
     this.physics = new Physics(spec.world.gravity);
@@ -178,6 +196,13 @@ export class Engine {
     this.physicsConstraintsBaseline = this.physics.constraintBaseline();
 
     this.state = 'ready';
+
+    // Workstream E: opt-in live perf debug overlay (?perfoverlay=1), read-only
+    // numbers for measurement runs. The typeof guard keeps headless/unit-test
+    // environments (no location global) safe.
+    if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('perfoverlay')) {
+      this.setPerfOverlayVisible(true);
+    }
 
     // cross-run progression: the seed this spec shipped with (daily runs
     // override it temporarily; toTitle()/startRun() restore it)
@@ -460,6 +485,15 @@ export class Engine {
 
   step(dt: number) {
     this.frame++;
+    // Workstream E: thin perf sampling. One branch when disabled (zero cost);
+    // when enabled: a performance.now() pair around the frame, a pair around
+    // each physics substep (summed into physicsMs), one renderer.info.reset()
+    // before the render (see the autoReset=false in the constructor) and one
+    // sample() after. No allocations anywhere in this path.
+    const perf = this.perf;
+    const sampling = perf.enabled;
+    const frameStart = sampling ? performance.now() : 0;
+    let physicsMs = 0;
     this.input.beginFrame();
     // R2-N1: snapshot the engine-level edges BEFORE the substep loop. Update
     // hooks consume edges on substep 0 only (see below), so the pause/confirm
@@ -474,7 +508,13 @@ export class Engine {
       for (let s = 0; s < substeps; s++) {
         this.time += dt;
         this.elapsed += dt;
-        this.physics.step(dt);
+        if (sampling) {
+          const ps = performance.now();
+          this.physics.step(dt);
+          physicsMs += performance.now() - ps;
+        } else {
+          this.physics.step(dt);
+        }
         for (const f of this.updateHooks) f(dt);
         // edge-triggered input is consumed by the first substep only: a single
         // injected edge fires exactly once per rendered frame in testMode.
@@ -495,9 +535,49 @@ export class Engine {
     // screenshake: offset around the render only, never accumulates into the camera
     const off = this.juice.shakeOffset(this.shakeVec);
     this.camera.position.add(off);
+    if (sampling) this.renderer.info?.reset();
     this.postfx.render();
     this.camera.position.sub(off);
+    if (sampling) perf.sample(performance.now() - frameStart, physicsMs, this.renderer.info);
     this.input.endFrame();
+    if (this.perfOverlayEl !== null && this.frame % 10 === 0) this.renderPerfOverlay();
+  }
+
+  /**
+   * Workstream E: opt-in live perf debug overlay — a fixed corner div with
+   * the current perf counters, refreshed 6x/sec. Off by default; enable with
+   * ?perfoverlay=1 or setPerfOverlayVisible(true). Read-only: the overlay
+   * never changes engine behavior (no adaptive quality in this wave).
+   */
+  setPerfOverlayVisible(v: boolean) {
+    const on = this.perfOverlayEl !== null;
+    if (v === on) return;
+    if (!v) {
+      this.perfOverlayEl!.remove();
+      this.perfOverlayEl = null;
+      return;
+    }
+    const el = document.createElement('div');
+    el.id = 'xandria-perf-overlay';
+    el.style.cssText = [
+      'position:fixed', 'left:8px', 'top:8px', 'z-index:99998', 'pointer-events:none',
+      'background:rgba(0,0,0,0.72)', 'color:#7dff9a', 'font:11px/1.5 monospace',
+      'padding:6px 8px', 'border-radius:4px', 'white-space:pre',
+    ].join(';');
+    (document.body ?? this.container).appendChild(el);
+    this.perfOverlayEl = el;
+    this.renderPerfOverlay();
+  }
+
+  private renderPerfOverlay() {
+    const el = this.perfOverlayEl;
+    if (!el) return;
+    const p = this.perf;
+    el.textContent =
+      `frame ${p.frameMs.toFixed(2)}ms (±${Math.sqrt(p.frameMsVariance).toFixed(2)}) ${p.fps.toFixed(0)}fps\n` +
+      `physics ${p.physicsMs.toFixed(2)}ms\n` +
+      `draws ${p.drawCalls} tris ${(p.triangles / 1000).toFixed(1)}k\n` +
+      `geo ${p.geometries} tex ${p.textures} prog ${p.programs}`;
   }
 
   /**
@@ -633,6 +713,9 @@ export class Engine {
     this.elapsed = 0;
     this.score = 0;
     this.frame = 0;
+    // Workstream E: a rebuilt run starts a fresh measurement window — the old
+    // run's frame times must not leak into the new run's rolling variance.
+    this.perf.reset();
     this.pauseReason = null;
     this.last = performance.now();
     // cross-run progression: apply the equipped modifier loadout to this

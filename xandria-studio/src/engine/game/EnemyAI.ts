@@ -11,7 +11,7 @@ import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { GROUP, toV3 } from '../core/Physics';
 import { makeHumanoid, makeDrone, makeTurret, disposeOwned, type CharacterRig } from '../gfx/Characters';
-import { resolveSkinDef, applySkin } from '../gfx/Skins';
+import { resolveSkinDef, applySkin, skinOptionsForSpec } from '../gfx/Skins';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { EnemySpec, EnemyKind } from '@spec';
 import type { Projectiles } from './Projectiles';
@@ -98,7 +98,7 @@ export class Enemy {
       const slot = engine.spec.custom?.characters?.enemies?.[spec.kind]
         ?? engine.spec.custom?.characters?.enemies?.[buildKind];
       const skinDef = resolveSkinDef(engine.spec, slot?.skin);
-      if (skinDef) applySkin(this.rig, skinDef);
+      if (skinDef) applySkin(this.rig, skinDef, skinOptionsForSpec(engine.spec));
       engine.scene.add(this.rig.group);
       if (slot?.model) void this.swapToModel(slot.model, slot.boneMap, slot.skin);
     } else if (buildKind === 'drone' || buildKind === 'flyer') {
@@ -136,7 +136,7 @@ export class Enemy {
     const rig = await loadRigFromURL(url, boneMap);
     if (!rig || !this.alive) return; // procedural fallback stands (or died mid-load)
     const skinDef = resolveSkinDef(this.engine.spec, skinId);
-    if (skinDef) applySkin(rig, skinDef);
+    if (skinDef) applySkin(rig, skinDef, skinOptionsForSpec(this.engine.spec));
     if (this.rigScale !== 1) rig.group.scale.setScalar(this.rigScale);
     const old = this.rig;
     this.engine.scene.remove(old!.group);

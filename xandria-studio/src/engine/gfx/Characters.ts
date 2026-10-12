@@ -437,14 +437,20 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   /** lazy snapshot of group.scale so the landing squash restores exactly (enemies re-scale post-build) */
   let squashBase: THREE.Vector3 | null = null;
 
+  // Follow-up wave A: limbs is a named binding (not an inline literal) so
+  // animate() can read rig.limbs.cape LIVE each frame. Voxel capes applied
+  // after construction register their segment pivots there and ride the same
+  // speed + noise cloth math as the polish-wave cape — no second animation path.
+  const limbs: CharacterRig['limbs'] = {
+    legL: legL.hip, legR: legR.hip, armL: armL.shoulder, armR: armR.shoulder,
+    torso, head, weaponMount: armR.shoulder,
+    elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee, joints,
+    ...(capeSegs.length ? { cape: capeSegs } : {}),
+  };
+
   return {
     group,
-    limbs: {
-      legL: legL.hip, legR: legR.hip, armL: armL.shoulder, armR: armR.shoulder,
-      torso, head, weaponMount: armR.shoulder,
-      elbowL: armL.elbow, elbowR: armR.elbow, kneeL: legL.knee, kneeR: legR.knee, joints,
-      ...(capeSegs.length ? { cape: capeSegs } : {}),
-    },
+    limbs,
     swing() { atkT = 1; },
     animate(t, speed, opts: AnimateOpts = {}) {
       const k = Math.min(1, speed / 6);
@@ -541,11 +547,17 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
           if (!squashBase) squashBase = group.scale.clone();
           group.scale.set(squashBase.x * (1 + 0.55 * sq), squashBase.y * (1 - sq), squashBase.z * (1 + 0.55 * sq));
         } else if (squashBase) { group.scale.copy(squashBase); squashBase = null; }
-        // CLOTH: cape segments trail with speed and flutter on two detuned sines
-        if (capeSegs.length) {
+        // CLOTH: cape segments trail with speed and flutter on two detuned sines.
+        // The segment array is read LIVE from limbs.cape (falling back to the
+        // construction-time chain): a voxel cape registered post-construction
+        // rides the exact same math as the polish-wave cape — it is driven
+        // here, never by a second animation path. Turning follows automatically:
+        // the chain hangs off the torso pivot, so group/torso rotation carries it.
+        const cloth = limbs.cape ?? capeSegs;
+        if (cloth.length) {
           const wob = 0.3 + k;
-          for (let i = 0; i < capeSegs.length; i++) {
-            const cg = capeSegs[i];
+          for (let i = 0; i < cloth.length; i++) {
+            const cg = cloth[i];
             cg.rotation.x = 0.12 + 0.10 * k * (i + 1)
               + Math.sin(t * 6.3 + i * 1.9) * 0.045 * wob
               + Math.sin(t * 11.7 + i * 0.7) * 0.028 * wob;

@@ -30,7 +30,31 @@ import {
   SKIN_TEXTURE_ROLES,
 } from '@spec';
 import type { CharacterRig } from './Characters';
-import { applyVoxelArmor, clearVoxelArmor, resolveVoxelArmorSet } from './VoxelArmor';
+import { applyVoxelArmor, clearVoxelArmor, resolveVoxelArmorSet, pickVoxelArmorSetId } from './VoxelArmor';
+
+/** Options for applySkin's opt-in seeded auto-armor (graphics follow-up, worker E). */
+export interface ApplySkinOptions {
+  /**
+   * Opt-in (spec flag `custom.armor.auto`): when true and `seed` is an
+   * integer, a skin with no explicit `armor` renders the deterministic set
+   * from pickVoxelArmorSetId(seed). Absent/false → legacy path, byte-identical
+   * to the pre-flag behavior (legacy skins render armor-free).
+   */
+  autoArmor?: boolean;
+  seed?: number;
+}
+
+/**
+ * Build the ApplySkinOptions for a spec: reads the opt-in flag
+ * (`custom.armor.auto`) and the spec seed. The flag is strict — only the
+ * boolean `true` enables auto-armor.
+ */
+export function skinOptionsForSpec(spec: GameSpec | undefined): ApplySkinOptions {
+  return {
+    autoArmor: spec?.custom?.armor?.auto === true,
+    seed: typeof spec?.meta?.seed === 'number' ? spec.meta.seed : undefined,
+  };
+}
 
 export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   default: {
@@ -365,8 +389,21 @@ const VALID_TEX_ROLES: readonly string[] = SKIN_TEXTURE_ROLES;
 /**
  * Apply a skin to a rig. Mutates only owned, role-tagged materials — shared
  * library materials are never touched (verified by unit test). Never throws.
+ *
+ * Voxel armor (art-direction pass): a skin naming an armor set renders the
+ * set's boxy shells automatically; the skin's visor overrides the set's
+ * default slit color. Skins without `armor` render exactly as before and
+ * strip any skin-origin armor (a re-skin is a full look change); item-origin
+ * armor from equipped gear is left alone. No-op on rigs without pivots
+ * (e.g. imported GLB rigs — the roles.size === 0 early return above).
+ *
+ * Seeded auto-armor (graphics follow-up, worker E): with `opts.autoArmor`
+ * true and a valid `opts.seed`, a skin with NO explicit `armor` picks a set
+ * deterministically via pickVoxelArmorSetId(seed) instead of rendering
+ * armor-free. An explicit `skin.armor` always wins over auto. With the flag
+ * absent/false the legacy path is byte-identical to the pre-flag behavior.
  */
-export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef): void {
+export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef, opts?: ApplySkinOptions): void {
   try {
     const roles = roleMaterials(rig.group);
     if (roles.size === 0) return; // e.g. an imported GLB rig — skins are procedural-only
@@ -418,11 +455,19 @@ export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef): void {
 
     // Voxel armor (art-direction pass): a skin naming an armor set renders the
     // set's boxy shells automatically; the skin's visor overrides the set's
-    // default slit color. Skins without `armor` render exactly as before and
-    // strip any skin-origin armor (a re-skin is a full look change); item-origin
-    // armor from equipped gear is left alone. No-op on rigs without pivots
-    // (e.g. imported GLB rigs — the roles.size === 0 early return above).
-    const armorId = typeof skin.armor === 'string' && skin.armor ? skin.armor : undefined;
+    // default slit color. Seeded auto-armor (worker E, opt-in via
+    // custom.armor.auto): a skin with no explicit `armor` renders the
+    // deterministic set from pickVoxelArmorSetId(seed); an explicit
+    // `skin.armor` always wins. Skins without `armor` and without auto-armor
+    // render exactly as before and strip any skin-origin armor (a re-skin is
+    // a full look change); item-origin armor from equipped gear is left
+    // alone. No-op on rigs without pivots (e.g. imported GLB rigs — the
+    // roles.size === 0 early return above).
+    const explicitArmorId = typeof skin.armor === 'string' && skin.armor ? skin.armor : undefined;
+    const autoArmorId = !explicitArmorId && opts?.autoArmor === true &&
+      typeof opts.seed === 'number' && Number.isInteger(opts.seed)
+      ? pickVoxelArmorSetId(opts.seed) : undefined;
+    const armorId = explicitArmorId ?? autoArmorId;
     const cRig = rig as CharacterRig;
     if (armorId && resolveVoxelArmorSet(armorId)) {
       const visorColor = skin.visor && isHex(skin.visor.color) ? skin.visor.color : undefined;

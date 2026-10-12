@@ -16,6 +16,17 @@ export const ENVIRONMENTS = [
 ] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];
 
+/**
+ * Biome treatments (workstream C): the 7 authored biome looks. World gen
+ * resolves one per seed/genre (see engine/world/Biomes.ts); the Studio can
+ * force one via custom.biome.biomeId. Distinct from Environment (the
+ * generator's broader setting) — several environments share a biome.
+ */
+export const BIOME_IDS = [
+  'plains', 'desert-canyon', 'forest', 'snow', 'volcanic', 'coastline', 'caves',
+] as const;
+export type BiomeId = (typeof BIOME_IDS)[number];
+
 export const TIMES = ['day', 'dusk', 'night', 'dawn'] as const;
 export type TimeOfDay = (typeof TIMES)[number];
 
@@ -225,6 +236,11 @@ export interface BiomeCustom {
   heightScale?: number;       // 0..2.5 — terrain height multiplier
   waterBias?: number;         // -5..8 — water level offset
   floraMix?: Partial<Record<FloraId, number>>; // species → weight 0..10
+  /**
+   * Studio biome override (workstream C): force one of the 7 authored biome
+   * treatments. Unset = auto, resolved per seed/genre in engine/world/Biomes.
+   */
+  biomeId?: BiomeId;
 }
 export interface ForgeCustom {
   headStyle?: (typeof HEAD_STYLES)[number];
@@ -330,6 +346,15 @@ export interface CharacterSlot {
   skin?: string;
   model?: string;
   boneMap?: Partial<Record<CharacterPivot, string>>;
+}
+/**
+ * Seeded auto-armor opt-in (graphics follow-up, worker E). Lives in
+ * `custom.armor`; `auto: true` is the only way to turn it on — absent or
+ * false keeps the legacy armor-free path byte-identical.
+ */
+export interface ArmorCustom {
+  /** opt-in: pick each skin's armor set deterministically from the spec seed */
+  auto?: boolean;
 }
 export interface CharactersCustom {
   /** custom skin id → definition (merged over the built-ins at read time) */
@@ -468,6 +493,14 @@ export interface CustomSpec {
    * by validateSpec.
    */
   items?: ItemsCustom;
+  /**
+   * Opt-in seeded auto-armor (graphics follow-up, worker E): when true, skins
+   * with no explicit `armor` render a deterministic armor set picked from the
+   * spec seed via pickVoxelArmorSetId. Default / absent / false → the legacy
+   * path: legacy skins render armor-free (their tested contract). Visual
+   * only — never touches gameplay.
+   */
+  armor?: ArmorCustom;
   /** legacy operator ids (1..72) matched from the prompt vocabulary bridge. Informational only. */
   legacyOperators?: number[];
   /**
@@ -658,7 +691,7 @@ function validateStageGraph(
 
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult', 'armor'];
 
 /** Options for validateSpec. */
 export interface ValidateSpecOptions {
@@ -901,6 +934,7 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
           if (b.terrainFrequency !== undefined && !num(b.terrainFrequency, 0.3, 3)) err('custom.biome.terrainFrequency', 'must be 0.3..3');
           if (b.heightScale !== undefined && !num(b.heightScale, 0, 2.5)) err('custom.biome.heightScale', 'must be 0..2.5');
           if (b.waterBias !== undefined && !num(b.waterBias, -5, 8)) err('custom.biome.waterBias', 'must be -5..8');
+          if (b.biomeId !== undefined && !inEnum(b.biomeId, BIOME_IDS)) err('custom.biome.biomeId', `must be one of ${BIOME_IDS.join('|')}`);
           if (b.floraMix !== undefined) {
             if (!isObj(b.floraMix)) err('custom.biome.floraMix', 'must be an object');
             else for (const [k, w] of Object.entries(b.floraMix)) {
@@ -977,6 +1011,13 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
             if (o.visible !== undefined && typeof o.visible !== 'boolean') err(`${p}.visible`, 'must be boolean');
           }
         }
+      }
+      // armor — opt-in seeded auto-armor (worker E). Visual only.
+      const ar = c.armor;
+      if (ar !== undefined) {
+        if (!isObj(ar)) err('custom.armor', 'must be an object');
+        else if (ar.auto !== undefined && typeof ar.auto !== 'boolean')
+          err('custom.armor.auto', 'must be boolean');
       }
       // characters — skins + GLB import slots (workstream D+E). Visual only.
       const ch = c.characters;

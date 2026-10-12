@@ -117,6 +117,116 @@ export function makeWindowGlow(mats: MaterialLibrary, s: number): THREE.Mesh {
   return m;
 }
 
+/**
+ * Rune strip: a low amber emissive slab with dark end caps, laid on the
+ * ground around landmarks. Standalone (mesh) variant — the placement pass
+ * batches these through `Instancer` instead (one draw call for every strip).
+ */
+export function makeRuneStrip(mats: MaterialLibrary, w = 1.5, h = 0.28): THREE.Group {
+  const g = new THREE.Group();
+  const dark = mats.standard('metal', '#3a3f47', { roughness: 0.6, metalness: 0.5 });
+  const slab = mesh(new THREE.BoxGeometry(Math.max(0.2, w), Math.max(0.1, h), Math.max(0.2, w * 0.38)), amberGlowMaterial(mats, 2.6), g);
+  slab.castShadow = false;
+  for (const s of [-1, 1]) {
+    const cap = mesh(new THREE.BoxGeometry(0.16, h * 1.5, w * 0.44), dark, g);
+    cap.position.x = s * (w / 2 + 0.08);
+  }
+  return g;
+}
+
+// ---------------------------------------------------------------------------
+// Instancer — batch repeated accent geometry into shared InstancedMeshes.
+//
+// Buckets are keyed by (geometry kind, material identity, shadow flag), so
+// every rune strip / arch segment / bridge plank in a placement call lands
+// in a handful of draw calls instead of hundreds of meshes. Materials come
+// from the MaterialLibrary cache (never disposed); the unit geometries are
+// module-shared and never disposed either. Deterministic: instances bake in
+// insertion order, so the same add() sequence → the same instance matrices.
+// ---------------------------------------------------------------------------
+
+/** Module-shared unit geometries for the instancer (never disposed). */
+const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+const UNIT_SPHERE = new THREE.SphereGeometry(1, 10, 8);
+
+type InstGeoKind = 'box' | 'sphere';
+
+interface InstBucket {
+  geo: THREE.BufferGeometry;
+  mat: THREE.Material;
+  shadow: boolean;
+  matrices: THREE.Matrix4[];
+}
+
+const _pos = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _euler = new THREE.Euler();
+const _scl = new THREE.Vector3();
+
+export class Instancer {
+  private buckets = new Map<string, InstBucket>();
+  private perMaterial = new Map<THREE.Material, number>();
+
+  private push(kind: InstGeoKind, mat: THREE.Material, shadow: boolean, m: THREE.Matrix4): void {
+    const key = `${kind}:${shadow ? 1 : 0}:${(mat as THREE.Material).uuid}`;
+    let b = this.buckets.get(key);
+    if (!b) {
+      b = { geo: kind === 'box' ? UNIT_BOX : UNIT_SPHERE, mat, shadow, matrices: [] };
+      this.buckets.set(key, b);
+    }
+    b.matrices.push(m);
+    this.perMaterial.set(mat, (this.perMaterial.get(mat) ?? 0) + 1);
+  }
+
+  /** Axis-aligned-ish box (yaw only), centered at (x, y, z), scaled to (sx, sy, sz). */
+  box(mat: THREE.Material, x: number, y: number, z: number, sx: number, sy: number, sz: number, ry = 0, shadow = true): void {
+    _pos.set(x, y, z);
+    _euler.set(0, ry, 0);
+    _quat.setFromEuler(_euler);
+    _scl.set(Math.max(1e-4, sx), Math.max(1e-4, sy), Math.max(1e-4, sz));
+    this.push('box', mat, shadow, new THREE.Matrix4().compose(_pos, _quat, _scl));
+  }
+
+  /** Sphere of radius r centered at (x, y, z). Glow pieces default to no shadow. */
+  sphere(mat: THREE.Material, x: number, y: number, z: number, r: number, shadow = false): void {
+    _pos.set(x, y, z);
+    _quat.identity();
+    _scl.set(Math.max(1e-4, r), Math.max(1e-4, r), Math.max(1e-4, r));
+    this.push('sphere', mat, shadow, new THREE.Matrix4().compose(_pos, _quat, _scl));
+  }
+
+  /** Instances registered under a material — used for amber-accent accounting. */
+  countFor(mat: THREE.Material): number {
+    return this.perMaterial.get(mat) ?? 0;
+  }
+
+  /** Total instances across all buckets. */
+  get instanceCount(): number {
+    let n = 0;
+    for (const b of this.buckets.values()) n += b.matrices.length;
+    return n;
+  }
+
+  /**
+   * Bake every bucket into an InstancedMesh under `parent` and return them.
+   * The instancer is single-use: bake once, then drop it.
+   */
+  bake(parent: THREE.Group): THREE.InstancedMesh[] {
+    const out: THREE.InstancedMesh[] = [];
+    for (const b of this.buckets.values()) {
+      const im = new THREE.InstancedMesh(b.geo, b.mat, b.matrices.length);
+      for (let i = 0; i < b.matrices.length; i++) im.setMatrixAt(i, b.matrices[i]);
+      im.instanceMatrix.needsUpdate = true;
+      im.castShadow = b.shadow;
+      im.receiveShadow = true;
+      im.computeBoundingSphere(); // instances spread — default sphere would cull wrong
+      parent.add(im);
+      out.push(im);
+    }
+    return out;
+  }
+}
+
 export interface AmberScatterOpts {
   mats: MaterialLibrary;
   /** lamp post count before the quality scaler (default 10) */
@@ -153,6 +263,12 @@ function qualityScale(q: 'retro' | 'standard' | 'high'): number {
 /**
  * Scatter amber accents across the ground. Deterministic from `rng`.
  * Real lights go to the first `realLights` lamp posts (clamped to the budget).
+ *
+ * Draw-call diet (graphics follow-up, worker D): every lamp post and lantern
+ * is emitted as instances into ONE shared Instancer (4 buckets: dark boxes,
+ * amber orbs, stone boxes, amber cores → 4 draw calls) instead of one Group
+ * of ~8 meshes per lamp. The rng consumption sequence and world transforms
+ * are identical to the old mesh path, so placement is pixel-identical.
  */
 export function scatterAmberGlow(scene: THREE.Scene, rng: Rng, opts: AmberScatterOpts): AmberScatterResult {
   const group = new THREE.Group();
@@ -167,6 +283,7 @@ export function scatterAmberGlow(scene: THREE.Scene, rng: Rng, opts: AmberScatte
   const realBudget = Math.max(0, Math.min(MAX_REAL_LIGHTS, Math.round(opts.realLights ?? 0)));
 
   let lamps = 0, lanterns = 0, realLights = 0;
+  const inst = new Instancer();
   const tryPlace = (r: number): [number, number] | null => {
     for (let a = 0; a < 8; a++) {
       const x = rng.range(-half, half), z = rng.range(-half, half);
@@ -175,26 +292,64 @@ export function scatterAmberGlow(scene: THREE.Scene, rng: Rng, opts: AmberScatte
     return null;
   };
 
+  // Instanced emission mirrors makeLampPost / makeGroundLantern part for
+  // part (same materials, same shadow flags, same rng sequence) — the only
+  // difference is boxes/spheres land in shared InstancedMesh buckets.
+  const dark = opts.mats.standard('metal', '#3a3f47', { roughness: 0.6, metalness: 0.5 });
+  const stone = opts.mats.standard('rock', '#6f6a60', { roughness: 1 });
+  const orbAmber = amberGlowMaterial(opts.mats, 2.6);
+  const coreAmber = amberGlowMaterial(opts.mats, 2.4);
+  const emitLamp = (x: number, gy: number, z: number): number => {
+    // rng sequence identical to makeLampPost(rng, mats, { realLight });
+    // returns the orb's world y (for the optional real point light)
+    const h = Math.max(1.5, rng.range(2.6, 3.4));
+    const ry = rng.range(0, Math.PI * 2);
+    const orbY = h + 0.35;
+    inst.box(dark, x, gy + h / 2, z, 0.28, h, 0.28, ry, true);       // post
+    inst.box(dark, x, gy + 0.17, z, 0.7, 0.35, 0.7, ry, true);        // foot
+    inst.sphere(orbAmber, x, gy + orbY, z, 0.34, false);              // orb
+    for (let i = 0; i < 4; i++) {
+      // cage bars: group-space angle a, world angle (a - ry) under yaw ry
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4 - ry;
+      inst.box(dark, x + Math.cos(a) * 0.42, gy + orbY, z + Math.sin(a) * 0.42,
+        0.08, 0.95, 0.08, ry, true);
+    }
+    inst.box(dark, x, gy + orbY + 0.55, z, 0.75, 0.16, 0.75, ry, true); // cap
+    return gy + orbY;
+  };
+  const emitLantern = (x: number, gy: number, z: number): void => {
+    // rng sequence identical to makeGroundLantern(rng, mats)
+    const s = rng.range(0.5, 0.75);
+    const ry = rng.range(0, Math.PI * 2);
+    inst.box(stone, x, gy + s * 0.35, z, s, s * 0.7, s, ry, true);            // base
+    inst.box(coreAmber, x, gy + s * 0.95, z, s * 0.55, s * 0.5, s * 0.55, ry, false); // core
+    inst.box(stone, x, gy + s * 1.28, z, s * 0.8, s * 0.18, s * 0.8, ry, true); // lid
+  };
+
   for (let i = 0; i < lampCount; i++) {
     const spot = tryPlace(0.6);
     if (!spot) continue;
     const wantLight = realLights < realBudget;
-    const lamp = makeLampPost(rng, opts.mats, { realLight: wantLight });
-    if (wantLight) realLights++;
     const [x, z] = spot;
-    lamp.position.set(x, groundY(x, z), z);
-    group.add(lamp);
+    const gy = groundY(x, z);
+    const orbWorldY = emitLamp(x, gy, z);
+    if (wantLight) {
+      // real point lights stay individual meshes — rare (≤ MAX_REAL_LIGHTS)
+      const l = new THREE.PointLight(AMBER, 14, 14, 1.8);
+      l.position.set(x, orbWorldY, z);
+      group.add(l);
+      realLights++;
+    }
     lamps++;
   }
   for (let i = 0; i < lanternCount; i++) {
     const spot = tryPlace(0.5);
     if (!spot) continue;
-    const lan = makeGroundLantern(rng, opts.mats);
     const [x, z] = spot;
-    lan.position.set(x, groundY(x, z), z);
-    group.add(lan);
+    emitLantern(x, groundY(x, z), z);
     lanterns++;
   }
+  inst.bake(group);
   scene.add(group);
   return { group, lamps, lanterns, realLights };
 }

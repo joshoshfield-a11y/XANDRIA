@@ -2,7 +2,9 @@
  * Env-art pass (inventory wave): blocky landmarks, amber glow accents,
  * biome material treatments, water sun glint, dusk grade preset.
  *
- * - placeLandmarks: deterministic, exclusion-aware, light-budgeted, per-env mix
+ * - placeLandmarks: deterministic, exclusion-aware, light-budgeted, 1–3 per
+ *   world from the (env × genre) mix, instanced repeated geometry, amber
+ *   rune strips + lamps registered per landmark
  * - AmberGlow: deterministic scatter, real-light budget clamped
  * - Props: blocktree / lamppost / lantern kinds build and scatter
  * - Materials.biomeGround: cached treatments per biome (cracked earth, snow
@@ -111,14 +113,27 @@ describe('placeLandmarks', () => {
     expect(countRealLights(r0.group)).toBe(0);
   });
 
-  it('picks a per-environment mix (desert → arches, volcanic → towers)', () => {
+  it('picks a genre-appropriate mix: dominant kind first, 1–3 per world', () => {
     const w = buildWorld();
+    // desert × third-person-action → arches dominant
     const desert = placeLandmarks(new THREE.Scene(), new Rng(5), landmarkOpts(w.mats, w.terrain, w.spec, { env: 'desert' }));
-    const kinds = desert.placed.map((p) => p.kind);
-    expect(kinds.filter((k) => k === 'ruin-arch').length)
-      .toBeGreaterThanOrEqual(kinds.filter((k) => k === 'beam-tower').length);
+    expect(desert.placed.length).toBeGreaterThanOrEqual(1);
+    expect(desert.placed.length).toBeLessThanOrEqual(3);
+    expect(desert.placed[0].kind).toBe('ruin-arch');
+    expect(desert.amberAccents).toBeGreaterThan(0);
+    expect(desert.instancedMeshes).toBeGreaterThan(0);
+    // volcanic → towers dominant
     const volc = placeLandmarks(new THREE.Scene(), new Rng(5), landmarkOpts(w.mats, w.terrain, w.spec, { env: 'volcanic' }));
-    expect(volc.placed.filter((p) => p.kind === 'beam-tower').length).toBeGreaterThanOrEqual(2);
+    expect(volc.placed[0].kind).toBe('beam-tower');
+    // racing × islands → bridges dominant (track crossings)
+    const racing = placeLandmarks(new THREE.Scene(), new Rng(5), landmarkOpts(w.mats, w.terrain, w.spec, { env: 'islands', genre: 'racing' }));
+    expect(racing.placed[0].kind).toBe('bridge');
+    // explicit kinds override still forces absolute counts
+    const forced = placeLandmarks(new THREE.Scene(), new Rng(5), landmarkOpts(w.mats, w.terrain, w.spec, {
+      kinds: { 'beam-tower': 2, 'ruin-arch': 2, bridge: 1 },
+    }));
+    expect(forced.placed.filter((p) => p.kind === 'beam-tower').length).toBe(2);
+    expect(forced.placed.filter((p) => p.kind === 'bridge').length).toBe(1);
   });
 
   it('never throws on degenerate input', () => {

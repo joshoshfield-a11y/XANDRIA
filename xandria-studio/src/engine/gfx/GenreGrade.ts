@@ -60,6 +60,29 @@ export interface GenreGrade {
    * so the night visibility floor is unaffected).
    */
   grade: ColorGrade;
+  /**
+   * dusk-only biome fog color override (absolute hex). Set only when the
+   * caller passes a BiomeDefLike object carrying fogColor (workstream C's
+   * BiomeDef); null = palette fog. Applied before fogLuminance/fogTint.
+   */
+  biomeFog: string | null;
+  /**
+   * dusk-only biome fog density override (absolute FogExp2 density). Set only
+   * from a BiomeDefLike object carrying fogDensity; null = the weather-derived
+   * base x grade.fogDensity multiplier.
+   */
+  biomeFogDensity: number | null;
+  /**
+   * dusk-only water deep tint for the terrain water material (hex). From the
+   * biome table or a BiomeDefLike's waterTint; null = the default steel blue
+   * (volcanic lava keeps its own color in Terrain).
+   */
+  waterTint: string | null;
+  /**
+   * dusk-only sky-reflection tint for the water fresnel term (hex); null =
+   * time-of-day default. Warm at dusk so water mirrors the sunset.
+   */
+  waterSky: string | null;
 }
 
 /**
@@ -89,6 +112,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
     fogDensity: 0.75, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.8, cloudColor: '#ffffff', sky: 0.45, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
     grade: {
       lift: [0.015, 0.005, -0.010], gamma: [1.0, 1.0, 1.0], gain: [1.03, 1.0, 0.96],
       saturation: 1.08, vignette: 0.45,
@@ -100,6 +124,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
     fogDensity: 0.9, fogLuminance: 0.9,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.9, cloudColor: '#f0f4ff', sky: 0.5, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
     grade: {
       lift: [-0.005, 0.005, 0.020], gamma: [1.0, 1.0, 1.0], gain: [0.96, 1.0, 1.06],
       saturation: 1.15, vignette: 0.55,
@@ -112,6 +137,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
     fogDensity: 0.55, fogLuminance: 0.75,
     sun: 0.95, hemi: 0.95, ambient: 1.0,
     clouds: 0.7, cloudColor: '#fff8ec', sky: 0.55, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
     grade: {
       lift: [0.020, 0.010, 0.000], gamma: [1.0, 1.0, 1.0], gain: [1.05, 1.0, 0.93],
       saturation: 1.10, vignette: 0.40,
@@ -124,6 +150,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
     fogDensity: 1.15, fogLuminance: 0.8,
     sun: 1.0, hemi: 1.05, ambient: 1.0,
     clouds: 1.0, cloudColor: '#e8dcff', sky: 0.45, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
     grade: {
       lift: [0.010, 0.000, 0.020], gamma: [1.0, 1.0, 1.0], gain: [1.0, 0.97, 1.05],
       saturation: 1.12, vignette: 0.40,
@@ -135,6 +162,7 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
     fogDensity: 0.5, fogLuminance: 0.85,
     sun: 1.0, hemi: 1.0, ambient: 1.0,
     clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
     grade: {
       lift: [0.000, 0.000, 0.005], gamma: [1.0, 1.0, 1.0], gain: [0.98, 1.0, 1.03],
       saturation: 1.06, vignette: 0.50,
@@ -158,12 +186,95 @@ const DUSK_EXPOSURE: Record<Genre, number> = {
   'top-down-shooter': 0.72,
 };
 
+/**
+ * Minimal biome descriptor (graphics workstream D, full-scale wave).
+ *
+ * SEAM with workstream C: C defines BiomeDef in src/engine/world/Biomes.ts
+ * (fog color/density values + water tint). That BiomeDef satisfies this
+ * interface structurally, so once it lands the call sites can pass the
+ * BiomeDef object directly and its fogColor/fogDensity/waterTint wire through
+ * automatically. Until then, callers pass spec.theme.environment (a plain
+ * string id) and the BIOME_DUSK table below supplies the per-biome look.
+ */
+export interface BiomeDefLike {
+  /** biome id — matches the Environment union values ('desert', 'arctic', ...) */
+  id: string;
+  fogColor?: string;
+  fogDensity?: number;
+  waterTint?: string;
+}
+
+/** Per-biome cinematic dusk tweaks, layered over the genre dusk grade. */
+interface BiomeDuskTweak {
+  /** multiplier on the genre dusk exposure */
+  exposure?: number;
+  /** fog tint override (default '#ff9a5c' amber haze) */
+  fogTint?: string;
+  /** water deep tint override */
+  waterTint?: string;
+  /** water sky-reflection (fresnel) tint override */
+  waterSky?: string;
+  /** complete dusk lift/gain/saturation for the biome (replaces genre's) */
+  lift?: [number, number, number];
+  gain?: [number, number, number];
+  saturation?: number;
+}
+
+/**
+ * Cinematic dusk/sunset grading per biome — the reference vistas are ALL
+ * dusk: hot amber deserts, ember volcanic glow, cold-blue arctic under a warm
+ * horizon, teal coastlines, violet dreamscapes. Dusk/dawn only; day keeps the
+ * authored genre table and night is locked. Keyed by spec.theme.environment.
+ */
+const BIOME_DUSK: Record<string, BiomeDuskTweak> = {
+  desert: {
+    fogTint: '#ffa25e', waterTint: '#2a7fb5', waterSky: '#f2a768',
+    lift: [0.020, 0.008, -0.012], gain: [1.06, 1.00, 0.90], saturation: 1.12,
+  },
+  wasteland: {
+    fogTint: '#ff9a5c', waterTint: '#3a6f8f', waterSky: '#e8a068',
+    lift: [0.022, 0.010, -0.008], gain: [1.05, 1.00, 0.92], saturation: 1.05,
+  },
+  forest: {
+    fogTint: '#ff9a5c', waterTint: '#2a6f8f', waterSky: '#e8a868',
+    lift: [0.008, 0.015, -0.005], gain: [1.02, 1.03, 0.94], saturation: 1.10,
+  },
+  jungle: {
+    fogTint: '#ff9a5c', waterTint: '#2a7050', waterSky: '#e8a868',
+    lift: [0.010, 0.020, 0.000], gain: [1.03, 1.04, 0.92], saturation: 1.12,
+  },
+  arctic: {
+    // cold blue land under a warm horizon — the reference snow vista
+    fogTint: '#ffc890', waterTint: '#3a8fc0', waterSky: '#f0b070',
+    lift: [-0.010, 0.000, 0.020], gain: [0.98, 1.00, 1.05], saturation: 1.08,
+  },
+  volcanic: {
+    // ember glow: hot red lift, crushed blue gain
+    fogTint: '#ff7a3c', waterTint: '#ff5a1f', waterSky: '#ff8a4a',
+    lift: [0.030, 0.005, -0.010], gain: [1.08, 0.95, 0.85], saturation: 1.15,
+  },
+  islands: {
+    // teal coastline water, warm dusk sky
+    fogTint: '#ffab70', waterTint: '#1f9db5', waterSky: '#f0a868',
+    lift: [0.012, 0.010, 0.000], gain: [1.00, 1.03, 1.02], saturation: 1.12,
+  },
+  ruins: {
+    fogTint: '#ffa25e', waterTint: '#2a6f9f', waterSky: '#f0a068',
+    lift: [0.015, 0.005, -0.010], gain: [1.04, 1.00, 0.93], saturation: 1.08,
+  },
+  dreamscape: {
+    fogTint: '#c08aff', waterTint: '#3a5fb5', waterSky: '#d89aff',
+    lift: [0.010, 0.000, 0.020], gain: [1.02, 0.97, 1.06], saturation: 1.15,
+  },
+};
+
 /** Night grade: identity — the earlier night-lighting fix owns these values. */
 const NIGHT_GRADE: GenreGrade = {
   exposure: 1.05,
   fogDensity: 1.0, fogLuminance: 1.0, fogTint: null, godRays: 1.0,
   sun: 1.0, hemi: 1.0, ambient: 1.0,
   clouds: 1.0, cloudColor: '#3a4460', sky: 1.0,
+  biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
   // color grade at night is identity except a mild vignette (no brightness
   // change, so the night visibility floor is unaffected).
   grade: {
@@ -172,7 +283,11 @@ const NIGHT_GRADE: GenreGrade = {
   },
 };
 
-export function gradeAtmosphere(genre: Genre, timeOfDay: TimeOfDay): GenreGrade {
+export function gradeAtmosphere(
+  genre: Genre,
+  timeOfDay: TimeOfDay,
+  biome?: string | BiomeDefLike | null,
+): GenreGrade {
   if (timeOfDay === 'night') return { ...NIGHT_GRADE };
   const base = DAY_TABLE[genre];
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
@@ -180,12 +295,34 @@ export function gradeAtmosphere(genre: Genre, timeOfDay: TimeOfDay): GenreGrade 
   // tint, deeper fog luminance so the horizon holds its amber tone, warmer
   // clouds, and stronger god-ray presence. Day keeps the authored table.
   if (!dusk) return { ...base, exposure: DAY_EXPOSURE[genre] };
+  // Graphics wave D2: per-biome cinematic dusk grading layered over the genre
+  // grade. A plain string id reads the BIOME_DUSK table; a BiomeDefLike object
+  // (workstream C's BiomeDef, once it lands) also carries absolute fog/water
+  // overrides that win over the table.
+  const tweak = typeof biome === 'string' ? BIOME_DUSK[biome] : undefined;
+  const like = biome !== null && typeof biome === 'object' ? biome : undefined;
+  const t = tweak ?? (like ? BIOME_DUSK[like.id] : undefined);
+  const t2: BiomeDuskTweak | undefined = t !== undefined &&
+    (t.lift !== undefined || t.gain !== undefined || t.saturation !== undefined) ? t : undefined;
+  const grade: ColorGrade = t2 !== undefined
+    ? {
+        ...base.grade,
+        lift: t2.lift ?? base.grade.lift,
+        gain: t2.gain ?? base.grade.gain,
+        saturation: t2.saturation ?? base.grade.saturation,
+      }
+    : base.grade;
   return {
     ...base,
-    exposure: DUSK_EXPOSURE[genre],
+    exposure: DUSK_EXPOSURE[genre] * (t?.exposure ?? 1),
     fogLuminance: base.fogLuminance * 0.92,
-    fogTint: '#ff9a5c',
+    fogTint: t?.fogTint ?? '#ff9a5c',
     cloudColor: '#ffd9b0',
     godRays: 1.7,
+    biomeFog: like?.fogColor ?? null,
+    biomeFogDensity: like?.fogDensity ?? null,
+    waterTint: like?.waterTint ?? t?.waterTint ?? null,
+    waterSky: t?.waterSky ?? null,
+    grade,
   };
 }

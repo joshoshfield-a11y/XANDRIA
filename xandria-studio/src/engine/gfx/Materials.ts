@@ -301,6 +301,31 @@ export class MaterialLibrary {
     return m;
   }
 
+  /**
+   * Biome-treatment ground (workstream C): BiomeDef-driven sibling of
+   * biomeGround(). Same caching contract — callers must not dispose the
+   * result. Structural param (not the BiomeDef type) so gfx/ never imports
+   * world/. `emissive` paints glowing crack veins (volcanic emberrock).
+   */
+  biomeGroundDef(g: { kind: TexKind; base: string; alt: string; roughness: number; emissive?: string; emissiveIntensity?: number }, opts: { repeat?: number } = {}): THREE.MeshStandardMaterial {
+    const key = `biomedef:${g.kind}:${g.base}:${g.alt}:${g.roughness}:${g.emissive ?? ''}:${g.emissiveIntensity ?? 0}:${opts.repeat ?? 0}`;
+    const hit = this.matCache.get(key);
+    if (hit) return hit as THREE.MeshStandardMaterial;
+    const rep = { repeat: opts.repeat };
+    const m = new THREE.MeshStandardMaterial({
+      map: this.texture(g.kind, g.base, { alt: g.alt, ...rep }),
+      normalMap: this.normalMap(g.kind, g.base, { alt: g.alt, ...rep }),
+      roughness: g.roughness,
+    });
+    if (g.emissive) {
+      m.emissiveMap = this.emissiveMap(g.kind, { ...rep, glowHex: g.emissive });
+      m.emissive = new THREE.Color(g.emissive);
+      m.emissiveIntensity = g.emissiveIntensity ?? 1;
+    }
+    this.matCache.set(key, m);
+    return m;
+  }
+
   standard(kind: TexKind, hex: string, opts: { alt?: string; repeat?: number; roughness?: number; metalness?: number; emissive?: string; emissiveIntensity?: number } = {}): THREE.MeshStandardMaterial {
     const key = `std:${kind}:${hex}:${JSON.stringify(opts)}`;
     const hit = this.matCache.get(key);

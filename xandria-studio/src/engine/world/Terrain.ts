@@ -4,6 +4,8 @@ import * as CANNON from 'cannon-es';
 import type { GameSpec } from '@spec';
 import { Noise2D } from '../core/Rng';
 import { MaterialLibrary, shade } from '../gfx/Materials';
+import { gradeAtmosphere } from '../gfx/GenreGrade';
+import { resolveBiomeDef, biomeTint } from './Biomes';
 import { GROUP, type Physics } from '../core/Physics';
 
 export class Terrain {
@@ -36,6 +38,11 @@ export class Terrain {
     const bioFree = bio as { surface?: string; groundSurface?: string } | undefined;
     this.bioSurface = bioFree?.surface;
     this.bioGround = bioFree?.groundSurface ?? 'stone';
+    // Workstream C: the resolved biome treatment (Studio override wins, else
+    // seeded per seed/genre). Drives ground material, water tint, and the
+    // palette blend below. Terrain GEOMETRY is untouched — shape stays
+    // generator-driven so gameplay is unaffected.
+    const biome = resolveBiomeDef(spec);
     const freq = bio?.terrainFrequency ?? 1;
     const hscale = bio?.heightScale ?? 1;
     const h: number[][] = [];
@@ -82,9 +89,12 @@ export class Terrain {
     // `new THREE.Color(hex)` here would store linear-workspace values and make
     // the terrain ~7x darker than the authored palette (it rendered black at
     // night). convertLinearToSRGB() recovers the raw sRGB components.
-    const cGround = new THREE.Color(spec.theme.palette.ground).convertLinearToSRGB();
-    const cAlt = new THREE.Color(spec.theme.palette.groundAlt).convertLinearToSRGB();
-    const cRock = new THREE.Color(spec.theme.palette.rock).convertLinearToSRGB();
+    // Workstream C: blend the spec palette toward the biome's authored palette
+    // (BIOME_PALETTE_BLEND in world/Biomes) so each biome reads distinctly
+    // while Studio palette edits still visibly shift the look.
+    const cGround = biomeTint(spec.theme.palette.ground, biome.palette.ground);
+    const cAlt = biomeTint(spec.theme.palette.groundAlt, biome.palette.groundAlt);
+    const cRock = biomeTint(spec.theme.palette.rock, biome.palette.rock);
     // Beauty wave: patch colors derived from the palette itself so new hues
     // never clash — dark earthy patches and sun-bleached patches that break
     // the flat procedural look. Baked into vertex colors: zero per-frame cost.
@@ -116,7 +126,10 @@ export class Terrain {
       if (ny < 0.75) { const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1); tmp.setRGB(colors[k * 3], colors[k * 3 + 1], colors[k * 3 + 2]).lerp(cRock, f); colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b; }
     }
     geo.attributes.color.needsUpdate = true;
-    const mat = mats.biomeGround(spec.theme.environment, { repeat: this.size / 8, roughness: 0.95 });
+    // Workstream C: ground material comes from the biome treatment (cached,
+    // shared — never disposed here). volcanic → ember-cracked basalt with
+    // glowing veins; snow → glittering snowdrift; desert → cracked earth, etc.
+    const mat = mats.biomeGroundDef(biome.ground, { repeat: this.size / 8 });
     mat.vertexColors = true;
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
@@ -150,39 +163,71 @@ export class Terrain {
       mk(-half - wt / 2, 0, wt, this.size); mk(half + wt / 2, 0, wt, this.size);
     }
 
-    // ---- water plane (polish wave: animated fake specular — a time-driven
-    // normal ripple in onBeforeCompile; env-art pass: sun-aligned directional
-    // glint so the water throws a warm dusk sparkle toward the sun. No planar
-    // reflections — two uniforms and one pow(), no per-frame CPU cost.)
+    // ---- water plane (graphics wave D: stylized water with specular)
+    // MeshStandardMaterial + onBeforeCompile injections:
+    //  - world-space ripple normal (~7m primary + ~3.5m chop), transformed to
+    //    view space — the old uv-space ripple had a ~290m wavelength, i.e.
+    //    effectively flat; the old glint also mixed view-space normals with a
+    //    world-space sun vector, now fixed via viewMatrix transforms
+    //  - sun-aligned Blinn-Phong glint (blueprints refine dir/tint from the
+    //    real sky sun via setWaterSun(); ACES in the grade pass rolls the
+    //    highlights off instead of clipping them white)
+    //  - fresnel term mirroring the sky tint at grazing angles — the cue that
+    //    reads as water in the reference vistas (golden path at dusk)
+    //  - per-biome deep tint + sky tint from the dusk grade (GenreGrade D2)
+    // No planar reflections — uniforms + a few ALU, no per-frame CPU cost.
     if (t.water) {
-      const wm = new THREE.MeshStandardMaterial({ color: spec.theme.environment === 'volcanic' ? '#ff5a1f' : '#2a6fb0', transparent: true, opacity: 0.75, roughness: 0.15, metalness: 0.3, emissive: spec.theme.environment === 'volcanic' ? '#ff3300' : '#000000', emissiveIntensity: 0.8 });
+      // Merge of D (shader) + C (content): the biome owns the water's authored
+      // look (volcanic reads as lava, caves as dark teal, coastline as bright
+      // teal); D's world-space ripple + sun glint + fresnel sky-mirror shader
+      // does the rendering; at dusk the cinematic grade tint wins.
+      const dusk = spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn';
+      // D2 seam: the BIOME_DUSK table is keyed by environment id, while the
+      // biome's absolute fog/water overrides (workstream C's BiomeDef) win
+      // over the table per the BiomeDefLike contract.
+      const bgrade = gradeAtmosphere(spec.meta.genre, spec.theme.timeOfDay, {
+        id: spec.theme.environment,
+        fogColor: biome.fog.color,
+        fogDensity: biome.fog.density,
+        waterTint: biome.water.tint,
+      });
+      const bw = biome.water;
+      const deepColor = (dusk && bgrade.waterTint) ? bgrade.waterTint : bw.tint;
+      const wm = new THREE.MeshStandardMaterial({ color: deepColor, transparent: true, opacity: bw.opacity, roughness: 0.12, metalness: 0.35, emissive: bw.emissive ?? '#000000', emissiveIntensity: bw.emissive ? (bw.emissiveIntensity ?? 0.8) : 0 });
       wm.userData.uTime = { value: 0 };
-      // default glint: low warm sun (dusk look); blueprints refine it from the
-      // real sky sun via setWaterSun() right after createSky().
+      // default glint: the biome's authored glint color (dusk-warm for most
+      // biomes, cool for snow/caves); blueprints refine it from the real sky
+      // sun via setWaterSun() right after createSky().
       wm.userData.uSunDirW = { value: new THREE.Vector3(0.55, 0.28, 0.45).normalize() };
-      wm.userData.uGlint = { value: new THREE.Color('#ffb46b') };
-      wm.customProgramCacheKey = () => 'xandria-water-v2';
+      wm.userData.uGlint = { value: new THREE.Color(bw.glint) };
+      wm.userData.uSkyTint = { value: new THREE.Color(bgrade.waterSky ?? (dusk ? '#f0a868' : '#a8c8dc')) };
+      wm.customProgramCacheKey = () => 'xandria-water-v3';
       wm.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = wm.userData.uTime;
         shader.uniforms.uSunDirW = wm.userData.uSunDirW;
         shader.uniforms.uGlint = wm.userData.uGlint;
+        shader.uniforms.uSkyTint = wm.userData.uSkyTint;
         shader.vertexShader = shader.vertexShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec2 vUvW; varying vec3 vWPos;')
-          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvUvW = uv;')
+          .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec3 vWPos;')
           .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         shader.fragmentShader = shader.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; varying vec2 vUvW; varying vec3 vWPos;')
-          .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
-            float wv1 = sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
-            float wv2 = sin((vUvW.x + vUvW.y) * 34.0 - uTime * 2.2);
-            normal = normalize(normal + vec3(wv1 * 0.28 + wv2 * 0.12, wv2 * 0.1, 0.0));`)
+          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; uniform vec3 uSkyTint; varying vec3 vWPos; float gShimmer;')
+          .replace('#include <normal_fragment_maps>', `
+            float wv1 = sin(vWPos.x * 0.85 + uTime * 1.5) * sin(vWPos.z * 0.70 - uTime * 1.1);
+            float wv2 = sin((vWPos.x + vWPos.z) * 1.70 - uTime * 2.2);
+            float wv3 = sin(vWPos.x * 2.60 - uTime * 2.8) * sin(vWPos.z * 2.30 + uTime * 2.0);
+            gShimmer = 0.5 + 0.5 * wv1 * wv2;
+            vec3 wN = normalize(vec3(wv1 * 0.20 + wv2 * 0.09, 1.0, wv1 * 0.09 - wv3 * 0.13));
+            normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);`)
           .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
             {
-              vec3 Vw = normalize(cameraPosition - vWPos);
-              vec3 Hv = normalize(normalize(uSunDirW) + Vw);
-              float wspec = pow(max(dot(normalize(normal), Hv), 0.0), 90.0);
-              float shimmer = 0.5 + 0.5 * sin(vUvW.x * 26.0 + uTime * 1.5) * sin(vUvW.y * 21.0 - uTime * 1.1);
-              totalEmissiveRadiance += uGlint * wspec * (0.25 + 0.75 * shimmer);
+              vec3 Vv = normalize(vViewPosition);
+              vec3 sunV = normalize((viewMatrix * vec4(normalize(uSunDirW), 0.0)).xyz);
+              vec3 Hv = normalize(sunV + Vv);
+              float wspec = pow(max(dot(normal, Hv), 0.0), 90.0);
+              totalEmissiveRadiance += uGlint * wspec * (0.25 + 0.75 * gShimmer);
+              float fres = pow(1.0 - max(dot(normal, Vv), 0.0), 3.0);
+              totalEmissiveRadiance += uSkyTint * fres * 0.45;
             }`);
       };
       this.waterMat = wm;
