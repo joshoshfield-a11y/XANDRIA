@@ -86,6 +86,7 @@ vi.mock('three', async (importOriginal) => {
   return { ...actual, WebGLRenderer: FakeWebGLRenderer };
 });
 
+import * as THREE from 'three';
 import { Engine } from '../src/engine/Engine';
 import { PerfMonitor } from '../src/engine/core/Perf';
 import { generateSpec } from '../src/generator/generate';
@@ -349,5 +350,62 @@ describe('E8 snapshot()', () => {
     s.frameMs = -999;
     expect(engine.perf.frameMs).not.toBe(-999);
     expect(JSON.parse(JSON.stringify(s)).frames).toBe(5);
+  });
+});
+
+/* ---------------- B: streaming counters wiring (stage-1 workstream B) ---------------- */
+
+describe('B streaming counters wiring', () => {
+  function makeEngineWithTerrain(): Engine {
+    const s = generateSpec('neon fps arena at night', { seed: 42 });
+    s.world.terrain.size = 1200;
+    const container: any = { ...makeEl('div'), clientWidth: 800, clientHeight: 600 };
+    const engine = new Engine(container, s, { testMode: true });
+    (engine as any).postfx = {
+      render() {
+        const info = (engine as any).renderer.info;
+        if (!info) return;
+        info.render.calls = 37;
+        info.render.triangles = 1234;
+        info.memory.geometries = 12;
+        info.memory.textures = 5;
+        info.programs = [{}, {}, {}];
+      },
+      resize() {},
+      dispose() {},
+    };
+    return engine;
+  }
+
+  it('terrain.update runs every Engine.step and feeds perf.sampleStream', () => {
+    const engine = makeEngineWithTerrain();
+    try {
+      stepFrames(engine, 5);
+      const ss = engine.terrain.getStreamStats();
+      expect(ss.loaded).toBeGreaterThan(0);
+      expect(engine.perf.chunksLoaded).toBe(ss.loaded);
+      expect(engine.perf.chunkBuildMs).toBe(ss.buildMs);
+      expect(engine.perf.streamQueue).toBe(ss.queue);
+      expect(engine.perf.snapshot().chunksLoaded).toBe(ss.loaded);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it('streamFocus override steers the streaming focus', () => {
+    const engine = makeEngineWithTerrain();
+    try {
+      engine.state = 'playing';
+      // park the focus in the far corner; drain the budget queue
+      engine.streamFocus = new THREE.Vector3(590, 0, 590);
+      for (let i = 0; i < 60; i++) engine.step(1 / 60);
+      expect(engine.perf.streamQueue).toBe(0);
+      expect(engine.terrain.getChunkStats().chunkCount).toBe(25);
+      // (590,590) sits in chunk (4,4) -> must be resident
+      expect(engine.terrain.isChunkLoaded(4, 4)).toBe(true);
+      expect(engine.perf.chunksLoaded).toBe(engine.terrain.getStreamStats().loaded);
+    } finally {
+      engine.dispose();
+    }
   });
 });

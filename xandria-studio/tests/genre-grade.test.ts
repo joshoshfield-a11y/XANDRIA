@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { gradeAtmosphere, type Genre } from '../src/engine/gfx/GenreGrade';
+import { fogDensityScaleForWorldSize } from '../src/engine/gfx/FarField';
 import { createSky } from '../src/engine/gfx/Sky';
 import { Scatter } from '../src/engine/world/Scatter';
 import { Terrain } from '../src/engine/world/Terrain';
@@ -128,7 +129,8 @@ describe('createSky grade wiring', () => {
         spec.theme.weather === 'fog' ? 0.012
         : spec.theme.weather === 'storm' || spec.theme.weather === 'ash' ? 0.007
         : spec.theme.environment === 'space-station' ? 0.002 : 0.0035;
-      expect((scene.fog as THREE.FogExp2).density).toBeCloseTo(baseDensity * grade.fogDensity, 10);
+      expect((scene.fog as THREE.FogExp2).density).toBeCloseTo(
+        baseDensity * grade.fogDensity * fogDensityScaleForWorldSize(spec.world.terrain.size), 10);
       const expectedFog = new THREE.Color(spec.theme.palette.fog);
       if (spec.theme.timeOfDay === 'night') expectedFog.multiplyScalar(0.35);
       expectedFog.multiplyScalar(grade.fogLuminance);
@@ -198,10 +200,12 @@ describe('Scatter hero props', () => {
     const alloc = (quality: 'retro' | 'standard' | 'high') => {
       const w = buildWorld('desert racing grand prix', 42);
       const s = new Scatter(w.spec, w.terrain, w.mats, w.physics, w.scene, { quality });
-      // genre-hero sets only (base rocks + workstream-C biome sets excluded)
+      // genre-hero sets only (base rocks + workstream-C biome sets excluded).
+      // Stage 1: the racing world is 400m, so it streams through global pools
+      // with fixed capacity — assert on the live placed count, not capacity.
       return s.sets
         .filter((set) => set.tag === 'genre-hero')
-        .map((set) => (set.mesh.instanceMatrix.array as Float32Array).length / 16);
+        .map((set) => set.mesh.count);
     };
     const retro = alloc('retro');
     const standard = alloc('standard');

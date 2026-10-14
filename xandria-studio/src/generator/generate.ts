@@ -453,6 +453,18 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     : ENV_TERRAIN[environment];
   const wantsWater = environment === 'islands' || has(text, 'lake', 'ocean', 'sea', 'water', 'river', 'flood');
 
+  // Open-world stage 1: prompts asking for a big world map to big sizes;
+  // prompts that don't ask keep the legacy defaults byte-identically.
+  // 'giant' is deliberately NOT a size word ('giant robot boss' is a boss fight).
+  const wantsBigWorld = has(text, 'open world', 'open-world', 'vast', 'expansive',
+    'sprawling', 'huge world', 'massive world', 'enormous world', 'huge map',
+    'massive map', 'big map', 'large map', 'enormous map', 'continent', 'world map');
+  const wantsRally = genre === 'racing' && has(text, 'rally', 'desert rally', 'open desert',
+    'off-road', 'offroad', 'cross-country', 'cross country', 'dakar');
+  const worldSize = wantsRally ? 2000
+    : wantsBigWorld ? 1500
+    : genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220;
+
   // --- assemble (partial → normalize fills the rest + validates)
   const partial: any = {
     meta: { name, seed, genre, description: text.slice(0, 300), version: 1 },
@@ -467,7 +479,7 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     world: {
       terrain: {
         type: genre === 'racing' || genre === 'fps-arena' || genre === 'top-down-shooter' ? 'flat' : terrain,
-        size: genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220,
+        size: worldSize,
         // racing needs a truly flat ribbon — hills clip through the track
         maxHeight: genre === 'racing' ? 2 : terrain === 'mountains' ? 30 : 14,
         roughness: genre === 'racing' ? 0 : 0.5,

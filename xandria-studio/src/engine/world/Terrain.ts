@@ -7,14 +7,130 @@ import { MaterialLibrary, shade } from '../gfx/Materials';
 import { gradeAtmosphere } from '../gfx/GenreGrade';
 import { resolveBiomeDef, biomeTint } from './Biomes';
 import { GROUP, type Physics } from '../core/Physics';
+// Stage-1 workstream B: chunked physics + streaming (chunked mesh generation
+// is workstream A's; both share the chunkLayout grid convention).
+import { chunkCellRange, chunkKey, worldToChunk, type ChunkGrid } from './chunkLayout';
+import { ChunkStream } from './ChunkStream';
+
+/**
+ * Stage-1 B: mesh streaming radii (meters). Chunk meshes page out only far
+ * beyond the camera far plane (~1400m), so the horizon never shows holes;
+ * hysteresis band prevents thrash. Worker D's far-field work (impostor
+ * ring / scaled far plane) owns tuning these further — if the camera far
+ * plane ever grows past MESH_STREAM_LOAD_RADIUS, raise these with it.
+ */
+export const MESH_STREAM_LOAD_RADIUS = 1500;
+export const MESH_STREAM_UNLOAD_RADIUS = 2000;
+
+// ---------------------------------------------------------------------------
+// Open-world stage 1 (worker A): chunked terrain mesh generation.
+//
+// The terrain height is a PURE function of world (x, z). Chunks sample it at
+// world-space coordinates on one shared vertex grid, so adjacent chunks own
+// bit-identical edge vertices — no cracks, no T-junctions, no stitching code.
+// Small worlds (<= TERRAIN_CHUNK_TARGET) are a single chunk built on the
+// legacy grid, so they come out identical to before.
+// ---------------------------------------------------------------------------
+
+/** Target chunk edge length in meters; the world tiles into ceil(size/256) chunks per side. */
+export const TERRAIN_CHUNK_TARGET = 256;
+/** Vertex-grid cell in meters for multi-chunk worlds (~the legacy 220m cell, so 1000m+ worlds keep detail). */
+export const TERRAIN_CHUNK_CELL = 2.5;
+
+/** Everything the pure height function closes over (was: the constructor's locals). */
+export interface TerrainHeightParams {
+  seed: number;
+  size: number;
+  type: string;
+  maxHeight: number;
+  roughness: number;
+  freq: number;
+  hscale: number;
+  flatCenters: Array<{ x: number; y: number; z: number }>;
+  flatRadius: number;
+  boundary: string;
+}
+
+// Noise2D instances are immutable after construction (the perm table is fixed
+// by the seed; get()/fbm() mutate nothing), so one cached instance per seed
+// is exactly equivalent to constructing per call — and keeps heightAt() cheap
+// enough to call per frame.
+const heightNoiseCache = new Map<number, Noise2D>();
+function heightNoise(seed: number): Noise2D {
+  let n = heightNoiseCache.get(seed);
+  if (!n) {
+    n = new Noise2D(seed);
+    heightNoiseCache.set(seed, n);
+  }
+  return n;
+}
+
+/**
+ * Pure terrain height at world (x, z) — the legacy in-constructor height loop
+ * extracted verbatim (same noise calls in the same order, same math), so it
+ * reproduces the old heights BIT-IDENTICALLY for the same inputs. Do not
+ * "improve" the noise: determinism (same seed -> same world, chunked or not)
+ * depends on it.
+ */
+export function terrainHeightAt(p: TerrainHeightParams, x: number, z: number): number {
+  const noise = heightNoise(p.seed);
+  let y = 0;
+  const nx = x / p.size, nz = z / p.size;
+  const base = noise.fbm(nx * 3 * p.freq + 10, nz * 3 * p.freq + 10, 5, 2, 0.5);
+  switch (p.type) {
+    case 'flat': y = base * 0.6; break;
+    case 'hills': y = (base + 0.3) * p.maxHeight * (0.4 + p.roughness * 0.6); break;
+    case 'mountains': y = Math.pow(Math.abs(base) + 0.15, 1.6) * p.maxHeight * 1.4 * (0.5 + p.roughness); break;
+    case 'canyon': { const r = Math.abs(noise.get(nx * 2 * p.freq, nz * 2 * p.freq + 5)); y = (r < 0.18 ? -0.6 : 0.8 + base * 0.5) * p.maxHeight; break; }
+    case 'islands': { const d = Math.hypot(nx, nz) * 2; y = (base + 0.35 - d * d * 0.9) * p.maxHeight; break; }
+    case 'platforms': y = Math.round((base + 1) * 3) * (p.maxHeight / 6); break;
+  }
+  y *= p.hscale;
+  // edge falloff: rim rises (or drops) for boundary
+  const edge = Math.max(Math.abs(nx), Math.abs(nz)) * 2; // 0..1
+  if (p.boundary === 'cliffs') y -= Math.pow(Math.max(0, edge - 0.85) / 0.15, 2) * 40;
+  else if (p.boundary === 'walls') y += Math.pow(Math.max(0, edge - 0.9) / 0.1, 2) * p.maxHeight * 0.8;
+  // flatten around spawn / arena centers
+  const flatR = p.flatRadius;
+  for (const c of p.flatCenters) {
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < flatR * 1.8) { const k = THREE.MathUtils.smoothstep(d, flatR * 0.6, flatR * 1.8); y = THREE.MathUtils.lerp(c.y, y, k); }
+  }
+  return y;
+}
 
 export class Terrain {
+  /**
+   * All chunk meshes, row-major (cj outer, ci inner). The whole world is
+   * always built from chunks — small worlds are simply one chunk.
+   */
+  chunkMeshes: THREE.Mesh[] = [];
+  /**
+   * Legacy accessor: the first chunk mesh. For small (single-chunk) worlds
+   * this IS the whole terrain, exactly as before.
+   */
   mesh: THREE.Mesh;
+  /**
+   * Stage-1 B: legacy single-body alias. In chunked worlds this is the body
+   * of the chunk containing the world origin (spawn area) — always resident.
+   * Prefer isChunkLoaded()/loadedChunkBodies for chunk-aware code.
+   */
   body: CANNON.Body;
   readonly size: number;
   readonly res: number;
+  /** Actual chunk edge length in meters (size / chunks per side). */
+  readonly chunkSize: number;
   private heights: number[][];
   private cell: number;
+  private hp: TerrainHeightParams;
+  /** Stage-1 B: chunk grid (A's canonical layout) driving physics + streaming. */
+  private readonly grid: ChunkGrid;
+  /** Stage-1 B: pages chunk physics bodies in/out by player distance. */
+  private readonly bodyStream: ChunkStream;
+  /** Stage-1 B: pages chunk meshes in/out of the scene (draw-call hygiene). */
+  private readonly meshStream: ChunkStream;
+  /** Stage-1 B: currently resident chunk bodies, keyed by chunkKey(cx, cz). */
+  private readonly chunkBodies = new Map<string, CANNON.Body>();
   water?: THREE.Mesh;
   private waterMat?: THREE.MeshStandardMaterial;
   readonly maxHeight: number;
@@ -29,10 +145,7 @@ export class Terrain {
   constructor(spec: GameSpec, physics: Physics, mats: MaterialLibrary, scene: THREE.Scene, opts: { flatRadius?: number; flatCenters?: THREE.Vector3[] } = {}) {
     const t = spec.world.terrain;
     this.size = t.size;
-    this.res = Math.min(128, Math.max(32, Math.round(t.size / 2.5)));
-    this.cell = this.size / (this.res - 1);
     this.maxHeight = t.maxHeight;
-    const noise = new Noise2D(spec.meta.seed);
     this.surfNoise = new Noise2D((spec.meta.seed ^ 0x5f3a17) >>> 0);
     const bio = spec.custom?.biome;
     const bioFree = bio as { surface?: string; groundSurface?: string } | undefined;
@@ -45,45 +158,42 @@ export class Terrain {
     const biome = resolveBiomeDef(spec);
     const freq = bio?.terrainFrequency ?? 1;
     const hscale = bio?.heightScale ?? 1;
-    const h: number[][] = [];
-    const half = this.size / 2;
     const flat = opts.flatCenters ?? [new THREE.Vector3(0, 0, 0)];
     const flatR = opts.flatRadius ?? Math.max(14, this.size * 0.08);
+    this.hp = {
+      seed: spec.meta.seed, size: this.size, type: t.type, maxHeight: t.maxHeight,
+      roughness: t.roughness, freq, hscale,
+      flatCenters: flat, flatRadius: flatR, boundary: spec.world.boundary,
+    };
+
+    // ---- chunk layout (open-world stage 1, worker A)
+    const chunksPerSide = Math.max(1, Math.ceil(this.size / TERRAIN_CHUNK_TARGET));
+    let cellsPerChunk: number;
+    if (chunksPerSide === 1) {
+      // legacy grid — the single chunk IS the old mesh, bit-identical
+      this.res = Math.min(128, Math.max(32, Math.round(this.size / 2.5)));
+      cellsPerChunk = this.res - 1;
+    } else {
+      // fixed ~2.5m cell so big worlds keep detail (the old res cap of 128
+      // would have stretched cells to ~8m on a 1000m world)
+      cellsPerChunk = Math.max(1, Math.round(this.size / chunksPerSide / TERRAIN_CHUNK_CELL));
+      this.res = chunksPerSide * cellsPerChunk + 1;
+    }
+    this.chunkSize = this.size / chunksPerSide;
+    this.cell = this.size / (this.res - 1);
+
+    // ---- heights: one shared world-space grid sampled through the pure function
+    const h: number[][] = [];
+    const half = this.size / 2;
     for (let i = 0; i < this.res; i++) {
       h[i] = [];
       for (let j = 0; j < this.res; j++) {
-        const x = -half + i * this.cell, z = -half + j * this.cell;
-        let y = 0;
-        const nx = x / this.size, nz = z / this.size;
-        const base = noise.fbm(nx * 3 * freq + 10, nz * 3 * freq + 10, 5, 2, 0.5);
-        switch (t.type) {
-          case 'flat': y = base * 0.6; break;
-          case 'hills': y = (base + 0.3) * t.maxHeight * (0.4 + t.roughness * 0.6); break;
-          case 'mountains': y = Math.pow(Math.abs(base) + 0.15, 1.6) * t.maxHeight * 1.4 * (0.5 + t.roughness); break;
-          case 'canyon': { const r = Math.abs(noise.get(nx * 2 * freq, nz * 2 * freq + 5)); y = (r < 0.18 ? -0.6 : 0.8 + base * 0.5) * t.maxHeight; break; }
-          case 'islands': { const d = Math.hypot(nx, nz) * 2; y = (base + 0.35 - d * d * 0.9) * t.maxHeight; break; }
-          case 'platforms': y = Math.round((base + 1) * 3) * (t.maxHeight / 6); break;
-        }
-        y *= hscale;
-        // edge falloff: rim rises (or drops) for boundary
-        const edge = Math.max(Math.abs(nx), Math.abs(nz)) * 2; // 0..1
-        if (spec.world.boundary === 'cliffs') y -= Math.pow(Math.max(0, edge - 0.85) / 0.15, 2) * 40;
-        else if (spec.world.boundary === 'walls') y += Math.pow(Math.max(0, edge - 0.9) / 0.1, 2) * t.maxHeight * 0.8;
-        // flatten around spawn / arena centers
-        for (const c of flat) {
-          const d = Math.hypot(x - c.x, z - c.z);
-          if (d < flatR * 1.8) { const k = THREE.MathUtils.smoothstep(d, flatR * 0.6, flatR * 1.8); y = THREE.MathUtils.lerp(c.y, y, k); }
-        }
-        h[i][j] = y;
+        h[i][j] = terrainHeightAt(this.hp, -half + i * this.cell, -half + j * this.cell);
       }
     }
     this.heights = h;
 
-    // ---- geometry with vertex colors
-    const geo = new THREE.PlaneGeometry(this.size, this.size, this.res - 1, this.res - 1);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.attributes.position as THREE.BufferAttribute;
-    const colors = new Float32Array(pos.count * 3);
+    // ---- chunked geometry with vertex colors
     // NOTE: vertex colors are consumed RAW by the shader (no color-management
     // conversion), so write the palette's sRGB components directly. Using
     // `new THREE.Color(hex)` here would store linear-workspace values and make
@@ -100,60 +210,185 @@ export class Terrain {
     // the flat procedural look. Baked into vertex colors: zero per-frame cost.
     const cPatchDark = cGround.clone().lerp(cRock, 0.35).multiplyScalar(0.72);
     const cPatchLight = cGround.clone().lerp(new THREE.Color(1, 1, 1), 0.28);
-    const tmp = new THREE.Color();
-    for (let k = 0; k < pos.count; k++) {
-      const x = pos.getX(k), z = pos.getZ(k);
-      const i = Math.round((x + half) / this.cell), j = Math.round((z + half) / this.cell);
-      const y = h[Math.min(this.res - 1, Math.max(0, i))][Math.min(this.res - 1, Math.max(0, j))];
-      pos.setY(k, y);
-      const slopeN = noise.get(x * 0.05, z * 0.05);
-      tmp.copy(cGround).lerp(cAlt, (slopeN + 1) / 2);
-      const hn = THREE.MathUtils.clamp((y / Math.max(1, t.maxHeight)) - 0.6, 0, 1);
-      tmp.lerp(cRock, hn * 1.2);
-      // high-frequency patchiness: earthy hollows + bleached rises
-      const patchN = noise.get(x * 0.33 + 47.3, z * 0.33 - 23.7);
-      const pk = (patchN + 1) / 2;
-      if (pk < 0.42) tmp.lerp(cPatchDark, ((0.42 - pk) / 0.42) * 0.6);
-      else if (pk > 0.58) tmp.lerp(cPatchLight, ((pk - 0.58) / 0.42) * 0.4);
-      colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b;
+    const noise = heightNoise(spec.meta.seed);
+    const vps = cellsPerChunk + 1; // verts per chunk side
+    // Shared normal accumulators over the GLOBAL vertex grid (Float32Array +
+    // Math.fround so per-add rounding matches the legacy computeVertexNormals
+    // exactly). Adjacent chunks accumulate face normals into the same global
+    // vertex, reproducing exactly what computeVertexNormals() would produce
+    // on one merged mesh — seamless lighting across chunk borders.
+    const nacc = new Float32Array(this.res * this.res * 3);
+    const builds: Array<{ geo: THREE.BufferGeometry; keys: Uint32Array }> = [];
+    for (let cj = 0; cj < chunksPerSide; cj++) {
+      for (let ci = 0; ci < chunksPerSide; ci++) {
+        const geo = new THREE.BufferGeometry();
+        const nv = vps * vps;
+        const posArr = new Float32Array(nv * 3);
+        const uvArr = new Float32Array(nv * 2);
+        const colArr = new Float32Array(nv * 3);
+        const keys = new Uint32Array(nv);
+        const tmp = new THREE.Color();
+        for (let ly = 0; ly < vps; ly++) {
+          for (let lx = 0; lx < vps; lx++) {
+            // global grid indices — shared edge vertices get the SAME (x, z)
+            // in every chunk that owns them (bit-identical, no cracks)
+            const gi = ci * cellsPerChunk + lx, gj = cj * cellsPerChunk + ly;
+            const vi = ly * vps + lx;
+            const x = -half + gi * this.cell, z = -half + gj * this.cell;
+            const y = h[gi][gj];
+            posArr[vi * 3] = x; posArr[vi * 3 + 1] = y; posArr[vi * 3 + 2] = z;
+            uvArr[vi * 2] = gi / (this.res - 1); uvArr[vi * 2 + 1] = 1 - gj / (this.res - 1);
+            keys[vi] = gi * this.res + gj;
+            // legacy read the coords back from the float32 position attribute —
+            // the color noise must see the same rounded inputs to stay identical
+            const fx = posArr[vi * 3], fz = posArr[vi * 3 + 2];
+            const slopeN = noise.get(fx * 0.05, fz * 0.05);
+            tmp.copy(cGround).lerp(cAlt, (slopeN + 1) / 2);
+            const hn = THREE.MathUtils.clamp((y / Math.max(1, t.maxHeight)) - 0.6, 0, 1);
+            tmp.lerp(cRock, hn * 1.2);
+            // high-frequency patchiness: earthy hollows + bleached rises
+            const patchN = noise.get(fx * 0.33 + 47.3, fz * 0.33 - 23.7);
+            const pk = (patchN + 1) / 2;
+            if (pk < 0.42) tmp.lerp(cPatchDark, ((0.42 - pk) / 0.42) * 0.6);
+            else if (pk > 0.58) tmp.lerp(cPatchLight, ((pk - 0.58) / 0.42) * 0.4);
+            colArr[vi * 3] = tmp.r; colArr[vi * 3 + 1] = tmp.g; colArr[vi * 3 + 2] = tmp.b;
+          }
+        }
+        // same triangle pattern as the legacy PlaneGeometry: (a,b,d),(b,c,d)
+        const idx: number[] = [];
+        for (let ly = 0; ly < cellsPerChunk; ly++) {
+          for (let lx = 0; lx < cellsPerChunk; lx++) {
+            const a = lx + vps * ly, b = lx + vps * (ly + 1);
+            const c = (lx + 1) + vps * (ly + 1), d = (lx + 1) + vps * ly;
+            idx.push(a, b, d, b, c, d);
+          }
+        }
+        geo.setIndex(idx);
+        geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+        geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+        geo.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+        geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nv * 3), 3));
+        // face-normal accumulation — the same math as three's
+        // computeVertexNormals (cb = (pC-pB) x (pA-pB), summed per vertex),
+        // but into the shared global grid so chunk borders shade seamlessly
+        for (let f = 0; f < idx.length; f += 3) {
+          const iA = idx[f] * 3, iB = idx[f + 1] * 3, iC = idx[f + 2] * 3;
+          const cbx = posArr[iC] - posArr[iB], cby = posArr[iC + 1] - posArr[iB + 1], cbz = posArr[iC + 2] - posArr[iB + 2];
+          const abx = posArr[iA] - posArr[iB], aby = posArr[iA + 1] - posArr[iB + 1], abz = posArr[iA + 2] - posArr[iB + 2];
+          const nx = cby * abz - cbz * aby, ny = cbz * abx - cbx * abz, nz = cbx * aby - cby * abx;
+          const kA = keys[idx[f]] * 3, kB = keys[idx[f + 1]] * 3, kC = keys[idx[f + 2]] * 3;
+          nacc[kA] = Math.fround(nacc[kA] + nx); nacc[kA + 1] = Math.fround(nacc[kA + 1] + ny); nacc[kA + 2] = Math.fround(nacc[kA + 2] + nz);
+          nacc[kB] = Math.fround(nacc[kB] + nx); nacc[kB + 1] = Math.fround(nacc[kB + 1] + ny); nacc[kB + 2] = Math.fround(nacc[kB + 2] + nz);
+          nacc[kC] = Math.fround(nacc[kC] + nx); nacc[kC + 1] = Math.fround(nacc[kC + 1] + ny); nacc[kC + 2] = Math.fround(nacc[kC + 2] + nz);
+        }
+        builds.push({ geo, keys });
+      }
     }
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geo.computeVertexNormals();
-    // steep slopes -> rock color
-    const nrm = geo.attributes.normal as THREE.BufferAttribute;
-    for (let k = 0; k < pos.count; k++) {
-      const ny = nrm.getY(k);
-      if (ny < 0.75) { const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1); tmp.setRGB(colors[k * 3], colors[k * 3 + 1], colors[k * 3 + 2]).lerp(cRock, f); colors[k * 3] = tmp.r; colors[k * 3 + 1] = tmp.g; colors[k * 3 + 2] = tmp.b; }
+    // normalize the shared accumulators back into each chunk (== three's normalizeNormals)
+    for (const { geo, keys } of builds) {
+      const nrm = geo.attributes.normal as THREE.BufferAttribute;
+      for (let vi = 0; vi < keys.length; vi++) {
+        const k3 = keys[vi] * 3;
+        const l = Math.sqrt(nacc[k3] * nacc[k3] + nacc[k3 + 1] * nacc[k3 + 1] + nacc[k3 + 2] * nacc[k3 + 2]) || 1;
+        nrm.setXYZ(vi, nacc[k3] / l, nacc[k3 + 1] / l, nacc[k3 + 2] / l);
+      }
     }
-    geo.attributes.color.needsUpdate = true;
+    // steep slopes -> rock color (legacy pass, per chunk)
+    for (const { geo } of builds) {
+      const nrm = geo.attributes.normal as THREE.BufferAttribute;
+      const col = geo.attributes.color as THREE.BufferAttribute;
+      const tmp = new THREE.Color();
+      for (let k = 0; k < nrm.count; k++) {
+        const ny = nrm.getY(k);
+        if (ny < 0.75) {
+          const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1);
+          tmp.setRGB(col.getX(k), col.getY(k), col.getZ(k)).lerp(cRock, f);
+          col.setXYZ(k, tmp.r, tmp.g, tmp.b);
+        }
+      }
+      col.needsUpdate = true;
+    }
     // Workstream C: ground material comes from the biome treatment (cached,
     // shared — never disposed here). volcanic → ember-cracked basalt with
     // glowing veins; snow → glittering snowdrift; desert → cracked earth, etc.
     const mat = mats.biomeGroundDef(biome.ground, { repeat: this.size / 8 });
     mat.vertexColors = true;
-    this.mesh = new THREE.Mesh(geo, mat);
-    this.mesh.receiveShadow = true;
-    this.mesh.castShadow = false;
-    scene.add(this.mesh);
-
-    // ---- physics heightfield (cannon expects matrix[i][j] with x along i, y along j)
-    // The body rotation (-90° about X) + position map local (i·e, j·e) to world
-    // (−half+i·e, +half−j·e), i.e. the j axis comes out Z-mirrored relative to
-    // the visual mesh and heightAt(), which place h[i][j] at z = −half+j·e.
-    // Mirror the data along j so physics grid sample (i,j) collides exactly
-    // where heightAt()/the mesh put h[i][j] (B3).
-    const phys: number[][] = [];
-    for (let i = 0; i < this.res; i++) {
-      phys[i] = [];
-      for (let j = 0; j < this.res; j++) phys[i][j] = h[i][this.res - 1 - j];
+    for (const { geo } of builds) {
+      const m = new THREE.Mesh(geo, mat);
+      m.receiveShadow = true;
+      m.castShadow = false;
+      scene.add(m);
+      this.chunkMeshes.push(m);
     }
-    const shape = new CANNON.Heightfield(phys, { elementSize: this.cell });
-    this.body = new CANNON.Body({ mass: 0, material: physics.defaultMat, collisionFilterGroup: GROUP.WORLD });
-    this.body.addShape(shape);
-    // rotate so that heightfield's local (x, y) → world (x, z), local z → world y
-    this.body.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
-    this.body.position.set(-half, 0, half);
-    physics.world.addBody(this.body);
+    this.mesh = this.chunkMeshes[0];
+
+    // ---- chunked physics + streaming (stage-1 workstream B): one static
+    // cannon Heightfield per chunk, each built from a sub-matrix of the
+    // shared world-space height grid above — the SAME grid worker A's chunk
+    // meshes sample, so physics and visuals agree exactly. Static bodies are
+    // cheap collision data; the bodyStream pages them in/out of the physics
+    // world by player distance, with hysteresis (no load/unload thrash) and
+    // a per-frame build budget.
+    //
+    // The j-axis mirror fix from the single-body era is preserved PER CHUNK:
+    // chunk data P[li][lj] = h[i0+li][j1-lj], body at (x0, 0, z1) with
+    // x0 = −half+i0·cell, z1 = −half+j1·cell, same −90° X rotation — so
+    // cannon's local (li·e, lj·e) lands exactly on the mesh's h[i][j] (B3).
+    // Adjacent chunks share edge sample rows exactly (one grid, 1-cell
+    // overlap == shared edges), so there is no tunneling at seams.
+    //
+    // Grid parameters are derived from A's canonical chunk fields (never
+    // recomputed independently — physics chunks MUST align with mesh chunks).
+    const cps = Math.round(this.size / this.chunkSize); // == A's chunksPerSide
+    this.grid = {
+      chunksPerSide: cps,
+      cellsPerChunk: (this.res - 1) / cps, // exact: A builds res = cps*cpc+1
+      chunkSize: this.chunkSize,
+      cell: this.cell,
+      half,
+      res: this.res,
+    };
+    this.bodyStream = new ChunkStream({
+      grid: this.grid,
+      loadRadius: this.chunkSize * 2.5,
+      unloadRadius: this.chunkSize * 4,
+      lifecycle: {
+        buildChunk: (cx, cz) => this.buildChunkBody(cx, cz, physics),
+        releaseChunk: (cx, cz) => {
+          const b = this.chunkBodies.get(chunkKey(cx, cz));
+          if (b) { physics.remove(b); this.chunkBodies.delete(chunkKey(cx, cz)); }
+        },
+      },
+    });
+    // Meshes: worker A builds every chunk mesh up front; the mesh stream
+    // pages them in/out of the scene (draw-call hygiene). Radii cover the
+    // camera far plane (~1400m) with margin so the horizon never shows
+    // holes; worker D's far-field work owns tuning these further. Geometry
+    // stays owned by A — streaming only toggles scene membership, never
+    // disposes.
+    this.meshStream = new ChunkStream({
+      grid: this.grid,
+      loadRadius: MESH_STREAM_LOAD_RADIUS,
+      unloadRadius: MESH_STREAM_UNLOAD_RADIUS,
+      lifecycle: {
+        buildChunk: (cx, cz) => {
+          const m = this.chunkMeshes[cz * cps + cx];
+          if (m && m.parent !== scene) scene.add(m);
+        },
+        releaseChunk: (cx, cz) => {
+          const m = this.chunkMeshes[cz * cps + cx];
+          if (m) scene.remove(m);
+        },
+      },
+    });
+    // Initial page-in around spawn: the world must be walkable on frame one.
+    // ChunkStream treats the first update as a teleport and pages everything
+    // within loadRadius synchronously (deterministic). Small worlds are one
+    // chunk — identical to the old single-body behavior.
+    this.bodyStream.update(new THREE.Vector3(0, 0, 0));
+    this.meshStream.update(new THREE.Vector3(0, 0, 0));
+    const oc = worldToChunk(0, 0, this.grid);
+    this.body = this.chunkBodies.get(chunkKey(oc.cx, oc.cz))!;
 
     // ---- boundary
     if (spec.world.boundary !== 'wrap') {
@@ -243,6 +478,11 @@ export class Terrain {
     if (this.waterMat) (this.waterMat.userData.uTime as { value: number }).value += dt;
   }
 
+  /** Chunk layout for worker B / engine.perf instrumentation. */
+  getChunkStats(): { chunkCount: number; chunkSize: number } {
+    return { chunkCount: this.chunkMeshes.length, chunkSize: this.chunkSize };
+  }
+
   /**
    * Align the water's fake sun glint with the real sky sun. Call once after
    * createSky() — e.g. `terrain.setWaterSun(sunDirFromSky, dusk ? '#ffb46b' : '#cfe8ff')`.
@@ -262,16 +502,80 @@ export class Terrain {
     }
   }
 
-  /** Bilinear height sample at world (x,z). */
+  /**
+   * Stage-1 B: build (and page into the physics world) the static Heightfield
+   * body for chunk (cx,cz). Samples the shared world-space height grid — the
+   * same grid worker A's chunk meshes sample — so physics and visuals agree
+   * exactly, including at chunk borders (shared edge samples; see the
+   * constructor note).
+   */
+  private buildChunkBody(cx: number, cz: number, physics: Physics): void {
+    const { i0, i1, j0, j1 } = chunkCellRange(cx, cz, this.grid);
+    const half = this.grid.half, cell = this.grid.cell;
+    // j-mirror per chunk: P[li][lj] = h[i0+li][j1-lj] (B3 fix, chunk-local).
+    const data: number[][] = [];
+    for (let li = 0; li <= i1 - i0; li++) {
+      data[li] = [];
+      for (let lj = 0; lj <= j1 - j0; lj++) data[li][lj] = this.heights[i0 + li][j1 - lj];
+    }
+    const shape = new CANNON.Heightfield(data, { elementSize: cell });
+    const b = new CANNON.Body({ mass: 0, material: physics.defaultMat, collisionFilterGroup: GROUP.WORLD });
+    b.addShape(shape);
+    // rotate so that heightfield's local (x, y) → world (x, z), local z → world y
+    b.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+    b.position.set(-half + i0 * cell, 0, -half + j1 * cell);
+    physics.world.addBody(b);
+    this.chunkBodies.set(chunkKey(cx, cz), b);
+  }
+
+  /**
+   * Stage-1 B: per-frame streaming hook — page chunk physics bodies (tight
+   * radii) and chunk meshes (far-plane-covering radii) in/out around the
+   * focus point (the player). Single-chunk worlds short-circuit to a no-op.
+   * Called by Engine.step every frame; blueprints may call it directly with
+   * the exact player position instead of the engine's camera fallback.
+   */
+  update(playerPos: THREE.Vector3): void {
+    this.bodyStream.update(playerPos);
+    this.meshStream.update(playerPos);
+  }
+
+  /**
+   * Height sample at world (x, z): the pure height function directly. Exact
+   * at grid points (bit-identical to the old bilinear lookup there); off-grid
+   * it samples the true surface instead of the bilinear approximation.
+   */
+
+  /** Stage-1 B: streaming counters for engine.perf (?perfoverlay=1). */
+  getStreamStats(): { loaded: number; buildMs: number; queue: number } {
+    const s = this.bodyStream;
+    return { loaded: s.loadedCount, buildMs: s.buildMsEMA, queue: s.queueLength + this.meshStream.queueLength };
+  }
+
+  /** Stage-1 B: is the physics body for chunk (cx,cz) currently paged in? */
+  isChunkLoaded(cx: number, cz: number): boolean {
+    return this.bodyStream.isLoaded(cx, cz);
+  }
+
+  /** Stage-1 B: is the mesh for chunk (cx,cz) currently in the scene? */
+  isChunkMeshLoaded(cx: number, cz: number): boolean {
+    return this.meshStream.isLoaded(cx, cz);
+  }
+
+  /** Stage-1 B: currently resident chunk physics bodies. */
+  get loadedChunkBodies(): CANNON.Body[] {
+    return [...this.chunkBodies.values()];
+  }
+
+  /**
+   * Stage-1 B: the resident physics body for chunk (cx,cz), or undefined when
+   * the chunk is not currently paged in.
+   */
+  chunkBodyAt(cx: number, cz: number): CANNON.Body | undefined {
+    return this.chunkBodies.get(chunkKey(cx, cz));
+  }
   heightAt(x: number, z: number): number {
-    const half = this.size / 2;
-    const fi = (x + half) / this.cell, fj = (z + half) / this.cell;
-    const i = Math.floor(fi), j = Math.floor(fj);
-    const cl = (v: number) => Math.min(this.res - 1, Math.max(0, v));
-    const i0 = cl(i), i1 = cl(i + 1), j0 = cl(j), j1 = cl(j + 1);
-    const tx = THREE.MathUtils.clamp(fi - i, 0, 1), tz = THREE.MathUtils.clamp(fj - j, 0, 1);
-    const a = this.heights[i0][j0], b = this.heights[i1][j0], c = this.heights[i0][j1], d = this.heights[i1][j1];
-    return THREE.MathUtils.lerp(THREE.MathUtils.lerp(a, b, tx), THREE.MathUtils.lerp(c, d, tx), tz);
+    return terrainHeightAt(this.hp, x, z);
   }
 
   normalAt(x: number, z: number): THREE.Vector3 {
@@ -299,7 +603,7 @@ export class Terrain {
    *   3. steep slope → 'rock'
    *   4. moisture/patch noise → 'mud' | 'sand' | 'gravel'
    *   5. biome ground default (custom.biome.groundSurface ?? 'stone')
-   * New biomes add table rows, not controller branches.
+   * New biomes add table rows, not controller rows.
    */
   surfaceAt(x: number, z: number): string {
     if (this.bioSurface) return this.bioSurface;
@@ -320,8 +624,15 @@ export class Terrain {
   }
 
   dispose(scene: THREE.Scene, physics: Physics) {
-    scene.remove(this.mesh); this.mesh.geometry.dispose();
-    physics.remove(this.body);
+    // Stage-1 B: page out everything first — bodyStream.reset() removes all
+    // resident chunk bodies from the physics world (the legacy `body` alias
+    // is the origin chunk's body), meshStream.reset() removes paged-in chunk
+    // meshes from the scene — then dispose A's geometries (owned by A, never
+    // disposed by the mesh stream).
+    this.bodyStream.reset();
+    this.meshStream.reset();
+    for (const m of this.chunkMeshes) { scene.remove(m); m.geometry.dispose(); }
+    this.chunkMeshes = [];
     for (const w of this.walls) physics.remove(w);
     if (this.water) { scene.remove(this.water); this.water.geometry.dispose(); }
   }

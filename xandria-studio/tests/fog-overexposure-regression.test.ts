@@ -38,6 +38,7 @@ import {
   type TimeOfDay,
   type BiomeDefLike,
 } from '../src/engine/gfx/GenreGrade';
+import { fogDensityScaleForWorldSize } from '../src/engine/gfx/FarField';
 import { GradeShader } from '../src/engine/gfx/GradeShader';
 import { RetroShader, patchBloomOutputTransform } from '../src/engine/gfx/PostFX';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -263,7 +264,8 @@ describe('D2 per-biome cinematic dusk grading', () => {
     try {
       const fog = scene.fog as THREE.FogExp2;
       // absolute density from the BiomeDefLike wins over weather x multiplier
-      expect(fog.density).toBe(0.009);
+      // (the world-size thin-out still applies on top — scale, not replace)
+      expect(fog.density).toBe(0.009 * fogDensityScaleForWorldSize(spec.world.terrain.size));
       // absolute fog color still flows through fogLuminance + dusk fogTint
       const expected = new THREE.Color('#112233');
       expected.multiplyScalar(gradeAtmosphere('racing', 'dusk', like).fogLuminance);
@@ -277,7 +279,8 @@ describe('D2 per-biome cinematic dusk grading', () => {
     const sky2 = createSky(spec, scene2, 'high');
     try {
       expect((scene2.fog as THREE.FogExp2).density)
-        .toBeCloseTo(0.0035 * gradeAtmosphere('racing', 'dusk', 'desert').fogDensity, 10);
+        .toBeCloseTo(0.0035 * gradeAtmosphere('racing', 'dusk', 'desert').fogDensity
+          * fogDensityScaleForWorldSize(spec.world.terrain.size), 10);
     } finally {
       sky2.dispose();
     }

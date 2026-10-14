@@ -453,6 +453,16 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       else sp.custom.biome.biomeId = v as BiomeId;
     }, true), 'Auto picks the biome from seed + genre. Override forces one look.'));
 
+    // Open-world stage 1: world size override (schema validates 60..2000).
+    // Changing it then hitting Play rebuilds the world at the new size.
+    host.appendChild(field(
+      'WORLD SIZE',
+      slider(s.world.terrain.size, 60, 2000, 20, (sp, v) => {
+        sp.world.terrain.size = Math.round(v);
+      }, (v) => `${Math.round(v)}m`),
+      'Arena default 220–400m. 1000m+ = open world: the engine streams the world in chunks (stage 1).',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">PALETTE — APPLY ENVIRONMENT LOOK</div>`));
     const sw = h(`<div class="xed-swatches"></div>`);
     for (const env of ENVIRONMENTS) {

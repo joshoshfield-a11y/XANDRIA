@@ -35,7 +35,7 @@ Allowed shape (all optional):
  "theme":{"environment":"forest|jungle|desert|wasteland|arctic|volcanic|city|neon-city|space-station|ruins|dreamscape|islands|arena",
           "timeOfDay":"day|night|dusk","weather":"clear|rain|storm|snow|fog|ash",
           "palette":{"primary","secondary","accent","sky","horizon","ground","groundAlt","rock","fog","water" — all #rrggbb}},
- "world":{"terrain":{"type":"flat|hills|mountains|canyon|islands|platforms","size":200-800,"maxHeight":4-80,"roughness":0-1,"water":bool,"waterLevel":-10-20},
+ "world":{"terrain":{"type":"flat|hills|mountains|canyon|islands|platforms","size":200-2000,"maxHeight":4-80,"roughness":0-1,"water":bool,"waterLevel":-10-20},
           "boundary":"walls|cliffs|wrap"},
  "player":{"weapon":"blaster|rifle|shotgun|sword"},
  "enemies":[{"kind":"walker|brute|drone|flyer|turret","count":1-40,"health":10-500,"speed":1-20,"damage":1-50}],
@@ -51,10 +51,17 @@ Allowed shape (all optional):
  }
 }
 
-Match the player's imagination: if they say "giant glowing bugs", use enemyMods.size≈2 + glow; if "moonscape", use theme+palette+world to fake it. Do NOT invent fields outside this shape. Numbers must be numbers, colors #rrggbb.
+Match the player's imagination: if they say "giant glowing bugs", use enemyMods.size≈2 + glow; if "moonscape", use theme+palette+world to fake it.
+World size: 220-400 is the default arena size (leave size out unless asked). If the player asks for an OPEN WORLD, huge/vast/expansive/sprawling map, or a desert rally, set world.terrain.size 1000-2000 (1500 typical; 2000 for a racing desert rally). Engine streams the world in chunks, so big is fine — but only go big when the player asks.
+Do NOT invent fields outside this shape. Numbers must be numbers, colors #rrggbb.
 Intent: "${intent}"
 Base genre: ${base.meta.genre}, environment: ${base.theme.environment}.
 Return JSON only, no commentary.`;
+
+/** Exported for regression tests (asserts the open-world size guidance). */
+export function buildArchitectPrompt(intent: string, base: GameSpec): string {
+  return ARCHITECT_PROMPT(intent, base);
+}
 
 async function callLLM(cfg: LLMConfig, prompt: string): Promise<Record<string, unknown> | null> {
   const ctrl = new AbortController();

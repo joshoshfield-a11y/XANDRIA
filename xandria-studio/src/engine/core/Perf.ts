@@ -45,6 +45,12 @@ export interface PerfSnapshot {
   physicsMs: number;
   /** sampled frames since construction / last reset() */
   frames: number;
+  /** stage-1 B: terrain chunk physics bodies currently paged in */
+  chunksLoaded: number;
+  /** stage-1 B: EMA of per-chunk build time, ms (instrumentation only) */
+  chunkBuildMs: number;
+  /** stage-1 B: chunk builds queued by the streaming budget */
+  streamQueue: number;
 }
 
 /** Rolling window for frameMs / frameMsVariance. */
@@ -64,6 +70,12 @@ export class PerfMonitor {
   programs = 0;
   physicsMs = 0;
   frames = 0;
+  /** stage-1 B: terrain chunk physics bodies currently paged in */
+  chunksLoaded = 0;
+  /** stage-1 B: EMA of per-chunk build time, ms (instrumentation only) */
+  chunkBuildMs = 0;
+  /** stage-1 B: chunk builds queued by the streaming budget */
+  streamQueue = 0;
 
   /** Ring buffer of per-frame step() durations (ms). Preallocated once. */
   private readonly samples = new Float64Array(WINDOW);
@@ -116,9 +128,23 @@ export class PerfMonitor {
     this.programs = 0;
     this.physicsMs = 0;
     this.frames = 0;
+    this.chunksLoaded = 0;
+    this.chunkBuildMs = 0;
+    this.streamQueue = 0;
     this.samples.fill(0);
     this.head = 0;
     this.count = 0;
+  }
+
+  /**
+   * Stage-1 B: record one frame's streaming counters. Called by Engine.step
+   * after terrain.update(); read-only instrumentation (no adaptation).
+   */
+  sampleStream(chunksLoaded: number, chunkBuildMs: number, streamQueue: number): void {
+    if (!this.enabled) return;
+    this.chunksLoaded = chunksLoaded;
+    this.chunkBuildMs = chunkBuildMs;
+    this.streamQueue = streamQueue;
   }
 
   /** Plain-object copy of the counters for console/JSON consumers (allocates — not for the hot loop). */
@@ -134,6 +160,9 @@ export class PerfMonitor {
       programs: this.programs,
       physicsMs: this.physicsMs,
       frames: this.frames,
+      chunksLoaded: this.chunksLoaded,
+      chunkBuildMs: this.chunkBuildMs,
+      streamQueue: this.streamQueue,
     };
   }
 }

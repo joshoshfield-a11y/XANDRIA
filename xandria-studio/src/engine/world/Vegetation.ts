@@ -5,6 +5,7 @@
  * placement is reproducible and integrated with exclusion zones and water.
  */
 import * as THREE from 'three';
+import type * as CANNON from 'cannon-es';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
@@ -12,6 +13,9 @@ import type { Terrain } from './Terrain';
 import type { MaterialLibrary } from '../gfx/Materials';
 import { resolveBiomeDef, effectiveScatter } from './Biomes';
 import { GROUP, type Physics } from '../core/Physics';
+import { chunkSeed, MAX_RESIDENT_CHUNKS } from './ChunkGrid';
+import { chunkKey, chunkWorldRect, type ChunkGrid } from './chunkLayout';
+import { TREE_SPECIES_CHUNK_CAP, type PlaceBounds } from './PropSets';
 
 type SpeciesId = 'pine' | 'oak' | 'palm' | 'cactus' | 'deadtree' | 'mushroom' | 'crystalflora';
 
@@ -172,9 +176,19 @@ export function speciesFor(env: string): SpeciesId[] {
 export interface VegetationOptions {
   exclusion?: Array<{ x: number; z: number; r: number }>;
   maxSlope?: number;
-  colliders?: { x: number; z: number; r: number }[];  // shared with Scatter
+  colliders?: { x: number; z: number; r: number }[];  // shared with Scatter (legacy path)
   physics?: Physics;
   count: number;
+  /**
+   * Open-world stage 1: chunked streaming mode. Placement becomes per-chunk
+   * (deterministic seed per chunk); the tier InstancedMeshes become global
+   * pools sized perSpeciesCap × MAX_RESIDENT_CHUNKS so draw calls stay flat.
+   * ChunkedScatter drives loadChunk/unloadChunk; update() keeps working.
+   */
+  chunked?: {
+    grid: ChunkGrid;
+    treeCountFor: (chunkAreaM2: number) => number;
+  };
 }
 
 interface VInstance { x: number; y: number; z: number; rot: number; scale: number; sp: SpeciesId }
@@ -198,9 +212,22 @@ export class Vegetation {
   private windUniforms: { uTime: { value: number }; uWind: { value: number } } = { uTime: { value: 0 }, uWind: { value: 1 } };
   private windMats: THREE.Material[] = [];
 
+  /** chunked-mode per-chunk data (streaming) */
+  private chunkData = new Map<string, { instances: VInstance[]; bodies: CANNON.Body[]; colliders: { x: number; z: number; r: number }[] }>();
+  private chunkedOpts?: { grid: ChunkGrid; treeCountFor: (chunkAreaM2: number) => number };
+  private grid!: ChunkGrid;
+  private worldSeed = 0;
+  private worldHalf = 0;
+  private species: SpeciesId[] = [];
+  private placer?: {
+    spec: GameSpec; terrain: Terrain; physics?: Physics; maxSlope: number;
+    excluded: (x: number, z: number, r: number) => boolean;
+  };
+  private lastCam = new THREE.Vector3();
+  /** max physics bodies per chunk in chunked mode (legacy: first 80 trees world-wide) */
+  private static readonly CHUNK_BODY_CAP = 8;
+
   constructor(spec: GameSpec, terrain: Terrain, mats: MaterialLibrary, scene: THREE.Scene, opts: VegetationOptions) {
-    if (opts.count <= 0) return;
-    const rng = new Rng(spec.meta.seed ^ 0xbe09);
     const mix = spec.custom?.biome?.floraMix;
     // Workstream C: explicit floraMix wins; otherwise the resolved biome's
     // authored species mix; otherwise the legacy per-environment table.
@@ -220,35 +247,93 @@ export class Vegetation {
     const maxSlope = opts.maxSlope ?? 0.45;
     const half = terrain.size / 2 - 8;
 
-    // placement
-    for (let i = 0; i < opts.count; i++) {
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const x = rng.range(-half, half), z = rng.range(-half, half);
-        if (excluded(x, z, 0.8)) continue;
-        if (terrain.slopeAt(x, z) > maxSlope) continue;
-        const y = terrain.heightAt(x, z);
-        if (spec.world.terrain.water && y < spec.world.terrain.waterLevel + 0.5) continue;
-        const sp = rng.pick(species);
-        const def = SPECIES[sp];
-        const scale = rng.range(def.minS, def.maxS);
-        this.instances.push({ x, y, z, rot: rng.range(0, Math.PI * 2), scale, sp });
-        opts.colliders?.push({ x, z, r: def.collideR * scale });
-        if (opts.physics && this.instances.length <= 80) {
-          opts.physics.cylinder(0.4 * scale, 0.45 * scale, 2.4 * scale, [x, y + 1.2 * scale, z], { group: GROUP.WORLD });
-        }
-        break;
-      }
-    }
-
     // wind strength from weather
     const wind = spec.theme.weather === 'storm' ? 2.2 : spec.theme.weather === 'rain' ? 1.3 : spec.theme.weather === 'snow' ? 1.1 : 0.8;
     this.windUniforms.uWind.value = wind * 0.12;
 
-    // build tiers: per species × lod × (trunk, foliage)
+    this.species = species;
+    this.worldSeed = spec.meta.seed;
+    this.worldHalf = half;
+    this.placer = { spec, terrain, physics: opts.physics, maxSlope, excluded };
+
+    if (opts.chunked) {
+      // ---- chunked streaming mode: global tier pools, no initial placement.
+      // Pool capacity per (species, lod, trunk/foliage) mesh is hard-bounded:
+      // per-species per-chunk cap × max resident chunks.
+      this.chunkedOpts = opts.chunked;
+      this.grid = opts.chunked.grid;
+      const counts = new Map<SpeciesId, number>();
+      for (const sp of species) counts.set(sp, TREE_SPECIES_CHUNK_CAP * MAX_RESIDENT_CHUNKS);
+      this.buildTiers(mats, spec, scene, counts);
+      for (const t of this.tiers) { t.mesh.count = 0; t.mesh.visible = false; }
+      return;
+    }
+
+    if (opts.count <= 0) return;
+    // ---- legacy whole-world path (byte-identical placement)
+    const rng = new Rng(spec.meta.seed ^ 0xbe09);
+    const placed = this.generateTrees(rng, { x0: -half, x1: half, z0: -half, z1: half },
+      opts.count, species, { maxBodies: 80, speciesCap: Infinity });
+    this.instances = placed.instances;
+    for (const c of placed.colliders) opts.colliders?.push(c);
+    this.legacyBodies = placed.bodies;
+
+    // build tiers: per species × lod × (trunk, foliage), exact capacities
     const bySpecies = new Map<SpeciesId, number>();
     for (const inst of this.instances) bySpecies.set(inst.sp, (bySpecies.get(inst.sp) ?? 0) + 1);
+    this.buildTiers(mats, spec, scene, bySpecies);
+    this.rebucket(new THREE.Vector3(0, 0, 0));
+  }
 
-    for (const [sp, count] of bySpecies) {
+  /** legacy-mode physics bodies (owned for the world's lifetime) */
+  private legacyBodies: CANNON.Body[] = [];
+
+  /**
+   * Seeded tree placement inside `bounds`. Shared by the legacy whole-world
+   * path and per-chunk generation — the rng stream is identical for identical
+   * (seed, bounds, count). Bodies are created (not tracked here) and returned
+   * so the caller can dispose them on chunk unload.
+   */
+  private generateTrees(
+    rng: Rng, b: PlaceBounds, count: number, species: SpeciesId[],
+    opts: { maxBodies: number; speciesCap: number },
+  ): { instances: VInstance[]; colliders: { x: number; z: number; r: number }[]; bodies: CANNON.Body[] } {
+    const p = this.placer!;
+    const instances: VInstance[] = [];
+    const colliders: { x: number; z: number; r: number }[] = [];
+    const bodies: CANNON.Body[] = [];
+    const perSpecies = new Map<SpeciesId, number>();
+    for (let i = 0; i < count; i++) {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const x = rng.range(b.x0, b.x1), z = rng.range(b.z0, b.z1);
+        if (p.excluded(x, z, 0.8)) continue;
+        if (p.terrain.slopeAt(x, z) > p.maxSlope) continue;
+        const y = p.terrain.heightAt(x, z);
+        if (p.spec.world.terrain.water && y < p.spec.world.terrain.waterLevel + 0.5) continue;
+        const sp = rng.pick(species);
+        const def = SPECIES[sp];
+        const scale = rng.range(def.minS, def.maxS);
+        const rot = rng.range(0, Math.PI * 2);
+        // per-species chunk cap: rng already consumed above, so the stream is
+        // unaffected whether or not the cap binds (it only binds in freak cases)
+        if ((perSpecies.get(sp) ?? 0) >= opts.speciesCap) break;
+        perSpecies.set(sp, (perSpecies.get(sp) ?? 0) + 1);
+        instances.push({ x, y, z, rot, scale, sp });
+        colliders.push({ x, z, r: def.collideR * scale });
+        if (p.physics && bodies.length < opts.maxBodies) {
+          bodies.push(p.physics.cylinder(0.4 * scale, 0.45 * scale, 2.4 * scale,
+            [x, y + 1.2 * scale, z], { group: GROUP.WORLD }));
+        }
+        break;
+      }
+    }
+    return { instances, colliders, bodies };
+  }
+
+  /** Build tier InstancedMeshes; capacities come from the caller's map. */
+  private buildTiers(mats: MaterialLibrary, spec: GameSpec, scene: THREE.Scene, capacities: Map<SpeciesId, number>) {
+    for (const [sp, count] of capacities) {
+      if (count <= 0) continue;
       const def = SPECIES[sp];
       const trunkMat = mats.standard('wood', sp === 'cactus' ? '#4d7a3d' : '#5a4230', { roughness: 0.95 });
       const folMat = def.foliageMat(mats, spec);
@@ -272,7 +357,71 @@ export class Vegetation {
         }
       }
     }
-    this.rebucket(new THREE.Vector3(0, 0, 0));
+  }
+
+  // ---------- chunked streaming API (driven by ChunkedScatter) ----------
+
+  /** Generate + register a chunk's trees (idempotent). */
+  loadChunk(cx: number, cz: number): void {
+    if (!this.chunkedOpts || this.chunkData.has(chunkKey(cx, cz))) return;
+    const rect = chunkWorldRect(cx, cz, this.grid);
+    const half = this.worldHalf;
+    const b: PlaceBounds = {
+      x0: Math.max(rect.x0, -half), x1: Math.min(rect.x1, half),
+      z0: Math.max(rect.z0, -half), z1: Math.min(rect.z1, half),
+    };
+    const area = Math.max(0, b.x1 - b.x0) * Math.max(0, b.z1 - b.z0);
+    const count = this.chunkedOpts.treeCountFor(area);
+    const rng = new Rng(chunkSeed(this.worldSeed, 0xbe09, cx, cz));
+    const placed = this.generateTrees(rng, b, count, this.species,
+      { maxBodies: Vegetation.CHUNK_BODY_CAP, speciesCap: TREE_SPECIES_CHUNK_CAP });
+    this.chunkData.set(chunkKey(cx, cz), placed);
+    this.rebuildInstances();
+  }
+
+  /** Drop a chunk's trees; physics bodies are removed from the world. */
+  unloadChunk(cx: number, cz: number): void {
+    if (!this.chunkedOpts) return;
+    const data = this.chunkData.get(chunkKey(cx, cz));
+    if (!data) return;
+    const physics = this.placer?.physics;
+    if (physics) for (const body of data.bodies) physics.remove(body);
+    this.chunkData.delete(chunkKey(cx, cz));
+    this.rebuildInstances();
+  }
+
+  /** Per-chunk colliders for the shared Scatter.colliders array. */
+  chunkColliders(cx: number, cz: number): { x: number; z: number; r: number }[] {
+    return this.chunkData.get(chunkKey(cx, cz))?.colliders ?? [];
+  }
+
+  /** Per-chunk instances (test hook + determinism verification). */
+  chunkInstances(cx: number, cz: number): VInstance[] {
+    return this.chunkData.get(chunkKey(cx, cz))?.instances ?? [];
+  }
+
+  get loadedChunkCount(): number { return this.chunkData.size; }
+
+  /** total instances across loaded chunks (chunked) or the whole world (legacy) */
+  get instanceCount(): number { return this.instances.length; }
+
+  private rebuildInstances() {
+    const keys = [...this.chunkData.keys()].sort();
+    const all: VInstance[] = [];
+    for (const k of keys) all.push(...this.chunkData.get(k)!.instances);
+    this.instances = all;
+    this.rebucket(this.lastCam);
+  }
+
+  /** Remove every chunk + tier mesh (full teardown). */
+  disposeAll(scene: THREE.Scene) {
+    if (this.chunkedOpts) {
+      const physics = this.placer?.physics;
+      if (physics) for (const [, data] of this.chunkData) for (const body of data.bodies) physics.remove(body);
+      this.chunkData.clear();
+      this.instances = [];
+    }
+    this.dispose(scene);
   }
 
   /** GPU wind sway: bend foliage by height, phase from instance position. */
@@ -302,6 +451,7 @@ export class Vegetation {
 
   /** Reassign instances to LOD tiers by camera distance (throttled). */
   update(dt: number, cameraPos: THREE.Vector3) {
+    this.lastCam.copy(cameraPos);
     this.time += dt;
     this.windUniforms.uTime.value = this.time;
     this.rebucketTimer -= dt;

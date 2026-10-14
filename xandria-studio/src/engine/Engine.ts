@@ -16,6 +16,8 @@ import { createSky, type SkyRig } from './gfx/Sky';
 import { Particles } from './gfx/Particles';
 import { PostFX } from './gfx/PostFX';
 import { Terrain } from './world/Terrain';
+import { FarTerrain } from './world/FarTerrain';
+import { cameraFarForWorldSize, cameraNearForWorldSize, FAR_TERRAIN_MIN_SIZE } from './gfx/FarField';
 import { HUD, type RunStats } from './game/HUD';
 import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
@@ -75,6 +77,8 @@ export class Engine {
   readonly perf = new PerfMonitor();
   sky!: SkyRig;
   terrain!: Terrain;
+  /** low-res far-field shell under the detail terrain (workstream D); null on small worlds */
+  private farTerrain: FarTerrain | null = null;
   assetBridge: AssetBridge;
   readonly container: HTMLElement;
   readonly testMode: boolean;
@@ -95,6 +99,13 @@ export class Engine {
   /** blueprint rebuild fn, registered by the runtime bootstrap (enables in-place restart) */
   private runBuilder: ((e: Engine) => unknown) | null = null;
   private playerAvatar: PlayerAvatar | null = null;
+  /**
+   * Stage-1 B: optional exact streaming focus (the player position).
+   * Blueprints may point this at their controller's position each frame;
+   * Engine.step falls back to the camera (which tracks the player in every
+   * genre) when it is null.
+   */
+  streamFocus: THREE.Vector3 | null = null;
   /** hooks that survive restart() (runtime bootstrap); blueprint hooks are torn down */
   private persistentHooks = new Set<(dt: number) => void>();
   private pauseReason: 'menu' | 'modal' | null = null;
@@ -105,6 +116,8 @@ export class Engine {
   private physicsBodiesBaseline = 0;
   private physicsConstraintsBaseline = 0;
   private shakeVec = new THREE.Vector3();
+  /** stage-1 B: scratch vector for the streaming focus (no per-frame alloc) */
+  private streamTmp = new THREE.Vector3();
   /** the spec's original seed — daily runs temporarily override spec.meta.seed */
   private baseSeed: number;
   /** YYYY-MM-DD while a daily-challenge run is active; null otherwise */
@@ -142,7 +155,12 @@ export class Engine {
     // renderer stubs, which carry no info object.)
     if (this.renderer.info) this.renderer.info.autoReset = false;
 
-    this.camera = new THREE.PerspectiveCamera(66, (container.clientWidth || innerWidth) / (container.clientHeight || innerHeight), 0.1, 1400);
+    // Open World stage 1 (workstream D): the far plane scales with world size
+    // so the horizon is never GPU-clipped on big maps; the near plane scales
+    // with it so the near:far ratio (and z-precision) matches the legacy
+    // 1400/0.1 baseline. Worlds at/below the knee keep the legacy planes.
+    const worldSize = spec.world.terrain.size;
+    this.camera = new THREE.PerspectiveCamera(66, (container.clientWidth || innerWidth) / (container.clientHeight || innerHeight), cameraNearForWorldSize(worldSize), cameraFarForWorldSize(worldSize));
     this.physics = new Physics(spec.world.gravity);
     this.mats = new MaterialLibrary(spec);
     this.input = new Input(this.renderer.domElement);
@@ -170,6 +188,7 @@ export class Engine {
         flatRadius: opts.flatRadius,
       });
     }
+    this.syncFarTerrain();
     this.terrainSeed = spec.meta.seed;
 
     // audio unlock on first gesture (removed again in dispose())
@@ -264,10 +283,24 @@ export class Engine {
       flatRadius: this.terrainOpts.flatRadius,
     });
     this.terrainSeed = this.spec.meta.seed;
+    this.syncFarTerrain();
     // The opt-in asset packs ground their props on engine terrain — keep the
     // bridge's reference fresh (private field, so set from here rather than
     // touching AssetBridge.ts).
     (this.assetBridge as unknown as { terrain?: Terrain }).terrain = this.terrain;
+  }
+
+  /**
+   * Open World stage 1 (workstream D): build/rebuild the low-res far-field
+   * shell under the detail terrain. Big worlds only — small worlds render
+   * byte-identical without it.
+   */
+  private syncFarTerrain() {
+    this.farTerrain?.dispose();
+    this.farTerrain = null;
+    if (!this.terrainOpts.noTerrain && this.terrain && this.terrain.size > FAR_TERRAIN_MIN_SIZE) {
+      this.farTerrain = new FarTerrain(this.spec, this.terrain, this.mats, this.scene);
+    }
   }
 
   /** Effective render quality: settings override, else the spec hint. */
@@ -532,6 +565,14 @@ export class Engine {
     this.touch.setVisible(this.state === 'playing');
     this.juice.update(dt, this.camera);
     this.sky.update(dt, this.camera.getWorldPosition(new THREE.Vector3()));
+    // Stage-1 B: chunk streaming follows the player every frame (all states —
+    // the title backdrop is a live world too). Instrumentation only: the
+    // counters below feed ?perfoverlay=1, nothing adapts quality.
+    if (this.terrain) {
+      this.terrain.update(this.streamFocus ?? this.camera.getWorldPosition(this.streamTmp));
+      const ss = this.terrain.getStreamStats();
+      perf.sampleStream(ss.loaded, ss.buildMs, ss.queue);
+    }
     // screenshake: offset around the render only, never accumulates into the camera
     const off = this.juice.shakeOffset(this.shakeVec);
     this.camera.position.add(off);
@@ -577,7 +618,8 @@ export class Engine {
       `frame ${p.frameMs.toFixed(2)}ms (±${Math.sqrt(p.frameMsVariance).toFixed(2)}) ${p.fps.toFixed(0)}fps\n` +
       `physics ${p.physicsMs.toFixed(2)}ms\n` +
       `draws ${p.drawCalls} tris ${(p.triangles / 1000).toFixed(1)}k\n` +
-      `geo ${p.geometries} tex ${p.textures} prog ${p.programs}`;
+      `geo ${p.geometries} tex ${p.textures} prog ${p.programs}\n` +
+      `chunks ${p.chunksLoaded} build ${p.chunkBuildMs.toFixed(2)}ms queue ${p.streamQueue}`;
   }
 
   /**
@@ -746,6 +788,7 @@ export class Engine {
     this.audio.dispose();
     this.assetBridge.dispose();
     this.postfx.dispose();
+    this.farTerrain?.dispose();
     this.renderer.dispose();
   }
 }

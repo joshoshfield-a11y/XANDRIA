@@ -19,10 +19,16 @@ export function createAtmosphere(spec: GameSpec): AtmosphereRig {
   const { timeOfDay, weather } = spec.theme;
   const sky = new Sky();
   // The dome follows the camera every frame (see SkyRig.update), so it only
-  // needs to comfortably enclose the view — and it MUST stay inside the
-  // camera far plane (1400 in Engine.ts), otherwise the whole sky is
-  // GPU-clipped (B4). Matches the night dome's radius-900 approach.
+  // needs to comfortably enclose the view.
+  // Open World stage 1 (workstream D): the dome no longer writes depth and
+  // renders first in the opaque pass (classic skybox behavior). Before this,
+  // the dome's 1000m depth shell occluded any terrain farther than 1000m
+  // from the camera — invisible on 220m worlds, but it would have swallowed
+  // the far field on 2km maps. Radius stays 1000, inside every camera far
+  // plane (Engine.ts scales far >= 1400 with world size).
   sky.scale.setScalar(1000);
+  (sky.material as THREE.Material).depthWrite = false;
+  sky.renderOrder = -1;
 
   const dusk = timeOfDay === 'dusk' || timeOfDay === 'dawn';
   // Env-art dusk preset: the sun sits lower for a longer atmospheric path and

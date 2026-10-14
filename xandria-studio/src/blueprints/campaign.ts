@@ -156,7 +156,9 @@ export type { ObjectiveType };
 /** Engine-level world assets: sky rig, terrain mesh, scene fog. */
 export function registerWorldAssets(assets: AssetRegistry, engine: Engine): void {
   assets.register('world.sky', { kind: 'world', roots: [engine.sky.group] });
-  if (engine.terrain) assets.register('world.ground', { kind: 'world', roots: [engine.terrain.mesh] });
+  // Stage-1 B: register ALL chunk meshes (not just chunk 0) — the reskin
+  // layer holds direct mesh references, so streaming page-outs don't break it.
+  if (engine.terrain) assets.register('world.ground', { kind: 'world', roots: engine.terrain.chunkMeshes });
   if (engine.scene.fog) assets.register('world.fog', { kind: 'world', fog: engine.scene.fog as THREE.Fog });
 }
 

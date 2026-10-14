@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { createAtmosphere, type AtmosphereRig } from './Atmosphere';
 import { gradeAtmosphere, type BiomeDefLike } from './GenreGrade';
+import { fogDensityScaleForWorldSize } from './FarField';
 import { LightLife } from './LightLife';
 import { Rng } from '../core/Rng';
 
@@ -79,6 +80,9 @@ export function createSky(
   });
     dome = new THREE.Mesh(new THREE.SphereGeometry(900, 24, 16), skyMat);
     dome.frustumCulled = false;
+    // Workstream D: render first like the day dome — without this the dome's
+    // 900m shell would paint over terrain farther than 900m at night.
+    dome.renderOrder = -1;
     group.add(dome);
   }
 
@@ -132,6 +136,11 @@ export function createSky(
   const shadowRes = quality === 'high' ? 2048 : 1024;
   sun.shadow.mapSize.set(shadowRes, shadowRes);
   sun.shadow.camera.near = 10; sun.shadow.camera.far = 400;
+  // Open World stage 1 (workstream D) — shadow camera NOT scaled with world
+  // size, deliberately: the shadow frustum is a player-local ±90m box that
+  // follows the camera target, and the far field is outside it by design
+  // (distant terrain reads fine unshadowed under fog; a world-sized shadow
+  // map would just smear the near-field shadows that matter).
   const sh = 90;
   sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh; sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;
   sun.shadow.bias = -0.0008; sun.shadow.normalBias = 0.02;
@@ -153,7 +162,13 @@ export function createSky(
   if (grade.fogTint) fogColor.lerp(new THREE.Color(grade.fogTint), 0.35);
   const density = grade.biomeFogDensity
     ?? (weather === 'fog' ? 0.012 : weather === 'storm' || weather === 'ash' ? 0.007 : environment === 'space-station' ? 0.002 : 0.0035) * grade.fogDensity;
-  scene.fog = new THREE.FogExp2(fogColor.getHex(), density);
+  // Open World stage 1 (workstream D): thin the density on big worlds so the
+  // horizon fades naturally instead of white-outing the mid-field or popping
+  // at the far plane. The authored per-biome/genre values above stay the
+  // source of truth — this is a scale, not a replacement — and the factor is
+  // 1 for worlds at/below the reference size (existing worlds unchanged).
+  const densityScaled = density * fogDensityScaleForWorldSize(spec.world.terrain.size);
+  scene.fog = new THREE.FogExp2(fogColor.getHex(), densityScaled);
   scene.background = fogColor;
 
   scene.add(group);
