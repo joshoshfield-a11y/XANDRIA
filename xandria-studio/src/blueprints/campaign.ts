@@ -156,9 +156,12 @@ export type { ObjectiveType };
 /** Engine-level world assets: sky rig, terrain mesh, scene fog. */
 export function registerWorldAssets(assets: AssetRegistry, engine: Engine): void {
   assets.register('world.sky', { kind: 'world', roots: [engine.sky.group] });
-  // Stage-1 B: register ALL chunk meshes (not just chunk 0) — the reskin
-  // layer holds direct mesh references, so streaming page-outs don't break it.
-  if (engine.terrain) assets.register('world.ground', { kind: 'world', roots: engine.terrain.chunkMeshes });
+  // Stage-1b A: chunk meshes build lazily now (spawn-area-first, then
+  // streamed) — register a LIVE roots provider so chunks built after
+  // registration still get reskinned on the next applyOverrides. (The old
+  // code snapshotted the array; with lazy builds that would miss every
+  // chunk built after blueprint construction.)
+  if (engine.terrain) assets.register('world.ground', { kind: 'world', roots: () => engine.terrain ? engine.terrain.chunkMeshes : [] });
   if (engine.scene.fog) assets.register('world.fog', { kind: 'world', fog: engine.scene.fog as THREE.Fog });
 }
 

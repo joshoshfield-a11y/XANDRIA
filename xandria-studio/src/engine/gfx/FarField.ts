@@ -1,5 +1,6 @@
 /**
- * Far-field scaling (Open World stage 1, workstream D).
+ * Far-field scaling (Open World stage 1, workstream D; stage 1b workstream C
+ * adds the shell resolution tiers + type-aware bias for multi-km worlds).
  *
  * Static config, NOT adaptive: every value below is a pure function of the
  * spec's world size, computed once at boot. The authored look stays the
@@ -24,6 +25,45 @@ export const FOG_REFERENCE_SIZE = 220;
  * terrain already covers the frame out to the far plane.
  */
 export const FAR_TERRAIN_MIN_SIZE = 500;
+
+/**
+ * Far-shell resolution tier (segments per side) as a pure function of world
+ * size. Open World stage 1b (workstream C): the 64x64 shell was built for
+ * 2km; on multi-km maps the tiers below keep the absolute cell size <= ~64m
+ * so the shell stays faithful near the chunk-stream boundary (which sits
+ * ~625m from the camera, nearly unfogged). The shell is static — it never
+ * swaps or follows the camera — so there are no LOD transitions to pop;
+ * every tier is exactly one draw call.
+ */
+export function farShellSegmentsForWorldSize(size: number): number {
+  if (!Number.isFinite(size) || size <= 0) return 64;
+  if (size <= 2000) return 64; // stage-1 sizes: byte-identical shell
+  if (size <= 4000) return 96; // 41.7m cells at 4km
+  return 128;                  // 62.5m cells at 8km (~33k tris, 1 draw call)
+}
+
+/**
+ * Downward bias (negative meters) for the far shell, as a pure function of
+ * the world spec. The shell must sit below the detail mesh everywhere it
+ * overlaps, or it pokes through near steep features.
+ *
+ * Measured max |detail - shellBilinear| on the deterministic scene (seed
+ * 20261012, 64-seg shell; scale-invariant — identical at 2/4/8km because the
+ * height field is parameterized in normalized coords):
+ *   hills/flat 1.81m, mountains 5.29m, canyon 19.81m (the canyon cliff step
+ *   is 1.4*maxHeight by construction).
+ * Stage-1's linear formula -(1.5 + size*0.001) covered hills but under-covered
+ * mountains and canyons (the shell could float above canyon floors near
+ * cliffs). The k factors below track the measurements with >=1.35x margin
+ * and scale with maxHeight*heightScale, which is how the true error scales.
+ * At 2km hills this yields -3.46m vs stage-1's -3.5m (4cm — invisible).
+ */
+export function farShellBias(terrainType: string, maxHeight: number, heightScale = 1): number {
+  const k = terrainType === 'canyon' ? 1.4 : terrainType === 'mountains' ? 0.18 : 0.13;
+  const mh = Number.isFinite(maxHeight) ? Math.max(1, maxHeight) : 14;
+  const hs = Number.isFinite(heightScale) ? Math.max(0.01, heightScale) : 1;
+  return -(1.0 + 1.35 * k * mh * hs);
+}
 
 /**
  * Camera far plane for a world of `size` meters. The margin covers the

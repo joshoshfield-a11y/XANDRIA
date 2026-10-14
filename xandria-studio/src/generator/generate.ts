@@ -453,16 +453,18 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     : ENV_TERRAIN[environment];
   const wantsWater = environment === 'islands' || has(text, 'lake', 'ocean', 'sea', 'water', 'river', 'flood');
 
-  // Open-world stage 1: prompts asking for a big world map to big sizes;
+  // Open-world stage 1b: prompts asking for a big world map to big sizes;
   // prompts that don't ask keep the legacy defaults byte-identically.
   // 'giant' is deliberately NOT a size word ('giant robot boss' is a boss fight).
+  // Provisional max 8000m (cold-build measured there; workstreams B/E own
+  // the final ceiling and may lower it).
   const wantsBigWorld = has(text, 'open world', 'open-world', 'vast', 'expansive',
     'sprawling', 'huge world', 'massive world', 'enormous world', 'huge map',
     'massive map', 'big map', 'large map', 'enormous map', 'continent', 'world map');
   const wantsRally = genre === 'racing' && has(text, 'rally', 'desert rally', 'open desert',
     'off-road', 'offroad', 'cross-country', 'cross country', 'dakar');
-  const worldSize = wantsRally ? 2000
-    : wantsBigWorld ? 1500
+  const worldSize = wantsRally ? 8000
+    : wantsBigWorld ? 3000
     : genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220;
 
   // --- assemble (partial → normalize fills the rest + validates)

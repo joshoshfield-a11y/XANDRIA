@@ -765,7 +765,7 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
     if (!isObj(t)) err('world.terrain', 'missing');
     else {
       if (!inEnum(t.type, TERRAIN_TYPES)) err('world.terrain.type', `must be one of ${TERRAIN_TYPES.join('|')}`);
-      if (!num(t.size, 60, 2000)) err('world.terrain.size', 'must be 60..2000');
+      if (!num(t.size, 60, 8000)) err('world.terrain.size', 'must be 60..8000');
       if (!num(t.maxHeight, 0, 200)) err('world.terrain.maxHeight', 'must be 0..200');
       if (!num(t.roughness, 0, 1)) err('world.terrain.roughness', 'must be 0..1');
       if (typeof t.water !== 'boolean') err('world.terrain.water', 'must be boolean');

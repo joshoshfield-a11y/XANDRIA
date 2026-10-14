@@ -12,10 +12,14 @@
  * - Vertex colors use the same recipe as Terrain.ts (same Noise2D seed, same
  *   world coords → identical noise values) over the shared cached biome
  *   ground material, so the shell reads as the same land at distance.
- * - A downward y-bias (grows with world size) keeps it below the detail
- *   mesh everywhere — no z-fighting, no polygon-offset fragility. The bias
- *   is sub-pixel beyond a few hundred meters and invisible under fog.
+ * - A downward y-bias (farShellBias: covers the measured max shell-vs-detail
+ *   interpolation error per terrain type) keeps it below the detail mesh
+ *   everywhere — no z-fighting, no polygon-offset fragility. The bias is a
+ *   few meters at the chunk-stream boundary and invisible under fog.
  * - One draw call, no shadows in or out, never frustum-culled.
+ * - Stage 1b: resolution tiers (farShellSegmentsForWorldSize) keep the
+ *   absolute cell <= ~64m on multi-km maps; the shell stays static (never
+ *   swaps or follows the camera), so there are no LOD transitions to pop.
  *
  * Gated to big worlds (FAR_TERRAIN_MIN_SIZE) by the Engine — small worlds
  * render byte-identical without it.
@@ -24,28 +28,39 @@ import * as THREE from 'three';
 import type { GameSpec } from '@spec';
 import { Noise2D } from '../core/Rng';
 import type { MaterialLibrary } from '../gfx/Materials';
+import { farShellBias, farShellSegmentsForWorldSize } from '../gfx/FarField';
 import { resolveBiomeDef, biomeTint } from './Biomes';
 import type { Terrain } from './Terrain';
 
-/** shell resolution (segments per side) — one draw call, ~8k tris */
+/**
+ * Shell resolution (segments per side) for stage-1 sizes (<=2000m) — one
+ * draw call, ~8k tris. Larger worlds use farShellSegmentsForWorldSize()
+ * tiers (96/128); every tier is still exactly one draw call.
+ */
 export const FAR_TERRAIN_SEGMENTS = 64;
 
 export class FarTerrain {
   readonly mesh: THREE.Mesh;
   readonly size: number;
   readonly bias: number;
+  /** segments per side actually built (resolution tier for this world size) */
+  readonly segments: number;
 
   constructor(spec: GameSpec, terrain: Terrain, mats: MaterialLibrary, scene: THREE.Scene) {
     const size = terrain.size;
     this.size = size;
-    const SEG = FAR_TERRAIN_SEGMENTS;
-    // Downward bias: sub-pixel at distance, and comfortably larger than the
-    // depth-buffer granularity at the far plane (see FarField.ts — the
-    // near:far ratio is held constant, so precision at relative distance is
-    // the same as the 1400/0.1 baseline).
-    this.bias = -(1.5 + size * 0.001);
-
+    const SEG = farShellSegmentsForWorldSize(size);
+    this.segments = SEG;
+    // Downward bias: covers the measured max shell-vs-detail interpolation
+    // error per terrain type (see farShellBias) so the shell never pokes
+    // through the detail mesh — no z-fighting, no polygon-offset fragility.
+    // The shell is static (never swaps/follows), so there are no LOD
+    // transitions to pop; depth precision at the overlap zone is ~cm (the
+    // near:far ratio is held constant per FarField.ts), far below the bias.
     const t = spec.world.terrain;
+    const heightScale = (spec.custom?.biome as { heightScale?: number } | undefined)?.heightScale ?? 1;
+    this.bias = farShellBias(t.type, t.maxHeight, heightScale);
+
     const half = size / 2;
     const maxH = Math.max(1, t.maxHeight);
 

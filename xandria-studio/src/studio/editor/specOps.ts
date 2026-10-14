@@ -467,8 +467,8 @@ export const ASSET_GROUPS: AssetGroup[] = [
           { kind: 'slider', label: 'Noise frequency', path: ['custom', 'biome', 'terrainFrequency'], min: 0.3, max: 3, step: 0.1 },
           { kind: 'slider', label: 'Height scale', path: ['custom', 'biome', 'heightScale'], min: 0, max: 2.5, step: 0.1 },
           { kind: 'slider', label: 'Water level', path: ['custom', 'biome', 'waterBias'], min: -5, max: 8, step: 0.5 },
-          // Open-world stage 1: world size (schema validates 60..2000). Play rebuilds the world.
-          { kind: 'slider', label: 'World size (m)', path: ['world', 'terrain', 'size'], min: 60, max: 2000, step: 20 },
+          // Open-world stage 1b: world size (schema validates 60..8000, provisional). Play rebuilds the world.
+          { kind: 'slider', label: 'World size (m)', path: ['world', 'terrain', 'size'], min: 60, max: 8000, step: 20 },
         ],
       },
       {

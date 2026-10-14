@@ -31,9 +31,12 @@ export const SCATTER_UNLOAD_RADIUS = 688;
 /**
  * Hard upper bound on simultaneously resident scatter chunks. Pool capacities
  * are sized as perChunkBudget × this. Analytic bound: chunk centers within
- * 688 + chunkDiag/2 ≈ 865m of the player; smallest chunk area is
- * (2000/8)² = 62500 m² → π·865²/62500 ≈ 38; 40 gives margin at every allowed
- * world size (60..2000m).
+ * 688 + chunkDiag/2 ≈ 865m of the player; large-world chunks are ~250m
+ * (chunkSize = size/ceil(size/256) stabilizes at 224..250m for worlds ≥2km),
+ * so the smallest chunk area is ≈ 62500 m² → π·865²/62500 ≈ 38; 40 gives
+ * margin at every allowed world size (60..8000m) — the bound is
+ * size-independent once chunks stabilize, so raising the cap to 8000m does
+ * not change it.
  */
 export const MAX_RESIDENT_CHUNKS = 40;
 
@@ -67,7 +70,7 @@ export function scatterGrid(terrain: Terrain): ChunkGrid {
  * NOTE: the naive `imul(cx,A) ^ imul(cz,B)` has an antisymmetry —
  * (-a)^(-b) === a^b for small coords (10 collisions in a 7×7 grid). Zigzag
  * encoding + addition avoids it: verified 66049/66049 unique over ±128
- * chunks (a 2000m world spans 8 per side).
+ * chunks (an 8000m world spans 32 per side — well inside).
  */
 export function chunkSeed(worldSeed: number, salt: number, cx: number, cz: number): number {
   // zigzag encode: 0 -> 0, bijective over the int32 range

@@ -133,14 +133,26 @@ describe('chunk seams are exact on a 1000m world', () => {
     const stats = terrain.getChunkStats();
     expect(stats.chunkCount).toBe(16);
     expect(stats.chunkSize).toBe(250);
-    expect(terrain.chunkMeshes).toHaveLength(16);
-    // row-major: index = cj * 4 + ci
-    const at = (ci: number, cj: number) => terrain.chunkMeshes[cj * 4 + ci];
+    // stage-1b A: meshes build lazily — build every chunk explicitly here,
+    // then address them by grid coords (chunkMeshes is build-ordered now)
+    for (let cj = 0; cj < 4; cj++) for (let ci = 0; ci < 4; ci++) terrain.ensureChunkMesh(ci, cj);
+    expect(terrain.builtMeshCount).toBe(16);
+    const at = (ci: number, cj: number) => terrain.getChunkMesh(ci, cj)!;
     const vps = 101; // 250m / 2.5m cells + 1
     const check = (a: THREE.BufferAttribute, b: THREE.BufferAttribute, ia: number, ib: number, label: string) => {
       expect(a.getX(ia), `${label}.x`).toBe(b.getX(ib));
       expect(a.getY(ia), `${label}.y`).toBe(b.getY(ib));
       expect(a.getZ(ia), `${label}.z`).toBe(b.getZ(ib));
+    };
+    // Stage-1b B: position attributes are chunk-local; compare WORLD
+    // positions (mesh.position + local). Shared edge verts are the same
+    // world grid points, so these are bit-identical — no cracks.
+    const checkWorldPos = (m: THREE.Mesh, e: THREE.Mesh, ia: number, ib: number, label: string) => {
+      const pa = m.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const pb = e.geometry.getAttribute('position') as THREE.BufferAttribute;
+      expect(m.position.x + pa.getX(ia), `${label}.x`).toBe(e.position.x + pb.getX(ib));
+      expect(pa.getY(ia), `${label}.y`).toBe(pb.getY(ib));
+      expect(m.position.z + pa.getZ(ia), `${label}.z`).toBe(e.position.z + pb.getZ(ib));
     };
     for (let cj = 0; cj < 4; cj++) {
       for (let ci = 0; ci < 4; ci++) {
@@ -155,7 +167,7 @@ describe('chunk seams are exact on a 1000m world', () => {
           const ec = e.geometry.getAttribute('color') as THREE.BufferAttribute;
           const en = e.geometry.getAttribute('normal') as THREE.BufferAttribute;
           for (let ly = 0; ly < vps; ly++) {
-            check(pos, ep, ly * vps + (vps - 1), ly * vps, `E-seam(${ci},${cj}) pos ly=${ly}`);
+            checkWorldPos(m, e, ly * vps + (vps - 1), ly * vps, `E-seam(${ci},${cj}) pos ly=${ly}`);
             check(col, ec, ly * vps + (vps - 1), ly * vps, `E-seam(${ci},${cj}) col ly=${ly}`);
             check(nrm, en, ly * vps + (vps - 1), ly * vps, `E-seam(${ci},${cj}) nrm ly=${ly}`);
           }
@@ -167,7 +179,7 @@ describe('chunk seams are exact on a 1000m world', () => {
           const sc = s.geometry.getAttribute('color') as THREE.BufferAttribute;
           const sn = s.geometry.getAttribute('normal') as THREE.BufferAttribute;
           for (let lx = 0; lx < vps; lx++) {
-            check(pos, sp, (vps - 1) * vps + lx, lx, `S-seam(${ci},${cj}) pos lx=${lx}`);
+            checkWorldPos(m, s, (vps - 1) * vps + lx, lx, `S-seam(${ci},${cj}) pos lx=${lx}`);
             check(col, sc, (vps - 1) * vps + lx, lx, `S-seam(${ci},${cj}) col lx=${lx}`);
             check(nrm, sn, (vps - 1) * vps + lx, lx, `S-seam(${ci},${cj}) nrm lx=${lx}`);
           }
@@ -178,12 +190,14 @@ describe('chunk seams are exact on a 1000m world', () => {
 
   it('chunk vertex heights match the pure function at world coords', () => {
     const terrain = buildTerrain(1000, 99, 'hills');
+    for (let cj = 0; cj < 4; cj++) for (let ci = 0; ci < 4; ci++) terrain.ensureChunkMesh(ci, cj);
     const rng = new Rng(5);
     for (let k = 0; k < 40; k++) {
-      const m = terrain.chunkMeshes[Math.floor(rng.next() * 16)];
+      const m = terrain.getChunkMesh(Math.floor(rng.next() * 4), Math.floor(rng.next() * 4))!;
       const pos = m.geometry.getAttribute('position') as THREE.BufferAttribute;
       const vi = Math.floor(rng.next() * pos.count);
-      const x = pos.getX(vi), y = pos.getY(vi), z = pos.getZ(vi);
+      // Stage-1b B: position attribute is chunk-local — reconstruct world coords
+      const x = m.position.x + pos.getX(vi), y = pos.getY(vi), z = m.position.z + pos.getZ(vi);
       // mesh stores float32 heights; the pure function is float64 — float32-close
       expect(y).toBeCloseTo(terrain.heightAt(x, z), 5);
     }
@@ -191,9 +205,10 @@ describe('chunk seams are exact on a 1000m world', () => {
 
   it('physics heightfield still matches the visual mesh on a big world (B3-style)', () => {
     // Stage-1 B: the whole-world body is gone — one Heightfield per chunk
-    // (terrain.body is now the origin chunk's body, kept as a legacy alias).
+    // (terrain.body is now the spawn chunk's body, kept as a legacy alias).
     // B3-check every chunk body: each sample must collide exactly where
-    // heightAt()/the chunk mesh put it.
+    // heightAt()/the chunk mesh put it. Bodies stream lazily (stage-1b A),
+    // so ensure each one before checking it.
     const terrain = buildTerrain(1000, 4242, 'hills');
     const half = terrain.size / 2;
     const cell = terrain.size / (terrain.res - 1);
@@ -204,7 +219,7 @@ describe('chunk seams are exact on a 1000m world', () => {
     expect(cps).toBe(4);
     for (let cx = 0; cx < cps; cx++) {
       for (let cz = 0; cz < cps; cz++) {
-        const body = terrain.chunkBodyAt(cx, cz);
+        const body = terrain.ensureChunkBody(cx, cz);
         expect(body, `chunk (${cx},${cz}) resident`).toBeDefined();
         const shape = body!.shapes[0] as CANNON.Heightfield;
         const data = shape.data as number[][];
@@ -237,12 +252,20 @@ describe('single-chunk worlds and determinism', () => {
   it('same seed -> identical chunk geometry across instances', () => {
     const a = buildTerrain(1000, 31337, 'canyon');
     const b = buildTerrain(1000, 31337, 'canyon');
-    expect(a.chunkMeshes.length).toBe(b.chunkMeshes.length);
-    for (let m = 0; m < a.chunkMeshes.length; m++) {
-      for (const attr of ['position', 'color', 'normal'] as const) {
-        const pa = a.chunkMeshes[m].geometry.getAttribute(attr) as THREE.BufferAttribute;
-        const pb = b.chunkMeshes[m].geometry.getAttribute(attr) as THREE.BufferAttribute;
-        expect(Array.from(pa.array as Float32Array), `chunk ${m} ${attr}`).toEqual(Array.from(pb.array as Float32Array));
+    for (let cj = 0; cj < 4; cj++) {
+      for (let ci = 0; ci < 4; ci++) {
+        a.ensureChunkMesh(ci, cj);
+        b.ensureChunkMesh(ci, cj);
+      }
+    }
+    expect(a.builtMeshCount).toBe(b.builtMeshCount);
+    for (let cj = 0; cj < 4; cj++) {
+      for (let ci = 0; ci < 4; ci++) {
+        for (const attr of ['position', 'color', 'normal'] as const) {
+          const pa = a.getChunkMesh(ci, cj)!.geometry.getAttribute(attr) as THREE.BufferAttribute;
+          const pb = b.getChunkMesh(ci, cj)!.geometry.getAttribute(attr) as THREE.BufferAttribute;
+          expect(Array.from(pa.array as Float32Array), `chunk (${ci},${cj}) ${attr}`).toEqual(Array.from(pb.array as Float32Array));
+        }
       }
     }
   });
@@ -255,6 +278,10 @@ describe('single-chunk worlds and determinism', () => {
     const scene = new THREE.Scene();
     const terrain = new Terrain(spec, physics, mats, scene);
     expect(() => terrain.update(new THREE.Vector3(10, 0, -40))).not.toThrow();
+    // drain the streaming queue so every chunk within the mesh radius pages in
+    for (let i = 0; i < 60 && terrain.getStreamStats().queue > 0; i++) {
+      terrain.update(new THREE.Vector3(0, 0, 0));
+    }
     expect(scene.children.filter((o) => (o as THREE.Mesh).isMesh).length).toBeGreaterThanOrEqual(16);
     terrain.dispose(scene, physics);
     for (const m of terrain.chunkMeshes) expect(scene.children.includes(m)).toBe(false);

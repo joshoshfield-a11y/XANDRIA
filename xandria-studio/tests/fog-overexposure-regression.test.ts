@@ -310,7 +310,16 @@ describe('D3 stylized water material', () => {
     // BIOME_DUSK table per D2's BiomeDefLike design — coastline biome tint.
     expect(mat.color.getHexString()).toBe('2a9fb0'); // BIOMES.coastline.water.tint
     expect((mat.userData.uSkyTint.value as THREE.Color).getHexString()).toBe('f0a868');
-    expect(mat.customProgramCacheKey()).toBe('xandria-water-v3');
+    expect(mat.customProgramCacheKey()).toBe('xandria-water-v4');
+    // Stage 1b (workstream C): radial edge fade uniforms — on stage-1 sizes
+    // the fade zone sits beyond the 3x quad, so the water is byte-identical.
+    const wm = terrain.water!.material as THREE.MeshStandardMaterial;
+    const fadeStart = (wm.userData.uFadeStart as { value: number }).value;
+    const fadeEnd = (wm.userData.uFadeEnd as { value: number }).value;
+    expect(fadeStart).toBeCloseTo(terrain.size * 1.55, 6);
+    expect(fadeEnd).toBeCloseTo(terrain.size * 1.60, 6);
+    // fade zone starts past the quad rim (1.5x): no-op on stage-1 sizes
+    expect(fadeStart).toBeGreaterThan(terrain.size * 1.5);
   });
 
   it('volcanic water stays lava; day water uses the palette color', () => {

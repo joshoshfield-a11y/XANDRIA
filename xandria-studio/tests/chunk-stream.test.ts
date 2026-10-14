@@ -330,7 +330,8 @@ describe('Terrain: chunked physics bodies', () => {
       const grid = makeGrid(terrain.size);
       for (let cx = 0; cx < grid.chunksPerSide; cx++) {
         for (let cz = 0; cz < grid.chunksPerSide; cz++) {
-          const b = terrain.chunkBodyAt(cx, cz);
+          // stage-1b A: bodies stream lazily — ensure each one before checking
+          const b = terrain.ensureChunkBody(cx, cz);
           expect(b).toBeDefined();
           const shape = b!.shapes[0] as CANNON.Heightfield;
           const data = shape.data as number[][];
@@ -358,12 +359,16 @@ describe('Terrain: chunked physics bodies', () => {
     const { terrain, scene, physics } = buildBigTerrain();
     try {
       const grid = makeGrid(terrain.size);
-      // all 25 chunks are within loadRadius of spawn on a 1200m world
-      expect(terrain.loadedChunkBodies.length).toBe(grid.chunksPerSide * grid.chunksPerSide);
+      // stage-1b A: bodies stream lazily — ensure every chunk body before
+      // comparing the seams (on a 1200m world all 25 are within loadRadius
+      // of spawn, so they would page in on first update anyway)
+      for (let ecx = 0; ecx < grid.chunksPerSide; ecx++) {
+        for (let ecz = 0; ecz < grid.chunksPerSide; ecz++) terrain.ensureChunkBody(ecx, ecz);
+      }
       for (let cx = 0; cx < grid.chunksPerSide - 1; cx++) {
         for (let cz = 0; cz < grid.chunksPerSide; cz++) {
-          const a = terrain.chunkBodyAt(cx, cz)!;
-          const b = terrain.chunkBodyAt(cx + 1, cz)!;
+          const a = terrain.ensureChunkBody(cx, cz)!;
+          const b = terrain.ensureChunkBody(cx + 1, cz)!;
           const da = (a.shapes[0] as CANNON.Heightfield).data as number[][];
           const db = (b.shapes[0] as CANNON.Heightfield).data as number[][];
           const nJ = da[0].length;
@@ -383,8 +388,8 @@ describe('Terrain: chunked physics bodies', () => {
       // same for vertical neighbors (shared j edge rows)
       for (let cx = 0; cx < grid.chunksPerSide; cx++) {
         for (let cz = 0; cz < grid.chunksPerSide - 1; cz++) {
-          const a = terrain.chunkBodyAt(cx, cz)!;
-          const b = terrain.chunkBodyAt(cx, cz + 1)!;
+          const a = terrain.ensureChunkBody(cx, cz)!;
+          const b = terrain.ensureChunkBody(cx, cz + 1)!;
           const da = (a.shapes[0] as CANNON.Heightfield).data as number[][];
           const db = (b.shapes[0] as CANNON.Heightfield).data as number[][];
           // a's +j edge row (lj=0 holds h[*][j1], the j-mirror) meets b's -j

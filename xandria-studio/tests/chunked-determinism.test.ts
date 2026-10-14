@@ -11,18 +11,25 @@
  * approximate):
  *
  *  1. Small worlds (220m / 256m hills): the single-chunk path builds on the
- *     legacy grid — the built Terrain's internal float64 height grid must be
- *     digest-identical to an independent recomputation of the legacy loop on
- *     the legacy grid (res formula taken from the pre-chunk code).
+ *     legacy grid — heightAt() sampled on the legacy grid must be
+ *     digest-identical to an independent recomputation of the legacy loop
+ *     on the legacy grid (res formula taken from the pre-chunk code).
  *  2. Big worlds (1000m mountains, 1500m canyon, 2000m flat): the chunked
- *     path samples the same world coords as the legacy loop — digest the
- *     built Terrain's full height grid and compare against the legacy loop
+ *     path samples the same world coords as the legacy loop — digest
+ *     heightAt() over the full grid and compare against the legacy loop
  *     evaluated at the same coords. EXACT equality, not approximate.
  *  3. Cross-path: at the legacy 128-grid coords (the grid the old single
  *     mesh would have used for big worlds), the legacy loop vs the chunked
  *     path's `terrainHeightAt` must also be digest-identical.
- *  4. `heightAt()` at grid vertices returns the grid values bit-exactly, so
- *     gameplay code sampling at vertex coords sees zero drift.
+ *  4. Built chunk geometry samples the pure height function bit-exactly:
+ *     every mesh vertex (float32) equals the legacy loop at the exact grid
+ *     coords — for the spawn chunk and a far corner chunk, so the lazy
+ *     per-chunk build (stage-1b A) is covered too.
+ *
+ * (Stage-1b A removed the internal float64 height grid — the cold-build
+ * bottleneck — so the gate now samples through heightAt()/the built
+ * geometry instead of digesting the grid. Same seed → same heights is what
+ * the gate protects, and these digests still pin it exactly.)
  *
  * The reference is a verbatim copy of the height loop from Terrain.ts at
  * commit 00474e33 (feature/openworld-stage1 base). Noise2D is immutable after
@@ -127,6 +134,20 @@ function legacyHeightAtP(noise: Noise2D, p: HeightParams, x: number, z: number):
   return y;
 }
 
+/** Sample heightAt() over a res x res world grid — the gate's view of the heightfield. */
+function heightAtGrid(terrain: { heightAt(x: number, z: number): number }, size: number, res: number): number[][] {
+  const half = size / 2;
+  const cell = size / (res - 1);
+  const out: number[][] = [];
+  for (let i = 0; i < res; i++) {
+    out[i] = [];
+    for (let j = 0; j < res; j++) {
+      out[i][j] = terrain.heightAt(-half + i * cell, -half + j * cell);
+    }
+  }
+  return out;
+}
+
 /** Legacy loop evaluated on a res x res world grid — the reference heightfield. */
 function legacyHeightsGrid(p: HeightParams, res: number): number[][] {
   const noise = new Noise2D(p.seed);
@@ -187,7 +208,7 @@ describe('determinism gate: legacy single-mesh vs chunked heights (exact digests
           expect(terrain.res, `${size}m res`).toBe(res);
           expect(terrain.getChunkStats().chunkCount, `${size}m chunks`).toBe(1);
           const ref = digestGrid(legacyHeightsGrid(p, res));
-          const got = digestGrid((terrain as any).heights as number[][]);
+          const got = digestGrid(heightAtGrid(terrain, size, res));
           expect(got, `${size}m ${type} seed=${seed}`).toBe(ref);
           recordDigest(`${size}m-${type}`, got);
         } finally {
@@ -225,7 +246,7 @@ describe('determinism gate: legacy single-mesh vs chunked heights (exact digests
             }
           }
           const ref = digestGrid(refGrid);
-          const got = digestGrid((terrain as any).heights as number[][]);
+          const got = digestGrid(heightAtGrid(terrain, size, res));
           expect(got, `${size}m ${type} seed=${seed}`).toBe(ref);
           recordDigest(`${size}m-${type}`, got);
         } finally {
@@ -268,22 +289,48 @@ describe('determinism gate: legacy single-mesh vs chunked heights (exact digests
     }
   }, 60000);
 
-  it('heightAt() at grid vertices returns the grid values bit-exactly', () => {
-    for (const [size, type, seed] of [[220, 'hills', 7], [1000, 'mountains', 4242]] as Array<[number, string, number]>) {
-      const { physics, scene, terrain } = buildWorld(size, type, seed);
+  it('built chunk geometry samples the pure height function bit-exactly', () => {
+    // Stage-1b A: the lazy per-chunk build must place every vertex exactly
+    // where the legacy height loop says (float32-rounded) — checked for the
+    // spawn chunk and a far corner chunk, so the ghost-ring normal path and
+    // the world-edge clamp are both exercised.
+    for (const [size, type, seed] of [[220, 'hills', 7], [1000, 'mountains', 4242], [2000, 'flat', 31337]] as Array<[number, string, number]>) {
+      const { spec, physics, scene, terrain } = buildWorld(size, type, seed);
       try {
-        const heights = (terrain as any).heights as number[][];
-        const res = terrain.res;
+        const p = paramsFromSpec(spec);
+        const noise = new Noise2D(p.seed);
+        const cps = Math.round(size / terrain.chunkSize);
+        const cpc = (terrain.res - 1) / cps;
+        const vps = cpc + 1;
         const half = size / 2;
-        const cell = size / (res - 1);
-        const got: number[][] = [];
-        for (let i = 0; i < res; i++) {
-          got[i] = [];
-          for (let j = 0; j < res; j++) {
-            got[i][j] = terrain.heightAt(-half + i * cell, -half + j * cell);
+        const cell = size / (terrain.res - 1);
+        const chunks: Array<[number, number]> = cps === 1
+          ? [[0, 0]]
+          : [[Math.floor(cps / 2), Math.floor(cps / 2)], [cps - 1, cps - 1]];
+        for (const [cx, cz] of chunks) {
+          const m = terrain.ensureChunkMesh(cx, cz);
+          const pos = m.geometry.getAttribute('position') as THREE.BufferAttribute;
+          expect(pos.count, `${size}m chunk(${cx},${cz}) verts`).toBe(vps * vps);
+          // Stage-1b B: position attribute is chunk-local; reconstruct world
+          // coords via mesh.position + local. Honest error bound has TWO
+          // float32 quantization steps: the local store (ulps of x - cx0)
+          // and the legacy world-coord store it replaces (ulps of x).
+          // (The rebase wins because ulp(x - cx0) no longer grows with
+          // distance from the origin — the term that used to dominate.)
+          const f32eps = (v: number) => Math.abs(v) * Math.pow(2, -23);
+          for (let vi = 0; vi < pos.count; vi++) {
+            const lx = vi % vps, ly = Math.floor(vi / vps);
+            const x = -half + (cx * cpc + lx) * cell;
+            const z = -half + (cz * cpc + ly) * cell;
+            const rx = m.position.x + pos.getX(vi), rz = m.position.z + pos.getZ(vi);
+            expect(Math.abs(rx - Math.fround(x)), `x@${size}m(${cx},${cz})[${lx},${ly}]`)
+              .toBeLessThanOrEqual(2 * f32eps(x - m.position.x) + 2 * f32eps(x) + 1e-9);
+            expect(Math.abs(rz - Math.fround(z)), `z@${size}m(${cx},${cz})[${lx},${ly}]`)
+              .toBeLessThanOrEqual(2 * f32eps(z - m.position.z) + 2 * f32eps(z) + 1e-9);
+            expect(pos.getY(vi), `y@${size}m(${cx},${cz})[${lx},${ly}]`)
+              .toBe(Math.fround(legacyHeightAtP(noise, p, x, z)));
           }
         }
-        expect(digestGrid(got), `${size}m heightAt grid`).toBe(digestGrid(heights));
       } finally {
         terrain.dispose(scene, physics);
       }

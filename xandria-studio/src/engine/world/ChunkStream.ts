@@ -9,7 +9,9 @@
  *   drained nearest-first instead of hitching one frame;
  * - teleport handling: when the focus jumps further than unloadRadius in one
  *   update (respawn, resetRun, debug teleport), correctness wins over
- *   smoothness — everything within loadRadius is built synchronously;
+ *   smoothness — the teleportSyncRadius neighborhood (default: the whole
+ *   loadRadius; Terrain narrows it to the spawn-area chunks) is built
+ *   synchronously and the rest of loadRadius drains through the budget;
  * - single-chunk short-circuit: small worlds keep one resident chunk and the
  *   per-frame update is a no-op (zero streaming overhead, identical behavior
  *   to the old single-body terrain).
@@ -41,6 +43,17 @@ export interface ChunkStreamOptions {
   unloadRadius?: number;
   /** max chunk builds per update() call. Default 2. */
   maxBuildsPerFrame?: number;
+  /**
+   * Stage-1b A: how far around the focus a teleport (or the very first
+   * update) sync-builds. Default: loadRadius (the old behavior — everything
+   * needed, right now). Terrain sets this much smaller than loadRadius so a
+   * teleport/respawn only pays for the spawn-area chunks synchronously and
+   * the budgeted queue fills the rest over the next frames — this is what
+   * makes cold build + respawn O(spawn area) instead of O(loadRadius²) on
+   * multi-km worlds. Correctness is preserved: the sync set always covers
+   * the focus chunk and its immediate neighbors.
+   */
+  teleportSyncRadius?: number;
 }
 
 export class ChunkStream {
@@ -49,6 +62,8 @@ export class ChunkStream {
   readonly loadRadius: number;
   readonly unloadRadius: number;
   readonly maxBuildsPerFrame: number;
+  /** Stage-1b A: sync-build radius for teleports / first update. */
+  readonly teleportSyncRadius: number;
   private readonly loaded = new Set<string>();
   private queue: Array<{ cx: number; cz: number; dist: number }> = [];
   private lastX = 0;
@@ -67,6 +82,10 @@ export class ChunkStream {
       throw new Error(`ChunkStream: unloadRadius (${this.unloadRadius}) must exceed loadRadius (${this.loadRadius}) — hysteresis requires a band between them.`);
     }
     this.maxBuildsPerFrame = Math.max(1, opts.maxBuildsPerFrame ?? 2);
+    // Clamp into (0, loadRadius]: a sync set larger than the load radius is
+    // meaningless, and an empty sync set would leave the focus chunk unbuilt.
+    const tsr = opts.teleportSyncRadius ?? this.loadRadius;
+    this.teleportSyncRadius = Math.min(this.loadRadius, Math.max(cs * 0.5, tsr));
   }
 
   get loadedCount(): number { return this.loaded.size; }
@@ -88,6 +107,10 @@ export class ChunkStream {
       return;
     }
     const teleported = this.hasLast && Math.hypot(px - this.lastX, pz - this.lastZ) > this.unloadRadius;
+    // The plan always uses the full loadRadius; teleports (and the first
+    // update) only sync-build the teleportSyncRadius neighborhood and queue
+    // the rest nearest-first — unloads still use the full unloadRadius so a
+    // teleport away pages the old area out immediately.
     const plan = planChunkChanges(px, pz, this.grid, (cx, cz) => this.isLoaded(cx, cz), this.loadRadius, this.unloadRadius);
     // Unloads are cheap (remove body / dispose geometry) — apply immediately.
     for (const c of plan.toUnload) {
@@ -96,10 +119,15 @@ export class ChunkStream {
     }
     if (teleported || !this.hasLast) {
       // Correctness first: the focus jumped somewhere new (spawn, respawn,
-      // resetRun, first update) — build everything needed NOW. Teleports
-      // already hitch elsewhere (world rebuilds), so no budget here.
-      for (const c of plan.toLoad) this.buildOne(c.cx, c.cz);
+      // resetRun, first update) — build the sync neighborhood NOW. Teleports
+      // already hitch elsewhere (world rebuilds), so no budget here; the
+      // remainder of loadRadius drains through the queue on later updates,
+      // nearest-first (toLoad already arrives in that order).
       this.queue = [];
+      for (const c of plan.toLoad) {
+        if (c.dist <= this.teleportSyncRadius) this.buildOne(c.cx, c.cz);
+        else this.queue.push(c);
+      }
     } else {
       // Rebuild the pending queue from the fresh plan (drops stale entries
       // the focus has moved away from), nearest first, then drain within the
@@ -128,7 +156,17 @@ export class ChunkStream {
     this.buildMsEMA = 0;
   }
 
+  /**
+   * Stage-1b A: build one chunk synchronously, now, outside the budget
+   * (spawn-area-first construction, test pre-warming). Idempotent — a chunk
+   * that is already loaded is left alone.
+   */
+  buildSync(cx: number, cz: number): void {
+    this.buildOne(cx, cz);
+  }
+
   private buildOne(cx: number, cz: number): void {
+    if (this.isLoaded(cx, cz)) return;
     const t0 = performance.now();
     this.lifecycle.buildChunk(cx, cz);
     const dt = performance.now() - t0;

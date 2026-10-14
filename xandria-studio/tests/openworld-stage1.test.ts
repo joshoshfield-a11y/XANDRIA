@@ -5,9 +5,9 @@
  *    specs (sha256 of JSON.stringify) before/after the stage-1 change.
  *    Baselines captured pre-change on feature/openworld-stage1 @ 00474e33.
  * 2. New behavior: prompts asking for big/open worlds map to big sizes;
- *    schema validation of the 60..2000 range the new paths produce.
+ *    schema validation of the 60..8000 range the new paths produce.
  * 3. Studio wiring: the ASSET_GROUPS 'World size' registry control applies
- *    to the spec, and a 1500m world builds headless from BOTH the prompt
+ *    to the spec, and a 3000m world builds headless from BOTH the prompt
  *    path and the Studio-control path.
  *
  * DOM is stubbed (no jsdom) — same pattern as terrain.test.ts; Terrain +
@@ -56,26 +56,26 @@ describe('E1 legacy specs are byte-identical', () => {
 });
 
 describe('E2 prompt → big world sizes (stage 1)', () => {
-  it('open desert rally → 2000m racing world', () => {
+  it('open desert rally → 8000m racing world', () => {
     const s = generateSpec('an epic desert rally raid');
     expect(s.meta.genre).toBe('racing');
-    expect(s.world.terrain.size).toBe(2000);
+    expect(s.world.terrain.size).toBe(8000);
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('"vast open world" → 1500m', () => {
+  it('"vast open world" → 3000m', () => {
     const s = generateSpec('a vast open world sword adventure');
-    expect(s.world.terrain.size).toBe(1500);
+    expect(s.world.terrain.size).toBe(3000);
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('"huge sprawling" → 1500m', () => {
+  it('"huge sprawling" → 3000m', () => {
     const s = generateSpec('a huge sprawling fantasy world to explore');
-    expect(s.world.terrain.size).toBe(1500);
+    expect(s.world.terrain.size).toBe(3000);
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('big-world platformer → 1500m (not the 260 default)', () => {
+  it('big-world platformer → 3000m (not the 260 default)', () => {
     const s = generateSpec('a huge open world platformer adventure');
     expect(s.meta.genre).toBe('platformer');
-    expect(s.world.terrain.size).toBe(1500);
+    expect(s.world.terrain.size).toBe(3000);
   });
   it('plain prompts keep legacy defaults', () => {
     expect(generateSpec('sword adventure').world.terrain.size).toBe(220);
@@ -85,18 +85,18 @@ describe('E2 prompt → big world sizes (stage 1)', () => {
 });
 
 describe('E3 LLM architect prompt describes the open-world option', () => {
-  it('suggests 200-2000 and the open-world rule', () => {
+  it('suggests 200-8000 and the open-world rule', () => {
     const base = generateSpec('a sword adventure');
     const p = buildArchitectPrompt('a vast open world to explore', base);
-    expect(p).toContain('200-2000');
+    expect(p).toContain('200-8000');
     expect(p).toContain('open world');
-    expect(p).toContain('1000-2000');
+    expect(p).toContain('1000-8000');
   });
 });
 
 describe('E4 schema validates the stage-1 size range', () => {
-  it('accepts 60..2000 (the sizes generator + Studio now produce)', () => {
-    for (const size of [60, 220, 400, 1500, 2000]) {
+  it('accepts 60..8000 (the sizes generator + Studio now produce)', () => {
+    for (const size of [60, 220, 400, 1500, 3000, 8000]) {
       const s = generateSpec('a sword adventure');
       s.world.terrain.size = size;
       expect(validateSpec(s).errors).toEqual([]);
@@ -104,7 +104,7 @@ describe('E4 schema validates the stage-1 size range', () => {
   });
   it('rejects outside the range', () => {
     const tooBig = generateSpec('a sword adventure');
-    tooBig.world.terrain.size = 2001;
+    tooBig.world.terrain.size = 8001;
     expect(validateSpec(tooBig).errors.some((e) => e.includes('world.terrain.size'))).toBe(true);
     const tooSmall = generateSpec('a sword adventure');
     tooSmall.world.terrain.size = 59;
@@ -125,7 +125,7 @@ describe('E5 Studio world-size control wiring', () => {
     const ctrl = findSizeControl();
     expect(ctrl.kind).toBe('slider');
     expect(ctrl.min).toBe(60);
-    expect(ctrl.max).toBe(2000);
+    expect(ctrl.max).toBe(8000);
   });
 
   it('applying the control writes spec.world.terrain.size and stays valid', () => {
@@ -170,25 +170,25 @@ function buildTerrain(spec: ReturnType<typeof generateSpec>): Terrain {
   return new Terrain(spec, physics, mats, scene);
 }
 
-describe('E6 1500m world builds end-to-end', () => {
-  it('prompt path: "vast open world" → Terrain(1500m)', () => {
+describe('E6 3000m world builds end-to-end', () => {
+  it('prompt path: "vast open world" → Terrain(3000m)', () => {
     const spec = generateSpec('a vast open world adventure');
-    expect(spec.world.terrain.size).toBe(1500);
+    expect(spec.world.terrain.size).toBe(3000);
     const terrain = buildTerrain(spec);
-    expect(terrain.size).toBe(1500);
+    expect(terrain.size).toBe(3000);
     expect(terrain.body.shapes[0]).toBeInstanceOf(CANNON.Heightfield);
     expect(Number.isFinite(terrain.heightAt(0, 0))).toBe(true);
   });
 
-  it('Studio path: control sets size 1500 on a 220m spec → Terrain(1500m)', () => {
+  it('Studio path: control sets size 3000 on a 220m spec → Terrain(3000m)', () => {
     const spec = generateSpec('a sword adventure');
     expect(spec.world.terrain.size).toBe(220);
     // same mutation the Studio WORLD SIZE slider commits: sp.world.terrain.size = v
     const working = cloneSpec(spec);
-    working.world.terrain.size = 1500;
+    working.world.terrain.size = 3000;
     expect(validateSpec(working).errors).toEqual([]);
     const terrain = buildTerrain(working);
-    expect(terrain.size).toBe(1500);
+    expect(terrain.size).toBe(3000);
     expect(terrain.body.shapes[0]).toBeInstanceOf(CANNON.Heightfield);
     expect(Number.isFinite(terrain.heightAt(700, -700))).toBe(true);
   });
