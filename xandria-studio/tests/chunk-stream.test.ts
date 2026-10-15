@@ -91,6 +91,9 @@ function buildBigTerrain() {
 /** Small default world — must behave exactly like the old single-body terrain. */
 function buildSmallTerrain() {
   const spec = generateSpec('a heroic knight adventure', { seed: 99 });
+  // Portals wave: third-person-action now defaults to 8000m (chunked); this
+  // test targets the single-chunk layout, so pin the stage-1 size.
+  spec.world.terrain.size = 220;
   const physics = new Physics(spec.world.gravity);
   const mats = new MaterialLibrary(spec);
   const scene = new THREE.Scene();

@@ -313,13 +313,17 @@ describe('D3 stylized water material', () => {
     expect(mat.customProgramCacheKey()).toBe('xandria-water-v4');
     // Stage 1b (workstream C): radial edge fade uniforms — on stage-1 sizes
     // the fade zone sits beyond the 3x quad, so the water is byte-identical.
+    // Portals wave: open-world specs now build at 8000m, where the engine
+    // uses the tighter multi-km fade (Terrain.ts: size > 2000 branch).
     const wm = terrain.water!.material as THREE.MeshStandardMaterial;
     const fadeStart = (wm.userData.uFadeStart as { value: number }).value;
     const fadeEnd = (wm.userData.uFadeEnd as { value: number }).value;
-    expect(fadeStart).toBeCloseTo(terrain.size * 1.55, 6);
-    expect(fadeEnd).toBeCloseTo(terrain.size * 1.60, 6);
-    // fade zone starts past the quad rim (1.5x): no-op on stage-1 sizes
-    expect(fadeStart).toBeGreaterThan(terrain.size * 1.5);
+    const big = terrain.size > 2000;
+    expect(fadeStart).toBeCloseTo(terrain.size * (big ? 1.02 : 1.55), 6);
+    expect(fadeEnd).toBeCloseTo(terrain.size * (big ? 1.38 : 1.60), 6);
+    // fade zone starts past the quad rim: no-op on stage-1 sizes, dissolves
+    // the rim on multi-km maps
+    expect(fadeStart).toBeGreaterThan(terrain.size * (big ? 1.0 : 1.5));
   });
 
   it('volcanic water stays lava; day water uses the palette color', () => {

@@ -152,6 +152,29 @@ export class Progression {
     return this.counts.get(id) ?? 0;
   }
 
+  /**
+   * PORTALS-D: snapshot level/xp/upgrade counts for portal transitions.
+   * Plain data — JSON-serializable. The 'firerate' upgrade's live effect
+   * (spec.custom.weaponMods.rateOfFire) is captured separately by
+   * PortalState.capturePlayerState, since it mutates the spec, not this.
+   */
+  portalSnapshot(): { level: number; xp: number; counts: Record<string, number> } {
+    return { level: this.level, xp: this.xp, counts: Object.fromEntries(this.counts) };
+  }
+
+  /**
+   * PORTALS-D: restore a portalSnapshot(). Defensive: corrupt values clamp
+   * to sane floors rather than throwing mid-transition.
+   */
+  portalRestore(s: { level: number; xp: number; counts: Record<string, number> }): void {
+    this.level = Number.isFinite(s?.level) ? Math.max(1, Math.floor(s.level)) : 1;
+    this.xp = Number.isFinite(s?.xp) ? Math.max(0, s.xp) : 0;
+    const counts = s?.counts && typeof s.counts === 'object' ? s.counts : {};
+    this.counts = new Map(
+      Object.entries(counts).filter(([, v]) => Number.isFinite(v) && (v as number) > 0) as Array<[string, number]>,
+    );
+  }
+
   /** Multiplicative damage bonus from 'damage' upgrades and the profile loadout. */
   damageMult(): number {
     const profile = this.engine.spec.custom?.profileDamageMult ?? 1;

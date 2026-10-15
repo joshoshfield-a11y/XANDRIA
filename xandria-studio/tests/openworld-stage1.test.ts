@@ -6,8 +6,9 @@
  *    Baselines captured pre-change on feature/openworld-stage1 @ 00474e33.
  * 2. New behavior: prompts asking for big/open worlds map to big sizes;
  *    schema validation of the 60..8000 range the new paths produce.
+ *    (Portals wave: big-world prompts now map to 8000m, not 3000m.)
  * 3. Studio wiring: the ASSET_GROUPS 'World size' registry control applies
- *    to the spec, and a 3000m world builds headless from BOTH the prompt
+ *    to the spec, and an 8000m world builds headless from BOTH the prompt
  *    path and the Studio-control path.
  *
  * DOM is stubbed (no jsdom) — same pattern as terrain.test.ts; Terrain +
@@ -30,21 +31,28 @@ import {
 const sha = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
 // [intent, pre-change sha256(JSON.stringify(generateSpec(intent))).slice(0,16)]
+//
+// Baselines re-captured on feature/openworld-portals-C @ workstream C (portals
+// wave, 2026-10-14): per the user's directive, third-person-action games now
+// start at the 8000m ceiling with world.portals enabled, so the 7 tpa intents
+// changed hash. Arena/racing/platformer intents are BYTE-IDENTICAL to the
+// stage-1 capture (no portals field emitted) — that is the wave's legacy
+// contract, and this table enforces it.
 const LEGACY_BASELINES: [string, string][] = [
-  ['epic sword adventure through ancient ruins at dusk', '3f595fb0a9819a60'],
+  ['epic sword adventure through ancient ruins at dusk', '3d51dadcd270615d'],
   ['neon cyberpunk fps arena deathmatch', '28e2e61e5b3de929'],
   ['racing through a volcanic canyon', 'eace8bb83e859607'],
   ['dreamy platformer in the clouds', '4bea1eaa3ab7d850'],
   ['top-down twin stick horde survival', 'baaeb7fb88924cc3'],
-  ['a quiet walk in the forest', '00525e780e840afc'],
+  ['a quiet walk in the forest', 'f5363ea9590b9888'],
   ['kart grand prix on tropical islands', 'dd19c3d94a23fecb'],
   ['race me across the desert', '8e11377a5b5560ac'],
-  ['a heroic knight adventure', 'b9aea421fffbf21b'],
-  ['giant robot boss fight in the city', '12763a04f837ced3'],
+  ['a heroic knight adventure', '47ad07123c852919'],
+  ['giant robot boss fight in the city', '169e57188888500b'],
   ['survive the endless horde at night', '2b8e2b26b4410943'],
-  ['a long journey across the wasteland', '3c8a2dfa98458f37'],
-  ['explore the alpine mountains', 'ac7e50b13627a744'],
-  ['fight the colossus with a rifle', 'e7c976eb3693f834'],
+  ['a long journey across the wasteland', '0b74f8a8d2279d0c'],
+  ['explore the alpine mountains', '699ab42a40b00bb5'],
+  ['fight the colossus with a rifle', '5aa2a2b55fa2dd32'],
   ['tropical island racing', '5b23edcbe6a8ac33'],
 ];
 
@@ -62,23 +70,25 @@ describe('E2 prompt → big world sizes (stage 1)', () => {
     expect(s.world.terrain.size).toBe(8000);
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('"vast open world" → 3000m', () => {
+  it('"vast open world" → 8000m (portals wave: open-world games start at the ceiling)', () => {
     const s = generateSpec('a vast open world sword adventure');
-    expect(s.world.terrain.size).toBe(3000);
+    expect(s.world.terrain.size).toBe(8000);
+    expect(s.world.portals).toEqual({ enabled: true });
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('"huge sprawling" → 3000m', () => {
+  it('"huge sprawling" → 8000m', () => {
     const s = generateSpec('a huge sprawling fantasy world to explore');
-    expect(s.world.terrain.size).toBe(3000);
+    expect(s.world.terrain.size).toBe(8000);
     expect(validateSpec(s).errors).toEqual([]);
   });
-  it('big-world platformer → 3000m (not the 260 default)', () => {
+  it('big-world platformer → 8000m (not the 260 default)', () => {
     const s = generateSpec('a huge open world platformer adventure');
     expect(s.meta.genre).toBe('platformer');
-    expect(s.world.terrain.size).toBe(3000);
+    expect(s.world.terrain.size).toBe(8000);
+    expect(s.world.portals).toEqual({ enabled: true });
   });
-  it('plain prompts keep legacy defaults', () => {
-    expect(generateSpec('sword adventure').world.terrain.size).toBe(220);
+  it('plain prompts keep legacy defaults (except third-person-action → 8000m per the portals-wave directive)', () => {
+    expect(generateSpec('sword adventure').world.terrain.size).toBe(8000);
     expect(generateSpec('a hard platformer over lava').world.terrain.size).toBe(260);
     expect(generateSpec('kart grand prix').world.terrain.size).toBe(400);
   });
@@ -170,19 +180,19 @@ function buildTerrain(spec: ReturnType<typeof generateSpec>): Terrain {
   return new Terrain(spec, physics, mats, scene);
 }
 
-describe('E6 3000m world builds end-to-end', () => {
-  it('prompt path: "vast open world" → Terrain(3000m)', () => {
+describe('E6 8000m world builds end-to-end', () => {
+  it('prompt path: "vast open world" → Terrain(8000m)', () => {
     const spec = generateSpec('a vast open world adventure');
-    expect(spec.world.terrain.size).toBe(3000);
+    expect(spec.world.terrain.size).toBe(8000);
     const terrain = buildTerrain(spec);
-    expect(terrain.size).toBe(3000);
+    expect(terrain.size).toBe(8000);
     expect(terrain.body.shapes[0]).toBeInstanceOf(CANNON.Heightfield);
     expect(Number.isFinite(terrain.heightAt(0, 0))).toBe(true);
   });
 
-  it('Studio path: control sets size 3000 on a 220m spec → Terrain(3000m)', () => {
+  it('Studio path: control sets size 3000 on an 8000m spec → Terrain(3000m)', () => {
     const spec = generateSpec('a sword adventure');
-    expect(spec.world.terrain.size).toBe(220);
+    expect(spec.world.terrain.size).toBe(8000);
     // same mutation the Studio WORLD SIZE slider commits: sp.world.terrain.size = v
     const working = cloneSpec(spec);
     working.world.terrain.size = 3000;

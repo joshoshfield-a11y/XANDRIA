@@ -355,6 +355,27 @@ export class Inventory implements InventoryLike {
   }
 
   /**
+   * PORTALS-D: replace the entire inventory contents from a serialize() JSON
+   * string (portal transitions — player state must survive map changes).
+   * Unknown item ids are skipped (same policy as deserialize). Malformed
+   * JSON leaves the inventory UNCHANGED (never wipes the player's items on
+   * a corrupt snapshot). Fires onChange once.
+   */
+  restore(serialized: string): void {
+    try {
+      JSON.parse(serialized);
+    } catch {
+      console.warn('[inventory] restore: invalid JSON — inventory unchanged');
+      return;
+    }
+    const fresh = Inventory.deserialize(this.defs, serialized);
+    // deserialize() never throws; copy its validated state over wholesale.
+    this.slots = fresh.slots;
+    this.equipped = fresh.equipped;
+    this.emitChange();
+  }
+
+  /**
    * Restore from serialize(). Never throws: malformed JSON or unknown item
    * ids are warned about and skipped, leaving an empty inventory.
    */

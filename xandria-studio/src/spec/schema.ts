@@ -116,11 +116,33 @@ export interface ScatterSpec {
   ruins: boolean;
 }
 
+/**
+ * Portals wave (workstream C): multi-map travel config. Optional — absent =
+ * legacy behavior (single map, authored boundary walls). When present and
+ * `enabled`, the engine replaces the boundary walls with the energy field and
+ * crossing a map edge loads the neighboring map (map identity = (mx,my) on
+ * the map grid; map seed = deriveMapSeed(worldSeed, mx, my)).
+ *
+ * Designed for the 8000m open-world ceiling; accepted at any valid
+ * world.terrain.size (60..8000) — on small maps the transitions just come
+ * more often. Arena genres leave it absent (walls stay).
+ */
+export interface PortalSpec {
+  enabled: boolean;
+}
+
 export interface WorldSpec {
   terrain: TerrainSpec;
   boundary: Boundary;
   gravity: number;     // m/s^2 (negative y)
   scatter: ScatterSpec;
+  portals?: PortalSpec;
+}
+
+/** True only when the spec explicitly opts into multi-map portals. Absent or
+ *  { enabled: false } = legacy single-map behavior (byte-identical worlds). */
+export function portalsEnabled(spec: GameSpec): boolean {
+  return spec.world.portals?.enabled === true;
 }
 
 export interface PlayerSpec {
@@ -509,6 +531,18 @@ export interface CustomSpec {
    * Progression.damageMult(). Config-only — never touches the seed.
    */
   profileDamageMult?: number;
+  /**
+   * Portals wave (workstream C): the map-grid coordinate of THIS map build,
+   * stamped by the portal transition flow (workstream B). Absent = a legacy
+   * single-map build.
+   *
+   * Session contract (workers B/D): spec.meta.seed is ALWAYS this map's
+   * build seed — the origin map uses deriveMapSeed(worldSeed, 0, 0) too, so
+   * every map goes through the same path. worldSeed is carried here so the
+   * per-map biome stays a pure function of (worldSeed, mx, my) via
+   * deriveMapBiome. Not user-editable in the Studio.
+   */
+  portalMap?: { mx: number; my: number; worldSeed: number };
 }
 
 export interface GameSpec {
@@ -772,6 +806,10 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
       if (!num(t.waterLevel, -50, 50)) err('world.terrain.waterLevel', 'must be -50..50');
     }
     if (!inEnum(spec.world.boundary, BOUNDARIES)) err('world.boundary', `must be one of ${BOUNDARIES.join('|')}`);
+    if (spec.world.portals !== undefined) {
+      if (!isObj(spec.world.portals)) err('world.portals', 'must be an object');
+      else if (typeof spec.world.portals.enabled !== 'boolean') err('world.portals.enabled', 'must be boolean');
+    }
     if (!num(spec.world.gravity, -60, 0)) err('world.gravity', 'must be -60..0');
     const s = spec.world.scatter;
     if (!isObj(s)) err('world.scatter', 'missing');

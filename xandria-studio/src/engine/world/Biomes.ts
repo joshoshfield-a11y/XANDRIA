@@ -30,10 +30,12 @@ import * as THREE from 'three';
 import {
   BIOME_IDS,
   type BiomeId, type Environment, type FloraId, type GameSpec, type Genre,
+  portalsEnabled,
 } from '@spec';
 import type { TexKind } from '../gfx/Materials';
 import type { LandmarkKind } from '../gfx/Landmarks';
 import { Rng } from '../core/Rng';
+import { deriveMapSeed, type MapCoord } from './MapGraph';
 
 export { BIOME_IDS };
 export type { BiomeId };
@@ -274,8 +276,13 @@ export function selectBiome(seed: number, genre: Genre, environment: Environment
 
 /**
  * Resolve the biome for a spec: the Studio override (custom.biome.biomeId)
- * wins; otherwise the seeded per-seed/genre selection. Never throws —
- * garbage in falls back to the automatic pick, then to plains.
+ * wins; on a portal-enabled map build with a stamped custom.portalMap, the
+ * per-map derived biome (workstream C) wins next; otherwise the seeded
+ * per-seed/genre selection. Never throws — garbage in falls back to the
+ * automatic pick, then to plains.
+ *
+ * Legacy contract: specs without world.portals (or with a disabled flag)
+ * take the seeded path exactly as before — byte-identical worlds.
  */
 export function resolveBiomeDef(spec: GameSpec): BiomeDef {
   try {
@@ -283,10 +290,53 @@ export function resolveBiomeDef(spec: GameSpec): BiomeDef {
     if (typeof override === 'string' && (BIOME_IDS as readonly string[]).includes(override)) {
       return BIOMES[override as BiomeId];
     }
+    // Portals wave (workstream C): the map build uses the per-map biome —
+    // derived from the WORLD seed carried on the stamped portal context
+    // (spec.meta.seed is this map's already-derived build seed).
+    const pm = portalsEnabled(spec) ? portalMapOf(spec) : undefined;
+    if (pm) return BIOMES[deriveMapBiome(pm.worldSeed, pm.mx, pm.my)];
     return BIOMES[selectBiome(spec.meta.seed, spec.meta.genre, spec.theme.environment)];
   } catch {
     return BIOMES.plains;
   }
+}
+
+// --- Open-world portals: per-map biomes (workstream C) -----------------------
+
+/** Portal-map context: this map's grid coordinate + the session's world seed. */
+export interface PortalMapContext extends MapCoord { worldSeed: number }
+
+/**
+ * Read the portal-map context off a spec (spec.custom.portalMap), stamped by
+ * the transition flow when building a map. Never throws; garbage in →
+ * undefined (the caller treats the build as a legacy single map).
+ */
+export function portalMapOf(spec: GameSpec): PortalMapContext | undefined {
+  try {
+    const pm = spec.custom?.portalMap;
+    if (pm && Number.isInteger(pm.mx) && Number.isInteger(pm.my)
+      && Number.isInteger(pm.worldSeed)) {
+      return { mx: pm.mx, my: pm.my, worldSeed: pm.worldSeed };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Per-map biome for portal travel: deterministic in (worldSeed, mx, my).
+ *
+ * The pick rolls on the DERIVED map seed (re-mixed with a biome salt so the
+ * roll is decorrelated from the terrain noise built from the same seed), so
+ * neighboring maps get different biomes and crossing a portal reads as
+ * arriving somewhere new. All 7 authored biomes are eligible — travel can
+ * take you from plains to volcanic to coastline. The Studio override
+ * (custom.biome.biomeId) still wins per resolveBiomeDef.
+ */
+export function deriveMapBiome(worldSeed: number, mx: number, my: number): BiomeId {
+  const rng = new Rng((deriveMapSeed(worldSeed, mx, my) ^ 0xb10be5) >>> 0);
+  return rng.pick(BIOME_IDS);
 }
 
 /** All biome ids the engine honors (Studio override dropdown source). */

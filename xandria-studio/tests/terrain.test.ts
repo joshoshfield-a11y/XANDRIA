@@ -42,6 +42,9 @@ beforeEach(() => {
 
 function buildTerrain(): Terrain {
   const spec = generateSpec('a heroic knight adventure', { seed: 99 });
+  // Portals wave: third-person-action now defaults to 8000m (chunked physics);
+  // these B3 tests target the single-chunk body layout, so pin the stage-1 size.
+  spec.world.terrain.size = 220;
   spec.world.terrain.type = 'hills'; // non-uniform heights so a mirror is detectable
   const physics = new Physics(spec.world.gravity);
   const mats = new MaterialLibrary(spec);

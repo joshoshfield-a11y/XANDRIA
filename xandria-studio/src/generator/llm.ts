@@ -52,7 +52,7 @@ Allowed shape (all optional):
 }
 
 Match the player's imagination: if they say "giant glowing bugs", use enemyMods.size≈2 + glow; if "moonscape", use theme+palette+world to fake it.
-World size: 220-400 is the default arena size (leave size out unless asked). If the player asks for an OPEN WORLD, huge/vast/expansive/sprawling map, or a desert rally, set world.terrain.size 1000-8000 (3000 typical; 8000 for a racing desert rally). Engine streams the world in chunks, so big is fine — but only go big when the player asks.
+World size: 220-400 is the default arena size (leave size out unless asked). If the player asks for an OPEN WORLD, huge/vast/expansive/sprawling map, or a desert rally, set world.terrain.size 1000-8000 (8000 typical — open-world games start on the 8km ceiling; 8000 also for a racing desert rally) and set world.portals {"enabled":true} for multi-map travel (open-world genres only — never for arena shooters or racing). Engine streams the world in chunks, so big is fine — but only go big when the player asks.
 Do NOT invent fields outside this shape. Numbers must be numbers, colors #rrggbb.
 Intent: "${intent}"
 Base genre: ${base.meta.genre}, environment: ${base.theme.environment}.

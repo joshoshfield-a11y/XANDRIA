@@ -64,6 +64,8 @@ export class Scatter {
           if (this.vegetation) this.vegetation.update(dt, cam);
           if (this.grass) this.grass.update(dt);
           if (terrain.water) terrain.updateWater(dt);
+          // Portals wave, workstream A: energy-field shader clock (one uniform/frame).
+          if (terrain.energyField) terrain.updateField(dt);
         });
       }
       return;
@@ -113,6 +115,10 @@ export class Scatter {
     // polish wave: animate the water plane's fake specular (one uniform/frame)
     if (terrain.water) {
       opts.engine?.onUpdate((dt) => terrain.updateWater(dt));
+    }
+    // Portals wave, workstream A: energy-field shader clock (one uniform/frame)
+    if (terrain.energyField) {
+      opts.engine?.onUpdate((dt) => terrain.updateField(dt));
     }
   }
 

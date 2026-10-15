@@ -6,6 +6,9 @@ import { Noise2D } from '../core/Rng';
 import { MaterialLibrary, shade } from '../gfx/Materials';
 import { gradeAtmosphere } from '../gfx/GenreGrade';
 import { resolveBiomeDef, biomeTint } from './Biomes';
+// Portals wave, workstream A: transparent energy-field boundary on
+// portal-enabled maps (replaces the wall/cliff boundary bodies+meshes).
+import { portalsEnabled, buildEnergyField, updateEnergyField, disposeEnergyField } from '../gfx/EnergyField';
 import { GROUP, type Physics } from '../core/Physics';
 // Stage-1 workstream B: chunked physics + streaming (chunked mesh generation
 // is workstream A's; both share the chunkLayout grid convention).
@@ -155,12 +158,25 @@ export class Terrain {
   private waterMat?: THREE.MeshStandardMaterial;
   readonly maxHeight: number;
   walls: CANNON.Body[] = [];
+  /**
+   * Portals wave, workstream A: the transparent energy-field boundary mesh
+   * (ONE mesh / ONE draw call, see gfx/EnergyField). Present only when
+   * `spec.world.portals` is on; undefined otherwise. Wired to the frame
+   * clock in Scatter.ts next to updateWater.
+   */
+  energyField?: THREE.Mesh;
   /** physics wave: surface-id derivation noise (seeded, independent of the
    *  height noise) + optional biome surface overrides (read via cast — the
    *  schema stays untouched and validation ignores unknown subfields). */
   private surfNoise: Noise2D;
   private bioSurface: string | undefined;
   private bioGround: string;
+  /**
+   * PORTALS-D: chunk key of the constructor's spawn chunk (used by
+   * refreshPortalAliases; the legacy body/mesh aliases re-point at the
+   * focus chunk after a park/unpark cycle).
+   */
+  private readonly spawnChunkKey: string;
 
   constructor(spec: GameSpec, physics: Physics, mats: MaterialLibrary, scene: THREE.Scene, opts: { flatRadius?: number; flatCenters?: THREE.Vector3[] } = {}) {
     const t = spec.world.terrain;
@@ -180,10 +196,16 @@ export class Terrain {
     const hscale = bio?.heightScale ?? 1;
     const flat = opts.flatCenters ?? [new THREE.Vector3(0, 0, 0)];
     const flatR = opts.flatRadius ?? Math.max(14, this.size * 0.08);
+    // Portals wave, workstream A: on portal-enabled maps the edge falloff is
+    // neutralized ('none') so the player can walk straight through the energy
+    // field into the transition trigger — a 'walls' rim or 'cliffs' drop at
+    // the edge would block/launch the crossing. When portals are off this is
+    // byte-identical to before.
+    const hpBoundary = portalsEnabled(spec) ? 'none' : spec.world.boundary;
     this.hp = {
       seed: spec.meta.seed, size: this.size, type: t.type, maxHeight: t.maxHeight,
       roughness: t.roughness, freq, hscale,
-      flatCenters: flat, flatRadius: flatR, boundary: spec.world.boundary,
+      flatCenters: flat, flatRadius: flatR, boundary: hpBoundary,
     };
 
     // ---- chunk layout (open-world stage 1, worker A)
@@ -317,9 +339,20 @@ export class Terrain {
     const oc = worldToChunk(spawnX, spawnZ, this.grid);
     this.body = this.chunkBodies.get(chunkKey(oc.cx, oc.cz))!;
     this.mesh = this.chunkMeshByKey.get(chunkKey(oc.cx, oc.cz))!;
+    // PORTALS-D: remember the spawn chunk's key for alias refresh after
+    // park/unpark cycles (refreshPortalAliases).
+    this.spawnChunkKey = chunkKey(oc.cx, oc.cz);
 
     // ---- boundary
-    if (spec.world.boundary !== 'wrap') {
+    // Portals wave, workstream A: portal-enabled maps get the transparent
+    // energy field INSTEAD of wall/cliff boundary bodies+meshes. Arena
+    // genres keep walls — the legacy branch below is untouched when portals
+    // are off (byte-identical).
+    if (portalsEnabled(spec)) {
+      const dusk = spec.theme.timeOfDay === 'dusk' || spec.theme.timeOfDay === 'dawn';
+      this.energyField = buildEnergyField(this.size, undefined, dusk);
+      scene.add(this.energyField);
+    } else if (spec.world.boundary !== 'wrap') {
       const wh = 60, wt = 4;
       const mk = (x: number, z: number, sx: number, sz: number) => { const b = physics.box([sx, wh, sz], [x, 0, z], { group: GROUP.WORLD }); this.walls.push(b); };
       mk(0, -half - wt / 2, this.size + wt * 2, wt); mk(0, half + wt / 2, this.size + wt * 2, wt);
@@ -419,6 +452,15 @@ export class Terrain {
   /** Advance the water ripple clock. Called per frame only when water exists. */
   updateWater(dt: number) {
     if (this.waterMat) (this.waterMat.userData.uTime as { value: number }).value += dt;
+  }
+
+  /**
+   * Portals wave, workstream A: advance the energy-field shader clock (one
+   * shared uniform per frame; the animation is pure shader ALU). Called per
+   * frame only when a field exists — wired in Scatter.ts next to updateWater.
+   */
+  updateField(dt: number) {
+    if (this.energyField) updateEnergyField(dt);
   }
 
   /**
@@ -798,6 +840,67 @@ export class Terrain {
     return x > -half && x < half && z > -half && z < half;
   }
 
+  /**
+   * PORTALS-D: park this map's live payloads for a portal transition.
+   *
+   * Removes chunk physics bodies from the physics world, chunk meshes from
+   * the scene, boundary walls from the physics world, and the water mesh
+   * from the scene — WITHOUT disposing anything. Built chunk geometry stays
+   * cached in chunkMeshByKey, so a cache revisit (unparkPortals + update)
+   * restores visuals instantly and rebuilds only the cheap physics bodies.
+   * The Terrain instance stays fully valid for a later unparkPortals() or
+   * dispose(). Idempotent.
+   */
+  parkPortals(scene: THREE.Scene, physics: Physics): void {
+    // bodyStream.reset(): releaseChunk removes each resident chunk body from
+    // the physics world; meshStream.reset(): releaseChunk removes each paged
+    // chunk mesh from the scene (geometry cache untouched). Both resets also
+    // clear the paging state, so the next update() is a teleport and
+    // sync-builds the arrival neighborhood.
+    this.bodyStream.reset();
+    this.meshStream.reset();
+    for (const w of this.walls) physics.remove(w);
+    if (this.water) scene.remove(this.water);
+    // Portals wave (merge): the energy field is a per-map visual — a parked
+    // map must not leave its field standing in the scene (all maps share the
+    // same boundary coordinates, so a lingering field would double-blend
+    // over the live map's field and cost a draw call per cached map).
+    if (this.energyField) scene.remove(this.energyField);
+  }
+
+  /**
+   * PORTALS-D: re-attach walls + water after parkPortals(). Chunk payloads
+   * re-page through update(focus) — call terrain.update(arrivalFocus) next,
+   * then refreshPortalAliases(focus). Safe to call on a freshly constructed
+   * (never parked) Terrain too: already-attached walls/water are skipped.
+   */
+  unparkPortals(scene: THREE.Scene, physics: Physics): void {
+    for (const w of this.walls) {
+      if (!physics.world.bodies.includes(w)) physics.world.addBody(w);
+    }
+    if (this.water && this.water.parent !== scene) scene.add(this.water);
+    // Portals wave (merge): re-attach the energy field removed by
+    // parkPortals(). Safe on a freshly constructed terrain too (already
+    // attached → skipped, mirroring the water guard).
+    if (this.energyField && this.energyField.parent !== scene) scene.add(this.energyField);
+  }
+
+  /**
+   * PORTALS-D: re-point the legacy spawn-chunk aliases (body/mesh) at the
+   * focus chunk's payloads after a park/unpark cycle — the stream rebuilt
+   * the bodies, so the old references point at removed objects. Call after
+   * unparkPortals() + update(focus). No-ops when the focus chunk has no
+   * resident payload yet (aliases keep their previous values).
+   */
+  refreshPortalAliases(focus: THREE.Vector3): void {
+    const c = worldToChunk(focus.x, focus.z, this.grid);
+    const k = chunkKey(c.cx, c.cz);
+    const b = this.chunkBodies.get(k) ?? this.chunkBodies.get(this.spawnChunkKey);
+    if (b) this.body = b;
+    const m = this.chunkMeshByKey.get(k) ?? this.chunkMeshByKey.get(this.spawnChunkKey);
+    if (m) this.mesh = m;
+  }
+
   dispose(scene: THREE.Scene, physics: Physics) {
     // Stage-1 B: page out everything first — bodyStream.reset() removes all
     // resident chunk bodies from the physics world (the legacy `body` alias
@@ -810,6 +913,9 @@ export class Terrain {
     this.chunkMeshByKey.clear();
     this.chunkMeshes = [];
     for (const w of this.walls) physics.remove(w);
+    // Portals wave, workstream A: tear down the field mesh (geometry only —
+    // the material is module-shared, never disposed).
+    if (this.energyField) { disposeEnergyField(scene, this.energyField); this.energyField = undefined; }
     if (this.water) { scene.remove(this.water); this.water.geometry.dispose(); }
   }
 }

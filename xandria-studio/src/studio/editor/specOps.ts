@@ -472,6 +472,15 @@ export const ASSET_GROUPS: AssetGroup[] = [
         ],
       },
       {
+        id: 'world.portals', label: 'Portals', hint: 'Multi-map travel',
+        controls: [
+          // Portals wave (workstream C): multi-map travel toggle. setAtPath
+          // creates world.portals on first enable; { enabled: false } (or the
+          // field absent) = legacy single map with boundary walls.
+          { kind: 'toggle', label: 'Portals (multi-map travel)', path: ['world', 'portals', 'enabled'] },
+        ],
+      },
+      {
         id: 'world.scatter', label: 'Scatter', hint: 'Props & vegetation',
         controls: [
           { kind: 'toggle', label: 'Trees', path: ['world', 'scatter', 'trees'] },

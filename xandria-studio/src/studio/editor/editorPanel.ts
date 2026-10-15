@@ -453,15 +453,25 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       else sp.custom.biome.biomeId = v as BiomeId;
     }, true), 'Auto picks the biome from seed + genre. Override forces one look.'));
 
-    // Open-world stage 1b: world size override (schema validates 60..8000;
-    // provisional max — workstreams B/E own the final ceiling).
+    // Open-world stage 1b: world size override (schema validates 60..8000).
     // Changing it then hitting Play rebuilds the world at the new size.
     host.appendChild(field(
       'WORLD SIZE',
       slider(s.world.terrain.size, 60, 8000, 20, (sp, v) => {
         sp.world.terrain.size = Math.round(v);
       }, (v) => `${Math.round(v)}m`),
-      'Arena default 220–400m. 1000m+ = open world: the engine streams the world in chunks (stage 1); 8000m max is provisional pending the maxsize wave measurements.',
+      'Arena default 220–400m. 1000m+ = open world: the engine streams the world in chunks (stage 1); 8000m is the measured maxsize ceiling.',
+    ));
+
+    // Portals wave (workstream C): multi-map travel toggle, same pattern as
+    // the WORLD SIZE slider above. Structural (rebuilds on Play).
+    host.appendChild(field(
+      'PORTALS — MULTI-MAP',
+      checkbox('Enabled', s.world.portals?.enabled === true, (sp, v) => {
+        if (v) sp.world.portals = { enabled: true };
+        else delete sp.world.portals;
+      }, true),
+      'Off = legacy single map with boundary walls. On = boundary walls become the energy field; crossing a map edge loads the neighboring map (deterministic per map coordinate). Designed for 8000m open-world maps; arena genres keep it off.',
     ));
 
     host.appendChild(h(`<div class="xed-ns">PALETTE — APPLY ENVIRONMENT LOOK</div>`));

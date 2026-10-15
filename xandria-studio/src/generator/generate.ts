@@ -453,18 +453,23 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     : ENV_TERRAIN[environment];
   const wantsWater = environment === 'islands' || has(text, 'lake', 'ocean', 'sea', 'water', 'river', 'flood');
 
-  // Open-world stage 1b: prompts asking for a big world map to big sizes;
-  // prompts that don't ask keep the legacy defaults byte-identically.
+  // Open-world stage 1b: prompts asking for a big world map to big sizes.
   // 'giant' is deliberately NOT a size word ('giant robot boss' is a boss fight).
-  // Provisional max 8000m (cold-build measured there; workstreams B/E own
-  // the final ceiling and may lower it).
+  // Portals wave (workstream C): per the user's directive every open-world-scale
+  // game starts on the measured 8km ceiling with multi-map portals on.
+  // Open-world-scale = the third-person-action exploration genre, plus any
+  // explicit big-world prompt. Arena genres (fps-arena, top-down-shooter) and
+  // racing keep their legacy sizes and walls — portals stay off there.
   const wantsBigWorld = has(text, 'open world', 'open-world', 'vast', 'expansive',
     'sprawling', 'huge world', 'massive world', 'enormous world', 'huge map',
     'massive map', 'big map', 'large map', 'enormous map', 'continent', 'world map');
   const wantsRally = genre === 'racing' && has(text, 'rally', 'desert rally', 'open desert',
     'off-road', 'offroad', 'cross-country', 'cross country', 'dakar');
+  const isOpenWorldGame = genre === 'third-person-action' || wantsBigWorld;
+  const portalsOn = isOpenWorldGame
+    && genre !== 'racing' && genre !== 'fps-arena' && genre !== 'top-down-shooter';
   const worldSize = wantsRally ? 8000
-    : wantsBigWorld ? 3000
+    : isOpenWorldGame ? 8000
     : genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220;
 
   // --- assemble (partial → normalize fills the rest + validates)
@@ -489,6 +494,10 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
         waterLevel: environment === 'islands' ? -0.5 : -2,
       },
       boundary: genre === 'racing' ? 'none' : 'walls',
+      // Portals wave (workstream C): on for open-world-scale games; absent
+      // (= legacy) everywhere else, so arena/racing specs serialize exactly
+      // as before (undefined fields drop out of JSON.stringify).
+      ...(portalsOn ? { portals: { enabled: true } } : {}),
       gravity: -22,
       scatter: {
         density: environment === 'city' || environment === 'neon-city' ? 0.5 : 0.65,

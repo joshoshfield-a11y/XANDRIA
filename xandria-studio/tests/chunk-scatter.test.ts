@@ -71,6 +71,8 @@ function build(intent: string, seed: number, size: number, type: string, opts: a
   const spec: any = generateSpec(intent, { seed });
   spec.world.terrain.size = size;
   spec.world.terrain.type = type;
+  // legacy-path test: the pre-refactor reference predates the portals wave
+  spec.world.portals = { enabled: false };
   if (forceTrees) spec.world.scatter.trees = true;
   const physics = new Physics(spec.world.gravity);
   const mats = new MaterialLibrary(spec);

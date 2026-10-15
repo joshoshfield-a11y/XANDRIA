@@ -56,6 +56,9 @@ function buildWorld(size: number, type: string, seed: number) {
   const spec = generateSpec('a heroic knight adventure', { seed });
   spec.world.terrain.type = type as any;
   spec.world.terrain.size = size;
+  // legacy-path test: the reference digests predate the portals wave, so opt
+  // out of the generator's portals default (portals-off = byte-identical)
+  spec.world.portals = { enabled: false };
   const physics = new Physics(spec.world.gravity);
   const mats = new MaterialLibrary(spec);
   const scene = new THREE.Scene();

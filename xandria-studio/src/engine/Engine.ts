@@ -17,6 +17,19 @@ import { Particles } from './gfx/Particles';
 import { PostFX } from './gfx/PostFX';
 import { Terrain } from './world/Terrain';
 import { FarTerrain } from './world/FarTerrain';
+// PORTALS-B: portal travel between 8km maps (workstream B)
+import { PortalManager } from './world/PortalManager';
+// PORTALS-D (workstream D): cross-map state for portal transitions.
+// portalEntities = per-map entity lifecycle registry (world/MapEntities);
+// portalCache = visited-map LRU (world/MapCache), wired by the portal flow.
+// The transition itself is driven by workstream B via PortalTransition
+// (world/PortalState) or the capture/park/despawn → acquire/swap/unpark/
+// restore/spawn primitives. Engine changes here are only the two fields
+// and the two methods below.
+import { MapEntityRegistry } from './world/MapEntities';
+import { PortalMapCache, TerrainMapContext } from './world/MapCache';
+import { ORIGIN, stampOriginMap, type MapCoord } from './world/MapGraph';
+import { portalsEnabled } from '@spec';
 import { cameraFarForWorldSize, cameraNearForWorldSize, FAR_TERRAIN_MIN_SIZE } from './gfx/FarField';
 import { HUD, type RunStats } from './game/HUD';
 import { AssetBridge } from './gfx/AssetBridge';
@@ -106,6 +119,19 @@ export class Engine {
    * genre) when it is null.
    */
   streamFocus: THREE.Vector3 | null = null;
+  /**
+   * PORTALS-D: per-map entity lifecycle registry (enemies, pickups, loot —
+   * see world/MapEntities.ts). Blueprints register their map-local systems;
+   * the portal transition despawns them on departure and respawns them
+   * deterministically on arrival.
+   */
+  readonly portalEntities = new MapEntityRegistry();
+  /**
+   * PORTALS-D: visited-map LRU (world/MapCache.ts). Wired by the portal
+   * transition flow (workstream B/C). Null = portals disabled; transitions
+   * throw rather than silently rebuild without a cache.
+   */
+  portalCache: PortalMapCache | null = null;
   /** hooks that survive restart() (runtime bootstrap); blueprint hooks are torn down */
   private persistentHooks = new Set<(dt: number) => void>();
   private pauseReason: 'menu' | 'modal' | null = null;
@@ -126,6 +152,12 @@ export class Engine {
   private terrainOpts: { flatCenters?: THREE.Vector3[]; flatRadius?: number; noTerrain?: boolean };
   /** the seed the live terrain was generated from */
   private terrainSeed: number;
+  /**
+   * PORTALS-B: portal travel manager (workstream B). Null unless the spec
+   * enables portals — arena genres and portal-off specs see no hooks, no
+   * overlay, no per-frame work. Attached in the constructor, after terrain.
+   */
+  portalManager: PortalManager | null = null;
 
   constructor(container: HTMLElement, spec: GameSpec, opts: EngineOptions = {}) {
     this.container = container;
@@ -182,6 +214,12 @@ export class Engine {
     this.juice.setFlash((color, pos, intensity, distance, duration) =>
       this.sky.lightLife.flash(color, pos, intensity, distance, duration));
     this.terrainOpts = { flatCenters: opts.flatCenters, flatRadius: opts.flatRadius, noTerrain: opts.noTerrain };
+    // PORTALS (merge): stamp the origin map's identity BEFORE terrain creation
+    // so the boot map builds from deriveMapSeed(worldSeed, 0, 0) — the same
+    // path as every later map (C's session contract). Without this, "there
+    // and back" would land on a different map than the boot map. A spec that
+    // already carries a portalMap (pre-stamped) is left alone.
+    if (portalsEnabled(spec) && !spec.custom?.portalMap) stampOriginMap(spec, spec.meta.seed);
     if (!opts.noTerrain) {
       this.terrain = new Terrain(spec, this.physics, this.mats, this.scene, {
         flatCenters: opts.flatCenters,
@@ -190,6 +228,17 @@ export class Engine {
     }
     this.syncFarTerrain();
     this.terrainSeed = spec.meta.seed;
+    // PORTALS-B: attach portal travel. Null unless portals are enabled for
+    // this spec — arena genres keep walls and are completely unaffected.
+    this.portalManager = PortalManager.attach(this);
+    // PORTALS (merge): construct the visited-map LRU and seed it with the
+    // live origin terrain, so the first return trip is a cache hit instead
+    // of a rebuild. The context wraps the live terrain — no extra build.
+    if (this.portalManager && this.terrain) {
+      this.portalCache = new PortalMapCache(3);
+      const origin: MapCoord = { ...ORIGIN };
+      this.portalCache.acquire(origin, (c) => new TerrainMapContext(c, this.terrain, this.scene, this.physics));
+    }
 
     // audio unlock on first gesture (removed again in dispose())
     this.audioUnlockHandler = () => { if (!this.testMode) this.audio.unlock(); };
@@ -224,8 +273,12 @@ export class Engine {
     }
 
     // cross-run progression: the seed this spec shipped with (daily runs
-    // override it temporarily; toTitle()/startRun() restore it)
-    this.baseSeed = spec.meta.seed;
+    // override it temporarily; toTitle()/startRun() restore it).
+    // PORTALS (merge): the WORLD seed, not the map build seed — on portal
+    // specs the origin stamp above already rewrote spec.meta.seed to
+    // deriveMapSeed(worldSeed, 0, 0); startRun()/toTitle() re-derive from
+    // the world seed via stampOriginMap.
+    this.baseSeed = spec.custom?.portalMap?.worldSeed ?? spec.meta.seed;
 
     // record finished runs into the persistent profile (skipped in testMode
     // so automated runs never pollute player stats)
@@ -267,6 +320,15 @@ export class Engine {
   }
 
   /**
+   * PORTALS-B: the live player avatar (workstream B/D seam — portal
+   * placement and the cross-map state handoff). Re-registered by
+   * PlayerAvatar on every blueprint build.
+   */
+  get portalsPlayerAvatar(): PlayerAvatar | null {
+    return this.playerAvatar;
+  }
+
+  /**
    * Rebuild the heightfield terrain from the current spec.meta.seed (R2-M1).
    * The daily challenge overrides the seed *after* construction; without a
    * rebuild every daily run would play on the base game's terrain, and an
@@ -277,6 +339,11 @@ export class Engine {
   private syncTerrainToSeed() {
     if (this.terrainOpts.noTerrain || !this.terrain) return;
     if (this.terrainSeed === this.spec.meta.seed) return;
+    // PORTALS-D: a seed change abandons every cached map — clear the visited
+    // LRU first (disposes all cached contexts including the live terrain;
+    // the dispose below is then a harmless no-op). Without this, cached
+    // contexts would leak on startRun/toTitle during a portal run.
+    this.portalCache?.clear();
     this.terrain.dispose(this.scene, this.physics);
     this.terrain = new Terrain(this.spec, this.physics, this.mats, this.scene, {
       flatCenters: this.terrainOpts.flatCenters,
@@ -288,6 +355,109 @@ export class Engine {
     // bridge's reference fresh (private field, so set from here rather than
     // touching AssetBridge.ts).
     (this.assetBridge as unknown as { terrain?: Terrain }).terrain = this.terrain;
+  }
+
+  /**
+   * PORTALS-B: rebuild the world from a derived map seed (portal travel,
+   * workstream B). The constructor's initial update() sync-builds the
+   * teleportSyncRadius neighborhood around `arrival` (spawn-first — the
+   * ChunkStream teleport path), and the rest of the load radius streams in
+   * over the next frames via the normal budget. flatCenters is steered at
+   * the arrival point (and restored) so the arrival pad is flattened exactly
+   * like the run spawn.
+   *
+   * PORTALS (merge): the live flow now goes through the visited-map LRU
+   * (PortalManager → PortalTransition → buildTerrainForPortal); this method
+   * remains for direct/external callers. When `portal` is given, the target
+   * map's identity is stamped so C's per-map biome resolves.
+   */
+  transitionToMapSeed(mapSeed: number, arrival: THREE.Vector3, portal?: { mx: number; my: number; worldSeed: number }): void {
+    this.spec.meta.seed = mapSeed;
+    if (portal) {
+      this.spec.custom = this.spec.custom ?? {};
+      this.spec.custom.portalMap = { ...portal };
+    }
+    const prevFlat = this.terrainOpts.flatCenters;
+    this.terrainOpts.flatCenters = [arrival.clone()];
+    try {
+      this.syncTerrainToSeed();
+    } finally {
+      this.terrainOpts.flatCenters = prevFlat;
+    }
+  }
+
+  /**
+   * PORTALS-D: park the live map's payloads ahead of a portal transition.
+   * Chunk bodies/meshes, boundary walls, and water come off the physics
+   * world / scene WITHOUT disposing cached chunk geometry; the far-field
+   * shell is disposed (it rebuilds cheaply per map). The Terrain instance
+   * stays valid — the visited-map LRU (portalCache) may re-attach it later.
+   * Pair with swapTerrainForPortal() on the arrival side.
+   */
+  parkWorldForPortal(): void {
+    if (this.terrainOpts.noTerrain || !this.terrain) return;
+    this.terrain.parkPortals(this.scene, this.physics);
+    this.farTerrain?.dispose();
+    this.farTerrain = null;
+  }
+
+  /**
+   * PORTALS-D: make `next` the live terrain after a portal transition.
+   * `next` must already be unparked (see TerrainMapContext.unpark). Rebuilds
+   * the far-field shell for the new map and refreshes the asset bridge's
+   * terrain reference, mirroring syncTerrainToSeed().
+   *
+   * PORTALS (E gate fix): the engine's live spec describes the live map. C's
+   * session contract requires spec.meta.seed = deriveMapSeed(worldSeed,mx,my)
+   * for every visited map (origin included), and every portal transition —
+   * LRU hit or fresh build — funnels through here, so the derived seed and
+   * the portalMap stamp land on the live spec exactly once per transition.
+   * This also keeps the terrainSeed === spec.meta.seed invariant that
+   * syncTerrainToSeed() relies on for its no-op check.
+   */
+  swapTerrainForPortal(next: Terrain, coord: MapCoord, mapSeed: number): void {
+    this.terrain = next;
+    this.terrainSeed = mapSeed;
+    this.spec.meta.seed = mapSeed;
+    this.spec.custom = {
+      ...(this.spec.custom ?? {}),
+      portalMap: {
+        mx: coord.mx,
+        my: coord.my,
+        worldSeed: this.spec.custom?.portalMap?.worldSeed ?? this.baseSeed,
+      },
+    };
+    this.syncFarTerrain();
+    // keep the opt-in asset packs grounded on the live terrain (same
+    // private-field pattern as syncTerrainToSeed)
+    (this.assetBridge as unknown as { terrain?: Terrain }).terrain = next;
+  }
+
+  /**
+   * PORTALS (merge): build a not-yet-live Terrain for a portal-map coordinate
+   * (the visited-map LRU's factory). The spec copy carries the derived build
+   * seed AND the stamped portalMap so C's per-map biome resolves for the new
+   * map; arrival flattening is steered at the arrival focus exactly like the
+   * run spawn. The caller (PortalTransition via PortalManager) parks the live
+   * map first and swaps this in via swapTerrainForPortal.
+   */
+  buildTerrainForPortal(coord: MapCoord, mapSeed: number, arrivalFocus: THREE.Vector3): Terrain {
+    const spec: GameSpec = {
+      ...this.spec,
+      meta: { ...this.spec.meta, seed: mapSeed },
+      custom: {
+        ...(this.spec.custom ?? {}),
+        portalMap: {
+          mx: coord.mx,
+          my: coord.my,
+          worldSeed: this.spec.custom?.portalMap?.worldSeed ?? this.baseSeed,
+        },
+      },
+    };
+    return new Terrain(spec, this.physics, this.mats, this.scene, {
+      flatCenters: [arrivalFocus.clone()],
+      flatRadius: this.terrainOpts.flatRadius,
+    });
   }
 
   /**
@@ -433,11 +603,40 @@ export class Engine {
   }
 
   /** Begin the run from the title screen (the click is a user gesture: audio unlocks). */
+  /**
+   * PORTALS (merge): re-establish the origin map identity after a seed reset
+   * (startRun/toTitle/startDailyRun). Forces spec.meta.seed back to
+   * deriveMapSeed(worldSeed, 0, 0) and re-points the portal manager at the
+   * run's world seed. Call BEFORE syncTerrainToSeed so the rebuild uses the
+   * derived origin seed.
+   */
+  private reseedPortalOrigin(worldSeed: number): void {
+    if (!portalsEnabled(this.spec)) return;
+    stampOriginMap(this.spec, worldSeed);
+    this.portalManager?.resetWorldSeed(worldSeed);
+  }
+
+  /**
+   * PORTALS (merge): re-seed the visited-map LRU with the live origin terrain
+   * after a seed reset cleared it (via syncTerrainToSeed's seed-change hook).
+   * Call AFTER syncTerrainToSeed. No-op when the origin entry survived.
+   */
+  private reseedPortalCache(): void {
+    if (this.portalCache && this.terrain) {
+      const origin: MapCoord = { ...ORIGIN };
+      this.portalCache.acquire(origin, (c) => new TerrainMapContext(c, this.terrain, this.scene, this.physics));
+    }
+  }
+
   startRun() {
     if (this.state !== 'title') return;
     this.dailyDate = null;
     this.spec.meta.seed = this.baseSeed;
+    // PORTALS (merge): a fresh run restarts at the origin map — re-stamp
+    // before the terrain sync, then re-seed the LRU the sync cleared.
+    this.reseedPortalOrigin(this.baseSeed);
     this.syncTerrainToSeed(); // no-op in the normal flow; restores base terrain after a daily run
+    this.reseedPortalCache();
     this.beginPlay();
   }
 
@@ -454,7 +653,11 @@ export class Engine {
     if (this.state !== 'title') return;
     this.dailyDate = todayLocalDate();
     this.spec.meta.seed = dailySeed(this.dailyDate);
+    // PORTALS (merge): the daily seed is the run's world seed — re-stamp the
+    // origin from it before the terrain sync, then re-seed the LRU.
+    this.reseedPortalOrigin(this.spec.meta.seed);
     this.syncTerrainToSeed();
+    this.reseedPortalCache();
     if (this.runBuilder) this.resetRun();
     this.beginPlay();
   }
@@ -488,7 +691,11 @@ export class Engine {
     // leave any daily run behind: the title background is always the base game
     this.dailyDate = null;
     this.spec.meta.seed = this.baseSeed;
+    // PORTALS (merge): the title background is the origin map — re-stamp
+    // before the terrain sync, then re-seed the LRU the sync cleared.
+    this.reseedPortalOrigin(this.baseSeed);
     this.syncTerrainToSeed(); // R2-M1: restore the base-game terrain after a daily run
+    this.reseedPortalCache();
     if (this.runBuilder) this.resetRun();
     else this.hud.clearOverlays();
     this.audio.setIntensity(0.5);
@@ -787,6 +994,9 @@ export class Engine {
     this.touch.dispose();
     this.audio.dispose();
     this.assetBridge.dispose();
+    // PORTALS-B: tear down the portal overlay + update hook.
+    this.portalManager?.dispose();
+    this.portalManager = null;
     this.postfx.dispose();
     this.farTerrain?.dispose();
     this.renderer.dispose();
