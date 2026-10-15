@@ -47,49 +47,138 @@ function b64url(s: string): string {
 }
 
 const css = `
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark;
+    --bg0:#090b0f; --bg1:#10141b; --bg2:#161c25;
+    --line:#232c38; --line2:#2e3947;
+    --txt:#e9eef5; --mut:#98a2b3; --dim:#5f6b7d;
+    --lime:#c9f24b; --lime-hi:#dcff70; --lime-dim:rgba(201,242,75,.10); --lime-line:rgba(201,242,75,.28);
+    --green:#3ddc84; --danger:#ff8b95;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family:'Segoe UI',system-ui,sans-serif; background:#0a0d14; color:#dfe6ef; height:100vh; overflow:hidden; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,system-ui,sans-serif;
+         background:var(--bg0); color:var(--txt); height:100vh; overflow:hidden; -webkit-font-smoothing:antialiased; }
   #layout { display:flex; height:100vh; }
-  #side { width:360px; min-width:360px; padding:18px; display:flex; flex-direction:column; gap:12px;
-          background:#0e1220; border-right:1px solid #1e2638; overflow-y:auto; }
-  h1 { font-size:19px; letter-spacing:.22em; margin:0; color:#7af7ff; }
-  h1 small { display:block; font-size:10px; letter-spacing:.3em; color:#5a6a85; margin-top:2px; }
-  textarea { width:100%; height:86px; background:#131a2a; color:#e6ecf5; border:1px solid #2a3550; border-radius:10px;
-             padding:10px 12px; font-size:14px; resize:none; outline:none; }
-  textarea:focus { border-color:#3fd8ff; }
-  select, .row input, #online input { width:100%; background:#131a2a; color:#e6ecf5; border:1px solid #2a3550; border-radius:8px; padding:8px 10px; font-size:13px; }
-  .row { display:flex; gap:8px; }
-  .lbl { font-size:10px; letter-spacing:.18em; color:#5a6a85; margin-bottom:4px; }
-  button { cursor:pointer; border:1px solid #2a3550; border-radius:10px; padding:11px; font-size:13.5px; font-weight:600;
-           letter-spacing:.06em; background:linear-gradient(180deg,#24304a,#182034); color:#e6ecf5; }
-  button:hover { border-color:#3fd8ff; }
-  button.primary { background:linear-gradient(180deg,#1f6d8a,#144256); border-color:#3fd8ff; }
+  /* ---- Icon rail ---- */
+  #sidenav { width:88px; flex:0 0 88px; display:flex; flex-direction:column; align-items:center; gap:4px;
+             padding:16px 0 12px; background:var(--bg1); border-right:1px solid var(--line); z-index:25; }
+  .nav-logo { width:38px; height:38px; border-radius:11px; background:var(--lime); color:#141806;
+              font-weight:900; font-size:20px; display:flex; align-items:center; justify-content:center; margin-bottom:14px; }
+  .nav-item { width:68px; padding:10px 4px; display:flex; flex-direction:column; align-items:center; gap:5px;
+              background:transparent; border:1px solid transparent; border-radius:12px; color:var(--mut);
+              font-size:10px; font-weight:600; letter-spacing:.06em; cursor:pointer; font-family:inherit; }
+  .nav-item .ico { font-size:17px; line-height:1; }
+  .nav-item:hover { color:var(--txt); background:rgba(255,255,255,.03); }
+  #sidenav .nav-item.primary { color:var(--lime); background:var(--lime-dim); border-color:transparent; }
+  .nav-foot { margin-top:auto; font-size:8.5px; letter-spacing:.14em; color:var(--dim); text-align:center; line-height:1.7; font-weight:600; }
+  /* ---- Main column ---- */
+  #side { width:452px; flex:0 0 452px; min-width:0; padding:20px 20px 24px; display:flex; flex-direction:column;
+          gap:14px; background:var(--bg0); overflow-y:auto; }
+  #topbar { display:flex; align-items:center; justify-content:space-between; }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .wordmark { font-weight:800; font-size:15px; letter-spacing:.22em; }
+  .playable { display:inline-flex; align-items:center; gap:7px; font-size:10px; font-weight:700; letter-spacing:.14em;
+              color:var(--mut); border:1px solid var(--line); border-radius:999px; padding:5px 11px; background:var(--bg1); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--green);
+         box-shadow:0 0 8px rgba(61,220,132,.8); display:inline-block; }
+  .top-right { display:flex; align-items:center; gap:10px; }
+  .credits { display:inline-flex; align-items:center; gap:6px; background:var(--lime-dim); color:var(--lime);
+             border:1px solid var(--lime-line); border-radius:10px; padding:7px 12px; font-weight:700; font-size:13px; }
+  .avatar { width:34px; height:34px; border-radius:50%; background:#2a3342; border:1px solid var(--line2);
+            color:#cfd6e0; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; }
+  .card { background:var(--bg1); border:1px solid var(--line); border-radius:16px; padding:22px;
+          display:flex; flex-direction:column; gap:16px; }
+  .card-head { display:flex; gap:14px; align-items:flex-start; }
+  .spark { color:var(--lime); font-size:24px; line-height:1.2; }
+  .card-head h2 { margin:0 0 6px; font-size:19px; font-weight:700; letter-spacing:-.01em; }
+  .card-head p { margin:0; color:var(--mut); font-size:13.5px; line-height:1.55; }
+  .sect { display:flex; flex-direction:column; gap:8px; }
+  .lbl { font-size:10.5px; letter-spacing:.16em; color:var(--dim); font-weight:700; text-transform:uppercase; }
+  .linked { font-size:12px; color:var(--green); display:flex; align-items:center; gap:6px; }
+  #acct-host #acct { background:var(--bg2); border-color:var(--line); }
+  #acct-host #acct .email { color:var(--mut); }
+  #acct-host #acct .left { color:var(--dim); }
+  #acct-host #acct input { background:var(--bg0); border-color:var(--line); color:var(--txt); }
+  textarea { width:100%; min-height:96px; background:var(--bg2); color:var(--txt); border:1px solid var(--line);
+             border-radius:10px; padding:11px 13px; font-size:14px; resize:vertical; outline:none;
+             font-family:inherit; line-height:1.5; }
+  textarea:focus { border-color:var(--lime-line); box-shadow:0 0 0 3px rgba(201,242,75,.08); }
+  select, .row input, #online input { width:100%; background:var(--bg2); color:var(--txt); border:1px solid var(--line);
+             border-radius:10px; padding:10px 12px; font-size:13.5px; outline:none; font-family:inherit; }
+  select:focus, input:focus { border-color:var(--lime-line); }
+  .row { display:flex; gap:10px; }
+  #history, #presets { display:flex; flex-direction:column; gap:8px; }
+  .prompt-row { display:flex; align-items:center; gap:6px; background:var(--bg2); border:1px solid var(--line);
+                border-radius:10px; padding:4px 4px 4px 12px; }
+  .prompt-row .fill { flex:1; min-width:0; background:none; border:none; color:var(--txt); text-align:left;
+                      font-size:13px; padding:8px 4px; font-weight:400; letter-spacing:0; cursor:pointer;
+                      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:inherit; }
+  .prompt-row .fill:hover { color:var(--lime); }
+  .prompt-row .rm { background:none; border:none; color:var(--dim); font-size:16px; padding:6px 10px;
+                    border-radius:8px; cursor:pointer; }
+  .prompt-row .rm:hover { color:var(--danger); background:rgba(255,139,149,.08); }
+  button { cursor:pointer; border:1px solid var(--line); border-radius:10px; padding:11px 14px; font-size:13.5px;
+           font-weight:600; background:var(--bg2); color:var(--txt); font-family:inherit;
+           transition:border-color .15s, background .15s; }
+  button:hover { border-color:var(--line2); background:#1a212c; }
+  button.primary { background:var(--lime); border-color:transparent; color:#161a08; }
+  button.primary:hover { background:var(--lime-hi); }
+  #generate { font-size:15px; font-weight:800; letter-spacing:.08em; padding:15px; border-radius:12px;
+              display:flex; align-items:center; justify-content:center; gap:10px; }
   button:disabled { opacity:.45; cursor:not-allowed; }
-  button:disabled:hover { border-color:#2a3550; }
-  .presets { display:flex; flex-wrap:wrap; gap:6px; }
-  .presets button { font-size:11px; padding:6px 9px; font-weight:400; opacity:.85; }
-  #frame-wrap { flex:1; position:relative; background:#000; }
+  button:disabled:hover { border-color:var(--line); background:var(--bg2); }
+  details#online { border:1px solid var(--line); border-radius:10px; background:var(--bg2); padding:0 14px; }
+  details#online summary { cursor:pointer; font-size:13px; font-weight:600; color:var(--mut); padding:12px 0;
+                           list-style:none; display:flex; align-items:center; gap:9px; }
+  details#online summary::-webkit-details-marker { display:none; }
+  details#online summary::before { content:'⚙'; font-size:14px; color:var(--dim); }
+  details#online summary::after { content:'›'; margin-left:auto; color:var(--dim); font-size:16px; transition:transform .15s; }
+  details#online[open] summary::after { transform:rotate(90deg); }
+  #online .opt-body { display:flex; flex-direction:column; gap:10px; padding:2px 0 14px; }
+  .badge { display:inline-block; padding:2px 7px; border-radius:6px; background:var(--lime-dim); color:var(--lime);
+           font-size:10px; font-weight:700; letter-spacing:.08em; margin-left:6px; border:1px solid var(--lime-line); }
+  #meta { font-size:11.5px; color:var(--dim); line-height:1.6; white-space:pre-wrap; max-height:160px; overflow:auto; }
+  #meta .badge { margin:2px 4px 0 0; }
+  #meta b { color:var(--mut); }
+  .signin-note { font-size:12px; color:var(--dim); text-align:center; }
+  .note { font-size:12px; color:var(--mut); }
+  /* ---- Preview ---- */
+  #frame-wrap { flex:1; min-width:0; position:relative; background:#04060a; }
   #game { width:100%; height:100%; border:0; display:block; }
-  #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px;
-           color:#3a4a65; letter-spacing:.2em; font-size:13px; }
-  #meta { font-size:11px; color:#5a6a85; line-height:1.5; white-space:pre-wrap; max-height:150px; overflow:auto; }
-  .badge { display:inline-block; padding:2px 8px; border-radius:6px; background:#1a2438; font-size:10.5px; margin:2px 2px 0 0; color:#8fa5c8; }
-  /* ---- Mobile: convert #side into a collapsible bottom drawer ---- */
-  #drawer-grabber { display:none; height:52px; flex:0 0 auto; margin:-18px -18px 0; cursor:pointer;
+  #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column;
+           gap:16px; text-align:center; padding:24px;
+           background:radial-gradient(640px 420px at 50% 34%, rgba(201,242,75,.055), transparent 70%); }
+  .ready-pill { display:inline-flex; align-items:center; gap:9px; font-size:11px; font-weight:700; letter-spacing:.22em;
+                color:var(--lime); border:1px solid var(--lime-line); border-radius:999px;
+                padding:9px 18px 9px 14px; background:rgba(201,242,75,.06); }
+  #empty p { margin:0; color:var(--mut); font-size:14px; line-height:1.65; max-width:300px; }
+  /* ---- Mobile: #side becomes a bottom drawer, #sidenav a top bar ---- */
+  #drawer-grabber { display:none; height:52px; flex:0 0 auto; margin:-20px -20px 0; cursor:pointer;
                     align-items:center; justify-content:center; touch-action:manipulation; }
   #drawer-grabber span { display:block; width:56px; height:6px; border-radius:3px; background:#3a4a65; }
   #drawer-fab { display:none; position:fixed; bottom:20px; right:20px; z-index:30; width:56px; height:56px;
-                border-radius:50%; padding:0; font-size:24px; align-items:center; justify-content:center;
-                background:linear-gradient(180deg,#1f6d8a,#144256); border:1px solid #3fd8ff;
+                border-radius:50%; padding:0; font-size:22px; align-items:center; justify-content:center;
+                background:var(--lime); color:#161a08; border:none;
                 box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  @media (max-width: 900px) {
+    #side { width:400px; flex-basis:400px; }
+    #sidenav { width:72px; flex-basis:72px; }
+    .nav-item { width:58px; }
+  }
   @media (max-width: 720px) {
-    #side { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto; min-width:0; max-height:72vh;
-            border-right:none; border-top:1px solid #1e2638; border-radius:16px 16px 0 0;
+    #layout { flex-direction:column; }
+    #sidenav { width:100%; flex:0 0 58px; flex-direction:row; border-right:none; border-bottom:1px solid var(--line);
+               padding:0 10px; align-items:center; gap:2px; }
+    .nav-logo { margin:0 8px 0 2px; width:32px; height:32px; font-size:17px; border-radius:9px; }
+    .nav-item { width:auto; flex-direction:row; padding:8px 12px; gap:7px; font-size:11px; }
+    .nav-item .ico { font-size:15px; }
+    .nav-foot { display:none; }
+    #side { position:fixed; left:0; right:0; bottom:0; top:auto; width:auto; flex:none; max-height:74vh;
+            border-top:1px solid var(--line); border-radius:16px 16px 0 0; background:var(--bg1);
             transform:translateY(calc(100% - 52px)); transition:transform .25s ease; z-index:20; }
     #side.open { transform:translateY(0); }
     #drawer-grabber { display:flex; }
     #drawer-fab { display:flex; }
+    #frame-wrap { min-height:0; }
   }
 `;
 
@@ -110,50 +199,67 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
 
   root.innerHTML = `
     <div id="layout">
+      <nav id="sidenav">
+        <div class="nav-logo">X</div>
+        <button id="tab-generate" class="nav-item primary"><span class="ico">✦</span><span>Generate</span></button>
+        <button id="tab-editor" class="nav-item"><span class="ico">&lt;/&gt;</span><span>Editor</span></button>
+        ${billingOn ? '<button id="tab-pricing" class="nav-item"><span class="ico">◆</span><span>Pricing</span></button>' : ''}
+        <div class="nav-foot">XANDRIA<br/>STUDIO<br/>v1.5.0</div>
+      </nav>
       <div id="side">
         <div id="drawer-grabber" role="button" aria-label="toggle panel" title="drag panel"><span></span></div>
-        <h1>XANDRIA STUDIO<small>INTENT → PLAYABLE GAME</small></h1>
-        ${billingOn ? '<div id="acct-host"></div>' : ''}
-        <div class="row" id="viewtabs" style="gap:6px">
-          <button id="tab-generate" class="primary" style="flex:1">✨ GENERATE</button>
-          <button id="tab-editor" style="flex:1">🛠 EDITOR</button>
-          ${billingOn ? '<button id="tab-pricing" style="flex:1">💎 PRICING</button>' : ''}
-        </div>
-        <div id="view-generate" style="display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow-y:auto">
-        <div><div class="lbl">DESCRIBE YOUR GAME</div><textarea id="prompt" placeholder="a dark knight questing through volcanic ruins, brutal difficulty…"></textarea></div>
-        <div class="presets" id="presets"></div>
-        <div class="row">
-          <div style="flex:1"><div class="lbl">GENRE</div><select id="genre"><option value="">auto</option></select></div>
-          <div style="flex:1"><div class="lbl">DIFFICULTY</div><select id="diff"><option value="">auto</option><option>easy</option><option>normal</option><option>hard</option></select></div>
-        </div>
-        <div><div class="lbl">GRAPHICS QUALITY</div><select id="quality"><option value="retro">retro (PS2)</option><option value="standard">standard</option><option value="high">high</option></select></div>
-        <details id="online"><summary style="cursor:pointer;font-size:11px;letter-spacing:.18em;color:#5a6a85">🌐 ONLINE / AI OPTIONS</summary>
-          <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
-            <div><div class="lbl">LLM MODE</div><select id="llm-mode"><option value="">off (deterministic)</option><option value="flavor">flavor (names/colors)</option><option value="architect">architect (full spec)</option></select></div>
-            <div><div class="lbl">LLM ENDPOINT</div><input id="llm-endpoint" placeholder="http://localhost:11434/v1"/></div>
-            <div class="row">
-              <div style="flex:1"><div class="lbl">API KEY</div><input id="llm-key" type="password" placeholder="optional"/></div>
-              <div style="flex:1"><div class="lbl">MODEL</div><input id="llm-model" placeholder="llama3.1"/></div>
-            </div>
-            <div><div class="lbl">ASSET PACKS (.glb/.gltf URLs, one per line)</div><textarea id="asset-packs" style="height:56px" placeholder="trees=https://example.com/trees.glb"></textarea></div>
+        <div id="topbar">
+          <div class="brand"><span class="wordmark">XANDRIA</span><span class="playable"><i class="dot"></i>PLAYABLE ▾</span></div>
+          <div class="top-right">
+            ${billingOn ? '<span id="credits-pill" class="credits" style="display:none">⚡ …</span>' : ''}
+            <span class="avatar">X</span>
           </div>
-        </details>
-        <button class="primary" id="generate">⚡ GENERATE &amp; PLAY</button>
-        <div class="row"><button id="export" style="flex:1">⬇ EXPORT .HTML</button><button id="copy" style="flex:1">🔗 SHARE LINK</button></div>
-        ${billingOn ? `<div id="export-extra" style="display:flex;flex-direction:column;gap:8px">
+        </div>
+        <div id="view-generate" class="card" style="display:flex">
+          <div class="card-head"><span class="spark">✦</span><div>
+            <h2>Create Your Experience</h2>
+            <p>Describe what you want to build. XANDRIA will generate a playable game based on your prompt.</p>
+          </div></div>
+          ${billingOn ? `<div class="sect"><div class="lbl">Account</div><div id="acct-host"></div><div class="linked">✓ Linked account</div></div>` : ''}
+          <div class="sect">
+            <div class="lbl">Prompt</div>
+            <div id="history" style="display:none"></div>
+            <textarea id="prompt" placeholder="a dark knight questing through volcanic ruins, brutal difficulty…"></textarea>
+            <div id="presets"></div>
+          </div>
           <div class="row">
-            <button id="steam-export" style="flex:1" title="Steam-ready export (Pro tier)">📦 STEAM <span class="badge">PRO</span></button>
-            <button id="api-access" style="flex:1" title="Programmatic generation API (Pro tier)">🔌 API <span class="badge">PRO</span></button>
+            <div style="flex:1;min-width:0"><div class="lbl">Genre</div><select id="genre"><option value="">Auto</option></select></div>
+            <div style="flex:1;min-width:0"><div class="lbl">Difficulty</div><select id="diff"><option value="">Auto</option><option>easy</option><option>normal</option><option>hard</option></select></div>
           </div>
-          <div id="splash-row" style="font-size:11px;color:#5a6a85"></div>
-        </div>` : ''}
-        <div id="meta"></div>
+          <div><div class="lbl">Graphics Quality</div><select id="quality"><option value="retro">retro (PS2)</option><option value="standard">standard</option><option value="high">high</option></select></div>
+          <details id="online"><summary>Advanced Options</summary>
+            <div class="opt-body">
+              <div><div class="lbl">LLM Mode</div><select id="llm-mode"><option value="">off (deterministic)</option><option value="flavor">flavor (names/colors)</option><option value="architect">architect (full spec)</option></select></div>
+              <div><div class="lbl">LLM Endpoint</div><input id="llm-endpoint" placeholder="http://localhost:11434/v1"/></div>
+              <div class="row">
+                <div style="flex:1;min-width:0"><div class="lbl">API Key</div><input id="llm-key" type="password" placeholder="optional"/></div>
+                <div style="flex:1;min-width:0"><div class="lbl">Model</div><input id="llm-model" placeholder="llama3.1"/></div>
+              </div>
+              <div><div class="lbl">Asset Packs (.glb/.gltf URLs, one per line)</div><textarea id="asset-packs" style="min-height:56px" placeholder="trees=https://example.com/trees.glb"></textarea></div>
+            </div>
+          </details>
+          <button class="primary" id="generate">⚡ GENERATE &amp; PLAY →</button>
+          <div class="row"><button id="export" style="flex:1">⬇ Export .HTML</button><button id="copy" style="flex:1">🔗 Share Link</button></div>
+          ${billingOn ? `<div id="export-extra" style="display:flex;flex-direction:column;gap:10px">
+            <div class="row">
+              <button id="steam-export" style="flex:1" title="Steam-ready export (Pro tier)">Steam <span class="badge">PRO</span></button>
+              <button id="api-access" style="flex:1" title="Programmatic generation API (Pro tier)">API <span class="badge">PRO</span></button>
+            </div>
+            <div id="splash-row" class="note"></div>
+          </div>` : ''}
+          <div id="meta"></div>
+          ${billingOn ? '<div class="signin-note">Sign in to manage your credit and projects.</div>' : ''}
         </div><!-- /view-generate -->
         <div id="view-editor" style="display:none;flex:1;min-height:0;overflow:hidden"></div>
         ${billingOn ? '<div id="view-pricing" style="display:none;flex:1;min-height:0;overflow-y:auto"></div>' : ''}
       </div>
-      <div id="frame-wrap"><div id="empty">✦<br/>GENERATE A GAME TO PLAY IT HERE</div><iframe id="game" style="display:none"></iframe></div>
-      <button id="drawer-fab" aria-label="toggle panel" title="panel">✨</button>
+      <div id="frame-wrap"><div id="empty"><span class="ready-pill"><i class="dot"></i>READY</span><p>Generate a game, scene or interactive experience.</p></div><iframe id="game" style="display:none"></iframe></div>
+      <button id="drawer-fab" aria-label="toggle panel" title="panel">✦</button>
     </div>`;
 
   const prompt = root.querySelector<HTMLTextAreaElement>('#prompt')!;
@@ -198,11 +304,45 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   };
   for (const e of [qualitySel, llmMode, llmEndpoint, llmKey, llmModel, assetPacks]) e.addEventListener('change', persistOnline);
 
+  // ---- Prompt history (recent successful generations) + dismissible preset
+  // ---- rows, one row per prompt: click refills the box, × removes it.
+  const loadStrArr = (k: string): string[] => {
+    try {
+      const v = JSON.parse(localStorage.getItem(k) ?? 'null');
+      return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+    } catch { return []; }
+  };
+  const saveStrArr = (k: string, v: string[]) => {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ }
+  };
+  const HIST_KEY = 'xandria.studio.history';
+  const DISM_KEY = 'xandria.studio.dismissedPresets';
+  let history: string[] = loadStrArr(HIST_KEY);
+  const dismissed: string[] = loadStrArr(DISM_KEY);
+  const historyBox = root.querySelector<HTMLElement>('#history')!;
   const presets = root.querySelector<HTMLElement>('#presets')!;
+  const promptRow = (text: string, title: string, onFill: () => void, onRemove: (row: HTMLElement) => void): HTMLElement => {
+    const row = el('<div class="prompt-row"><button class="fill"></button><button class="rm" title="remove">×</button></div>');
+    const fill = row.querySelector('.fill') as HTMLButtonElement;
+    fill.textContent = text;
+    fill.title = title;
+    fill.addEventListener('click', onFill);
+    (row.querySelector('.rm') as HTMLButtonElement).addEventListener('click', () => onRemove(row));
+    return row;
+  };
+  const renderHistory = () => {
+    historyBox.innerHTML = '';
+    history.forEach((h, i) => historyBox.appendChild(promptRow(h, h,
+      () => { prompt.value = h; },
+      () => { history.splice(i, 1); saveStrArr(HIST_KEY, history); renderHistory(); })));
+    historyBox.style.display = history.length ? 'flex' : 'none';
+  };
+  renderHistory();
   for (const p of PRESETS) {
-    const b = el(`<button>${p.split(',')[0].slice(0, 32)}…</button>`);
-    b.addEventListener('click', () => { prompt.value = p; });
-    presets.appendChild(b);
+    if (dismissed.includes(p)) continue;
+    presets.appendChild(promptRow(p.split(',')[0], p,
+      () => { prompt.value = p; },
+      (row) => { dismissed.push(p); saveStrArr(DISM_KEY, dismissed); row.remove(); }));
   }
 
   let lastSpec = '';
@@ -212,12 +352,21 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   // ---- supabase env vars are unset, `billing.enabled` is false and every
   // ---- gate below passes through, leaving launch behavior untouched.
   const notifyMeta: Notify = (html) => { meta.innerHTML += `<br/>${html}`; };
-  let renderAcct: () => void = () => {};
+  const creditsPill = root.querySelector<HTMLElement>('#credits-pill');
   const billing: BillingState = createBillingState(() => { renderAcct(); renderExportRow(); });
+  const updateCredits = () => {
+    if (!creditsPill || !billing.enabled) return;
+    if (!billing.email) { creditsPill.style.display = 'none'; return; }
+    creditsPill.style.display = 'inline-flex';
+    creditsPill.textContent = `⚡ ${billing.me ? billing.me.generations_remaining : '…'}`;
+  };
+  let renderAcct: () => void = () => { updateCredits(); };
   const acctHost = root.querySelector<HTMLElement>('#acct-host');
   if (billing.enabled && acctHost) {
-    renderAcct = mountAccountChip(acctHost, billing, notifyMeta);
+    const chipRender = mountAccountChip(acctHost, billing, notifyMeta);
+    renderAcct = () => { chipRender(); updateCredits(); };
   }
+  renderAcct();
   const renderExportRow = () => {
     const row = root.querySelector<HTMLElement>('#splash-row');
     if (!row || !billing.enabled) return;
@@ -225,7 +374,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     if (!billing.email) {
       row.innerHTML = '<i>sign in to manage the splash credit</i>';
     } else if (tier === 'free' || tier === null) {
-      row.innerHTML = '✦ splash credit: <b style="color:#8fa5c8">always on</b> <span style="opacity:.7">(free tier)</span>';
+      row.innerHTML = '✦ splash credit: <b>always on</b> <span style="opacity:.7">(free tier)</span>';
     } else {
       row.innerHTML = `<label style="cursor:pointer;display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="splash-toggle"${billing.splashOn ? ' checked' : ''} style="width:auto"/>
@@ -261,7 +410,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     const { spec: next, changed } = applyPatch(current, detail, inspector.lockedKeys);
     if (changed.length > 0) {
       lastSpec = JSON.stringify(next);
-      inspector.spec = next;
+      inspector.spec = JSON.parse(lastSpec) as Record<string, unknown>;
       reloadPreview();
     }
   });
@@ -394,10 +543,16 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     frame.style.display = 'block';
     empty.style.display = 'none';
     collapseDrawer(); // mobile: give the canvas the full viewport
+    // Remember successful prompts for the history list (cap 6, deduped).
+    if (intent !== 'a heroic adventure in the forest') {
+      history = [intent, ...history.filter((h) => h !== intent)].slice(0, 6);
+      saveStrArr(HIST_KEY, history);
+      renderHistory();
+    }
     meta.innerHTML =
       `<span class="badge">${GENRE_LABELS[spec.meta.genre]}</span><span class="badge">${spec.theme.environment}</span>` +
       `<span class="badge">${spec.theme.timeOfDay}</span><span class="badge">${spec.rules.difficulty}</span>` +
-      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b style="color:#8fa5c8">${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}`;
+      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b>${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}`;
     // Record the COMPLETED generation against the monthly quota. This line is
     // only reached on success — failed builds don't count.
     if (billing.enabled) {
