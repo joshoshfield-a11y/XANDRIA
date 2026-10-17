@@ -10,6 +10,74 @@ export type TexKind = 'ground' | 'rock' | 'metal' | 'brick' | 'wood' | 'grid' | 
   /** env-art pass: cracked desert earth, glittering snow, ember-cracked basalt, darkened wet sand */
   | 'cracked' | 'snowdrift' | 'emberrock' | 'wetsand';
 
+/**
+ * Graphics wave 2, workstream A — shared uniforms for the ground detail
+ * normal layer (see applyGroundDetail below). ONE object for every ground
+ * material: the quality tier sets .value live (no recompile, no second code
+ * path) from Engine.applySettings / boot. Feature-flagged fidelity, not two
+ * materials.
+ */
+export const groundDetailUniforms = {
+  /** 0 = off (retro), ~0.55 (standard/S25), 1 = full (high/desktop) */
+  uDetailStrength: { value: 0.55 },
+  /** world-space distance the detail layer fades out by (m) */
+  uDetailFade: { value: 45 },
+};
+
+/** Quality-tier -> detail layer tuning. Called on boot and on pause-menu quality changes. */
+export function applyGroundDetailForQuality(q: 'retro' | 'standard' | 'high'): void {
+  groundDetailUniforms.uDetailStrength.value = q === 'high' ? 1 : q === 'standard' ? 0.55 : 0;
+  groundDetailUniforms.uDetailFade.value = q === 'high' ? 70 : 45;
+}
+
+/**
+ * Micro-detail normal layer for ground materials: re-samples the material's
+ * OWN biome normal map at high frequency (~0.85m tiles) from world-space
+ * coords, so it survives close-up where the 8m macro tile goes soft. One
+ * extra texture sample + ~15 ALU per ground fragment inside the fade
+ * distance, on the one shared material — zero new draw calls, zero new
+ * textures, no per-frame CPU. Fades out with view distance (no moiré at
+ * range); the S25/standard tier gets a shorter fade + softer strength via
+ * the shared uniforms above.
+ */
+function applyGroundDetail(m: THREE.MeshStandardMaterial): void {
+  if ((m.userData as { groundDetail?: boolean }).groundDetail) return;
+  (m.userData as { groundDetail?: boolean }).groundDetail = true;
+  m.customProgramCacheKey = () => 'xandria-ground-detail-v1';
+  const prev = m.onBeforeCompile;
+  m.onBeforeCompile = (shader, renderer) => {
+    prev?.(shader, renderer);
+    shader.uniforms.uDetailStrength = groundDetailUniforms.uDetailStrength;
+    shader.uniforms.uDetailFade = groundDetailUniforms.uDetailFade;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vGroundWPos;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGroundWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nuniform float uDetailStrength;\nuniform float uDetailFade;\nvarying vec3 vGroundWPos;',
+      )
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+      {
+        // detail bump from the biome normal map at ~0.85m tiling, sampled in
+        // world space so chunk-local UVs don't matter; faded by view distance
+        float dFade = 1.0 - smoothstep(uDetailFade * 0.55, uDetailFade, length(vViewPosition));
+        float dAmt = uDetailStrength * dFade;
+        if (dAmt > 0.003) {
+          // normalMap is the biome normal map (declared by three when
+          // USE_NORMALMAP) — tangent-space; the terrain is XZ-planar so its
+          // xy maps straight onto world xz as a bump perturbation.
+          vec3 dT = texture2D(normalMap, vGroundWPos.xz * ${(1 / 0.85).toFixed(4)}).xyz * 2.0 - 1.0;
+          vec3 bumpW = normalize(vec3(dT.x * 0.55, 1.0, -dT.y * 0.55));
+          vec3 bumpV = normalize((viewMatrix * vec4(bumpW, 0.0)).xyz);
+          normal = normalize(mix(normal, bumpV, dAmt * 0.85));
+          // whisper of albedo variation so the detail reads in flat light too
+          diffuseColor.rgb *= 1.0 + (dT.z - 0.72) * 0.14 * dAmt;
+        }
+      }`);
+  };
+}
+
 export class MaterialLibrary {
   private cache = new Map<string, THREE.Texture>();
   private matCache = new Map<string, THREE.Material>();
@@ -322,6 +390,9 @@ export class MaterialLibrary {
       m.emissive = new THREE.Color(g.emissive);
       m.emissiveIntensity = g.emissiveIntensity ?? 1;
     }
+    // Graphics wave 2, workstream A: close-up micro-detail normal layer on
+    // the shared material (zero new draw calls — see applyGroundDetail).
+    applyGroundDetail(m);
     this.matCache.set(key, m);
     return m;
   }
@@ -341,7 +412,7 @@ export class MaterialLibrary {
     return m;
   }
 
-  flat(hex: string, opts: { roughness?: number; metalness?: number; emissive?: string; emissiveIntensity?: number; transparent?: boolean; opacity?: number } = {}): THREE.MeshStandardMaterial {
+  flat(hex: string, opts: { roughness?: number; metalness?: number; emissive?: string; emissiveIntensity?: number; transparent?: boolean; opacity?: number; vertexColors?: boolean } = {}): THREE.MeshStandardMaterial {
     const key = `flat:${hex}:${JSON.stringify(opts)}`;
     const hit = this.matCache.get(key);
     if (hit) return hit as THREE.MeshStandardMaterial;
@@ -354,6 +425,10 @@ export class MaterialLibrary {
     };
     if (opts.transparent !== undefined) params.transparent = opts.transparent;
     if (opts.opacity !== undefined) params.opacity = opts.opacity;
+    // Graphics wave 2 (workstream B): vegetation foliage carries per-vertex
+    // colors (canopy white × undergrowth tints). The flag is part of the
+    // cache key, so non-vegetation users of the same hex are unaffected.
+    if (opts.vertexColors) params.vertexColors = true;
     const m = new THREE.MeshStandardMaterial(params);
     if (opts.emissive) { m.emissive = new THREE.Color(opts.emissive); m.emissiveIntensity = opts.emissiveIntensity ?? 1; }
     this.matCache.set(key, m);

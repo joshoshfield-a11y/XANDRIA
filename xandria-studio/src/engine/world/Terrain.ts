@@ -14,6 +14,12 @@ import { GROUP, type Physics } from '../core/Physics';
 // is workstream A's; both share the chunkLayout grid convention).
 import { chunkCellRange, chunkKey, worldToChunk, type ChunkGrid } from './chunkLayout';
 import { ChunkStream } from './ChunkStream';
+// Graphics wave 2, workstream A: the shared ground-color recipe (also used
+// by FarTerrain so the far shell agrees with the detail mesh at the seam).
+import {
+  deriveGroundColors, paintGroundVertex, highColorForGroundKind,
+  type GroundPaintCtx, type WearDisc, type WearPath,
+} from './groundPaint';
 
 /**
  * Stage-1 B: mesh streaming radii (meters). Chunk meshes page out only far
@@ -102,6 +108,85 @@ export function terrainHeightAt(p: TerrainHeightParams, x: number, z: number): n
   return y;
 }
 
+/**
+ * Graphics wave 2, workstream D: baked heightfield for the water shader.
+ *
+ * The water plane is a single 1x1-segment quad, so the fragment shader can't
+ * interpolate terrain depth from vertices. Instead we bake the map's pure
+ * height function (terrainHeightAt — the same function the chunk meshes are
+ * built from, so the bake matches the visible terrain exactly) into a
+ * 16-bit-packed RGBA DataTexture once at construction. The shader samples
+ * it per pixel to derive water depth → shoreline foam band + shallow/deep
+ * color grading. One-time CPU cost (~0.4s at 768², ~0.8s at 1024²), zero
+ * per-frame CPU — the brief's "uniforms + ALU" budget.
+ *
+ * Per-map by construction: each Terrain bakes from its own TerrainHeightParams
+ * (seeded per map), so portal-cached maps each get correct shores. The ripple
+ * phase stays seed-independent (uTime from 0, pure noise — no visible benefit
+ * to per-map phases).
+ */
+export function waterHeightTexSize(worldSize: number): number {
+  return worldSize > 2000 ? 1024 : 768;
+}
+
+export interface WaterHeightBake {
+  texture: THREE.DataTexture;
+  minH: number;
+  maxH: number;
+  /** texel size in meters (worldSize / N) — bounds the foam contour accuracy */
+  texel: number;
+}
+
+/** 16-bit pack of a 0..1 normalized height into two bytes (R=hi, G=lo). */
+export function packHeight16(h01: number): [number, number] {
+  const v = Math.max(0, Math.min(65535, Math.round(h01 * 65535)));
+  return [(v >> 8) & 255, v & 255];
+}
+
+/** JS mirror of the GLSL unpack (for tests): bytes → 0..1 normalized height. */
+export function unpackHeight16(r: number, g: number): number {
+  return (r * 256 + g) / 65535;
+}
+
+export function bakeWaterHeightTexture(
+  hp: TerrainHeightParams,
+  worldSize: number,
+): WaterHeightBake {
+  const N = waterHeightTexSize(worldSize);
+  const half = worldSize / 2;
+  // Single pass into a float grid (4MB at 1024²) so min/max come for free.
+  const heights = new Float32Array(N * N);
+  let minH = Infinity, maxH = -Infinity;
+  for (let j = 0; j < N; j++) {
+    const z = (j / (N - 1)) * worldSize - half;
+    for (let i = 0; i < N; i++) {
+      const x = (i / (N - 1)) * worldSize - half;
+      const h = terrainHeightAt(hp, x, z);
+      heights[j * N + i] = h;
+      if (h < minH) minH = h;
+      if (h > maxH) maxH = h;
+    }
+  }
+  if (!(maxH > minH)) maxH = minH + 1; // degenerate flat world: avoid div-by-zero
+  const data = new Uint8Array(N * N * 4);
+  const inv = 1 / (maxH - minH);
+  for (let k = 0; k < N * N; k++) {
+    const [r, g] = packHeight16((heights[k] - minH) * inv);
+    const o = k * 4;
+    data[o] = r; data[o + 1] = g; data[o + 2] = 0; data[o + 3] = 255;
+  }
+  // RGBA8 + LinearFilter: filterable on every WebGL2 implementation (float
+  // textures would need OES_texture_float_linear, spotty on mobile GPUs).
+  const texture = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return { texture, minH, maxH, texel: worldSize / N };
+}
+
 export class Terrain {
   /**
    * Chunk meshes built so far, in build order. Stage-1b A: meshes are built
@@ -141,11 +226,22 @@ export class Terrain {
   private cell: number;
   private hp: TerrainHeightParams;
   /** Stage-1b A: vertex-color inputs, derived once in the constructor (the old
-   *  geometry loop's locals) so per-chunk builds stay deterministic. */
-  private colorCtx!: {
-    cGround: THREE.Color; cAlt: THREE.Color; cRock: THREE.Color;
-    cPatchDark: THREE.Color; cPatchLight: THREE.Color;
-  };
+   *  geometry loop's locals) so per-chunk builds stay deterministic.
+   *  Graphics wave 2, workstream A: the full ground-paint context (richer
+   *  slope/height bands, shoreline wetness, wear) — shared with FarTerrain
+   *  via groundPaint.paintGroundVertex. */
+  private paintCtx!: GroundPaintCtx;
+  /**
+   * Graphics wave 2, workstream A: trampled discs + worn path corridors,
+   * baked into vertex colors (zero draw calls). Spawn discs are seeded in
+   * the constructor; Structures.landmarks adds landmark aprons + paths via
+   * addWearPoints(). The same arrays feed every chunk build AND the repaint
+   * pass, so edge vertices stay bit-identical across chunks.
+   */
+  private readonly wearDiscs: WearDisc[] = [];
+  private readonly wearPaths: WearPath[] = [];
+  /** Spawn point (flatCenters[0]) — Structures.landmarks aims wear paths here. */
+  readonly spawnXZ: { x: number; z: number };
   /** Stage-1 B: chunk grid (A's canonical layout) driving physics + streaming. */
   private readonly grid: ChunkGrid;
   /** Stage-1 B: pages chunk physics bodies in/out by player distance. */
@@ -156,6 +252,8 @@ export class Terrain {
   private readonly chunkBodies = new Map<string, CANNON.Body>();
   water?: THREE.Mesh;
   private waterMat?: THREE.MeshStandardMaterial;
+  /** D env2: baked heightfield texture for foam/depth (disposed in dispose()). */
+  private waterHeightTex?: THREE.DataTexture;
   readonly maxHeight: number;
   walls: CANNON.Body[] = [];
   /**
@@ -247,12 +345,22 @@ export class Terrain {
     const cGround = biomeTint(spec.theme.palette.ground, biome.palette.ground);
     const cAlt = biomeTint(spec.theme.palette.groundAlt, biome.palette.groundAlt);
     const cRock = biomeTint(spec.theme.palette.rock, biome.palette.rock);
-    // Beauty wave: patch colors derived from the palette itself so new hues
-    // never clash — dark earthy patches and sun-bleached patches that break
-    // the flat procedural look. Baked into vertex colors: zero per-frame cost.
-    const cPatchDark = cGround.clone().lerp(cRock, 0.35).multiplyScalar(0.72);
-    const cPatchLight = cGround.clone().lerp(new THREE.Color(1, 1, 1), 0.28);
-    this.colorCtx = { cGround, cAlt, cRock, cPatchDark, cPatchLight };
+    // Graphics wave 2, workstream A: high-altitude cap color follows the
+    // biome's ground treatment — see groundPaint.highColorForGroundKind.
+    const cHigh = highColorForGroundKind(biome.ground.kind, cAlt);
+    this.paintCtx = {
+      colors: deriveGroundColors(cGround, cAlt, cRock, cHigh),
+      waterY: t.water ? t.waterLevel + (bio?.waterBias ?? 0) : null,
+      maxHeight: this.maxHeight,
+      discs: this.wearDiscs,
+      paths: this.wearPaths,
+    };
+    this.spawnXZ = { x: flat[0].x, z: flat[0].z };
+    // Trampled ground around spawn / arena centers — baked into vertex
+    // colors below (and into every chunk built later via the shared ctx).
+    for (const c of flat) {
+      this.wearDiscs.push({ x: c.x, z: c.z, radius: flatR * 0.5, strength: 0.45 });
+    }
     // Workstream C: ground material comes from the biome treatment (cached,
     // shared — never disposed here). volcanic → ember-cracked basalt with
     // glowing veins; snow → glittering snowdrift; desert → cracked earth, etc.
@@ -359,7 +467,8 @@ export class Terrain {
       mk(-half - wt / 2, 0, wt, this.size); mk(half + wt / 2, 0, wt, this.size);
     }
 
-    // ---- water plane (graphics wave D: stylized water with specular)
+    // ---- water plane (graphics wave D: stylized water with specular;
+    //    env2 adds shoreline foam + depth grading + rain ripple)
     // MeshStandardMaterial + onBeforeCompile injections:
     //  - world-space ripple normal (~7m primary + ~3.5m chop), transformed to
     //    view space — the old uv-space ripple had a ~290m wavelength, i.e.
@@ -371,6 +480,11 @@ export class Terrain {
     //  - fresnel term mirroring the sky tint at grazing angles — the cue that
     //    reads as water in the reference vistas (golden path at dusk)
     //  - per-biome deep tint + sky tint from the dusk grade (GenreGrade D2)
+    //  - env2: shoreline foam + shallow/deep depth grading from a 16-bit
+    //    heightfield baked once per map (uniforms + ALU, no per-frame CPU);
+    //    polygonOffset kills the terrain/water z-fight seam (~8cm slop at
+    //    1km from the maxsize wave); rain/storm weather adds high-frequency
+    //    rain ripple via uRain (constructor + setWaterWeather)
     // No planar reflections — uniforms + a few ALU, no per-frame CPU cost.
     if (t.water) {
       // Merge of D (shader) + C (content): the biome owns the water's authored
@@ -389,7 +503,7 @@ export class Terrain {
       });
       const bw = biome.water;
       const deepColor = (dusk && bgrade.waterTint) ? bgrade.waterTint : bw.tint;
-      const wm = new THREE.MeshStandardMaterial({ color: deepColor, transparent: true, opacity: bw.opacity, roughness: 0.12, metalness: 0.35, emissive: bw.emissive ?? '#000000', emissiveIntensity: bw.emissive ? (bw.emissiveIntensity ?? 0.8) : 0 });
+      const wm = new THREE.MeshStandardMaterial({ color: deepColor, transparent: true, opacity: bw.opacity, roughness: 0.12, metalness: 0.35, emissive: bw.emissive ?? '#000000', emissiveIntensity: bw.emissive ? (bw.emissiveIntensity ?? 0.8) : 0, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
       wm.userData.uTime = { value: 0 };
       // default glint: the biome's authored glint color (dusk-warm for most
       // biomes, cool for snow/caves); blueprints refine it from the real sky
@@ -407,7 +521,30 @@ export class Terrain {
       const fadeEnd = this.size > 2000 ? this.size * 1.38 : this.size * 1.60;
       wm.userData.uFadeStart = { value: fadeStart };
       wm.userData.uFadeEnd = { value: fadeEnd };
-      wm.customProgramCacheKey = () => 'xandria-water-v4';
+      // D env2: shoreline foam + depth grading + rain ripple. The height
+      // texture is baked once from this map's own height function (per-map
+      // correct, incl. portal maps); the shader derives water depth per
+      // pixel and draws the foam band + shallow/deep grade from it. All
+      // uniforms are set once here (or via setWaterSun/setWaterWeather) —
+      // no per-frame CPU beyond the existing uTime tick.
+      const waterY = t.waterLevel + (bio?.waterBias ?? 0);
+      const bake = bakeWaterHeightTexture(this.hp, this.size);
+      this.waterHeightTex = bake.texture;
+      wm.userData.uHeightTex = { value: bake.texture };
+      wm.userData.uHeightMin = { value: bake.minH };
+      wm.userData.uHeightMax = { value: bake.maxH };
+      wm.userData.uHeightSpan = { value: this.size };
+      wm.userData.uWaterY = { value: waterY };
+      const deepC = new THREE.Color(deepColor);
+      const skyC = wm.userData.uSkyTint.value as THREE.Color;
+      // shallow water: deep tint lifted toward white and the sky tint
+      // (dusk: amber shallows, the signature motif; day: pale sky shallows)
+      wm.userData.uShallowColor = { value: deepC.clone().lerp(new THREE.Color('#ffffff'), 0.30).lerp(skyC, 0.25) };
+      wm.userData.uFoamColor = { value: new THREE.Color('#f2ede2') };
+      wm.userData.uFoamWidth = { value: 2.2 };
+      // rain ripple response: storm carries rain particles too (Particles)
+      wm.userData.uRain = { value: (spec.theme.weather === 'rain' || spec.theme.weather === 'storm') ? 1 : 0 };
+      wm.customProgramCacheKey = () => 'xandria-water-v5';
       wm.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = wm.userData.uTime;
         shader.uniforms.uSunDirW = wm.userData.uSunDirW;
@@ -415,20 +552,50 @@ export class Terrain {
         shader.uniforms.uSkyTint = wm.userData.uSkyTint;
         shader.uniforms.uFadeStart = wm.userData.uFadeStart;
         shader.uniforms.uFadeEnd = wm.userData.uFadeEnd;
+        shader.uniforms.uHeightTex = wm.userData.uHeightTex;
+        shader.uniforms.uHeightMin = wm.userData.uHeightMin;
+        shader.uniforms.uHeightMax = wm.userData.uHeightMax;
+        shader.uniforms.uHeightSpan = wm.userData.uHeightSpan;
+        shader.uniforms.uWaterY = wm.userData.uWaterY;
+        shader.uniforms.uShallowColor = wm.userData.uShallowColor;
+        shader.uniforms.uFoamColor = wm.userData.uFoamColor;
+        shader.uniforms.uFoamWidth = wm.userData.uFoamWidth;
+        shader.uniforms.uRain = wm.userData.uRain;
         shader.vertexShader = shader.vertexShader
           .replace('#include <common>', '#include <common>\nuniform float uTime; varying vec3 vWPos;')
           .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         shader.fragmentShader = shader.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; uniform vec3 uSkyTint; uniform float uFadeStart; uniform float uFadeEnd; varying vec3 vWPos; float gShimmer;')
+          .replace('#include <common>', '#include <common>\nuniform float uTime; uniform vec3 uSunDirW; uniform vec3 uGlint; uniform vec3 uSkyTint; uniform float uFadeStart; uniform float uFadeEnd; uniform sampler2D uHeightTex; uniform float uHeightMin; uniform float uHeightMax; uniform float uHeightSpan; uniform float uWaterY; uniform vec3 uShallowColor; uniform vec3 uFoamColor; uniform float uRain; uniform float uFoamWidth; varying vec3 vWPos; float gShimmer;')
           .replace('#include <color_fragment>', `#include <color_fragment>
             // radial edge fade (see above): dissolve the rim into the horizon
-            diffuseColor.a *= 1.0 - smoothstep(uFadeStart, uFadeEnd, length(vWPos.xz));`)
+            diffuseColor.a *= 1.0 - smoothstep(uFadeStart, uFadeEnd, length(vWPos.xz));
+            // D env2: water depth from the baked heightfield (RG = 16-bit
+            // packed normalized height). Off the terrain span reads as deep.
+            vec2 huv = vWPos.xz / uHeightSpan + 0.5;
+            float hIn = step(0.0, huv.x) * step(huv.x, 1.0) * step(0.0, huv.y) * step(huv.y, 1.0);
+            vec2 hB = texture2D(uHeightTex, clamp(huv, 0.0, 1.0)).rg * 255.0;
+            float hTerr = mix(uHeightMin, uHeightMax, (hB.x * 256.0 + hB.y) / 65535.0);
+            float wDepth = mix(1000.0, uWaterY - hTerr, hIn);
+            // depth grading: bright shallows -> biome deep tint
+            float gradeK = 1.0 - smoothstep(1.0, 9.0, wDepth);
+            diffuseColor.rgb = mix(diffuseColor.rgb, uShallowColor, gradeK * 0.85);
+            // shoreline foam: animated band hugging the waterline, broken up
+            // by chop so it never reads as a hard ring; clamped just above
+            // the waterline so it can't paint under the terrain mesh
+            float foamBand = (1.0 - smoothstep(0.0, uFoamWidth, wDepth)) * step(-0.3, wDepth);
+            float foamTex = 0.5 + 0.5 * sin(vWPos.x * 2.1 + uTime * 2.2) * sin(vWPos.z * 1.7 - uTime * 1.6);
+            float foam = clamp(foamBand * (0.45 + 0.55 * foamTex), 0.0, 1.0);
+            diffuseColor.rgb = mix(diffuseColor.rgb, uFoamColor, foam * 0.9);
+            diffuseColor.a = mix(diffuseColor.a, 0.96, foam);`)
           .replace('#include <normal_fragment_maps>', `
             float wv1 = sin(vWPos.x * 0.85 + uTime * 1.5) * sin(vWPos.z * 0.70 - uTime * 1.1);
             float wv2 = sin((vWPos.x + vWPos.z) * 1.70 - uTime * 2.2);
             float wv3 = sin(vWPos.x * 2.60 - uTime * 2.8) * sin(vWPos.z * 2.30 + uTime * 2.0);
-            gShimmer = 0.5 + 0.5 * wv1 * wv2;
             vec3 wN = normalize(vec3(wv1 * 0.20 + wv2 * 0.09, 1.0, wv1 * 0.09 - wv3 * 0.13));
+            // D env2: rain ripple — high-frequency chop while weather is rain/storm
+            float rainRip = uRain * sin(vWPos.x * 6.3 + uTime * 9.0) * sin(vWPos.z * 5.7 - uTime * 7.3);
+            wN = normalize(wN + vec3(rainRip * 0.12, 0.0, -rainRip * 0.10));
+            gShimmer = 0.5 + 0.5 * wv1 * wv2 + uRain * rainRip * 0.35;
             normal = normalize((viewMatrix * vec4(wN, 0.0)).xyz);`)
           .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
             {
@@ -518,9 +685,6 @@ export class Terrain {
     const posArr = new Float32Array(nv * 3);
     const uvArr = new Float32Array(nv * 2);
     const colArr = new Float32Array(nv * 3);
-    const { cGround, cAlt, cRock, cPatchDark, cPatchLight } = this.colorCtx;
-    const noise = heightNoise(hp.seed);
-    const tmp = new THREE.Color();
     for (let ly = 0; ly < vps; ly++) {
       for (let lx = 0; lx < vps; lx++) {
         // global grid indices — shared edge vertices get the SAME (x, z)
@@ -531,20 +695,6 @@ export class Terrain {
         const y = hgt(gi, gj); // float64 — the color pass below used the float64 height
         posArr[vi * 3] = x - cx0; posArr[vi * 3 + 1] = y; posArr[vi * 3 + 2] = z - cz0;
         uvArr[vi * 2] = gi / (res - 1); uvArr[vi * 2 + 1] = 1 - gj / (res - 1);
-        // the color noise must see the exact f32 world coords the legacy
-        // build stored in the position attribute — fround(x) is bit-identical
-        // to the old Float32Array store-then-read
-        const fx = Math.fround(x), fz = Math.fround(z);
-        const slopeN = noise.get(fx * 0.05, fz * 0.05);
-        tmp.copy(cGround).lerp(cAlt, (slopeN + 1) / 2);
-        const hn = THREE.MathUtils.clamp((y / Math.max(1, this.maxHeight)) - 0.6, 0, 1);
-        tmp.lerp(cRock, hn * 1.2);
-        // high-frequency patchiness: earthy hollows + bleached rises
-        const patchN = noise.get(fx * 0.33 + 47.3, fz * 0.33 - 23.7);
-        const pk = (patchN + 1) / 2;
-        if (pk < 0.42) tmp.lerp(cPatchDark, ((0.42 - pk) / 0.42) * 0.6);
-        else if (pk > 0.58) tmp.lerp(cPatchLight, ((pk - 0.58) / 0.42) * 0.4);
-        colArr[vi * 3] = tmp.r; colArr[vi * 3 + 1] = tmp.g; colArr[vi * 3 + 2] = tmp.b;
       }
     }
     // same triangle pattern as the legacy PlaneGeometry: (a,b,d),(b,c,d)
@@ -560,6 +710,11 @@ export class Terrain {
     geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
     geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
     geo.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+    // Graphics wave 2, workstream A: vertex colors via the shared ground
+    // recipe (slope/height bands, shoreline wetness, wear) — same function
+    // FarTerrain uses, and a pure function of world coords so chunk seams
+    // stay bit-identical.
+    this.paintChunkColors(geo, cx, cz, hgt);
     const nacc = new Float32Array(nv * 3);
     // face-normal accumulation — the same math as three's computeVertexNormals
     // (cb = (pC-pB) x (pA-pB), summed per vertex with fround per add), but
@@ -629,23 +784,82 @@ export class Terrain {
       nrmArr[k3] = nacc[k3] / l; nrmArr[k3 + 1] = nacc[k3 + 1] / l; nrmArr[k3 + 2] = nacc[k3 + 2] / l;
     }
     geo.setAttribute('normal', new THREE.BufferAttribute(nrmArr, 3));
-    // steep slopes -> rock color (legacy pass, per chunk)
-    const nrm = geo.attributes.normal as THREE.BufferAttribute;
-    const col = geo.attributes.color as THREE.BufferAttribute;
-    for (let k = 0; k < nrm.count; k++) {
-      const ny = nrm.getY(k);
-      if (ny < 0.75) {
-        const f = THREE.MathUtils.clamp((0.75 - ny) / 0.3, 0, 1);
-        tmp.setRGB(col.getX(k), col.getY(k), col.getZ(k)).lerp(cRock, f);
-        col.setXYZ(k, tmp.r, tmp.g, tmp.b);
-      }
-    }
-    col.needsUpdate = true;
     // Stage-1b B: the mesh carries the chunk origin (world frame) — see
     // ensureChunkMesh. Stored here so the offset subtracted from the
     // position attribute above is exactly the mesh translation.
     geo.userData.chunkOrigin = { x: cx0, z: cz0 };
     return geo;
+  }
+
+  /**
+   * Graphics wave 2, workstream A: paint a chunk's vertex colors through the
+   * shared ground recipe. `hgt` must cover the chunk's grid plus a 1-cell
+   * ring (for the central-difference slope). Pure in world coords — chunk
+   * seams stay bit-identical, and repainting after addWearPoints() yields
+   * exactly what a fresh build would produce.
+   */
+  private paintChunkColors(
+    geo: THREE.BufferGeometry, cx: number, cz: number,
+    hgt: (gi: number, gj: number) => number,
+  ): void {
+    const { cellsPerChunk: cpc, res, cell, half } = this.grid;
+    const i0 = cx * cpc, j0 = cz * cpc, vps = cpc + 1;
+    const col = geo.getAttribute('color') as THREE.BufferAttribute;
+    const noise = heightNoise(this.hp.seed);
+    const tmp = new THREE.Color();
+    const giMax = res - 1;
+    for (let ly = 0; ly < vps; ly++) {
+      for (let lx = 0; lx < vps; lx++) {
+        const gi = i0 + lx, gj = j0 + ly;
+        const x = -half + gi * cell, z = -half + gj * cell;
+        const y = hgt(gi, gj);
+        // slope from central differences on the height grid (build-time
+        // only — no per-frame cost)
+        const sx = (hgt(Math.min(gi + 1, giMax), gj) - hgt(Math.max(gi - 1, 0), gj)) / (2 * cell);
+        const sz = (hgt(gi, Math.min(gj + 1, giMax)) - hgt(gi, Math.max(gj - 1, 0))) / (2 * cell);
+        const ny = 1 / Math.sqrt(sx * sx + sz * sz + 1);
+        paintGroundVertex(tmp, this.paintCtx, noise, x, z, y, ny);
+        const vi = ly * vps + lx;
+        col.setXYZ(vi, tmp.r, tmp.g, tmp.b);
+      }
+    }
+    col.needsUpdate = true;
+  }
+
+  /** Rebuild the minimal height grid for one chunk (repaint path). */
+  private repaintChunk(cx: number, cz: number): void {
+    const m = this.chunkMeshByKey.get(chunkKey(cx, cz));
+    if (!m) return;
+    const { cellsPerChunk: cpc, res, cell, half } = this.grid;
+    const hp = this.hp;
+    const i0 = cx * cpc, j0 = cz * cpc;
+    const gi0 = Math.max(0, i0 - 1), gi1 = Math.min(res - 1, i0 + cpc + 1);
+    const gj0 = Math.max(0, j0 - 1), gj1 = Math.min(res - 1, j0 + cpc + 1);
+    const ew = gi1 - gi0 + 1;
+    const eh = new Float64Array(ew * (gj1 - gj0 + 1));
+    for (let gj = gj0; gj <= gj1; gj++) {
+      for (let gi = gi0; gi <= gi1; gi++) {
+        eh[(gj - gj0) * ew + (gi - gi0)] = terrainHeightAt(hp, -half + gi * cell, -half + gj * cell);
+      }
+    }
+    this.paintChunkColors(m.geometry, cx, cz, (gi, gj) => eh[(gj - gj0) * ew + (gi - gi0)]);
+  }
+
+  /**
+   * Graphics wave 2, workstream A: register worn-ground discs / path
+   * corridors (spawn, landmark aprons, spawn->landmark paths). Already-built
+   * chunk meshes are repainted in place; chunks built later pick the wear up
+   * at build time through the shared paint context. Deterministic: same
+   * inputs -> same colors, and repaint == fresh build exactly.
+   */
+  addWearPoints(discs: WearDisc[], paths: WearPath[] = []): void {
+    if (!discs.length && !paths.length) return;
+    this.wearDiscs.push(...discs);
+    this.wearPaths.push(...paths);
+    for (const key of this.chunkMeshByKey.keys()) {
+      const [cx, cz] = key.split(',').map(Number);
+      this.repaintChunk(cx, cz);
+    }
   }
 
   /**
@@ -714,6 +928,22 @@ export class Terrain {
       }
     } catch {
       // water glint is cosmetic — never break the world over it
+    }
+  }
+
+  /**
+   * D env2: switch the rain-ripple response at runtime. Weather is
+   * spec-static today (the constructor reads spec.theme.weather), so this
+   * is for blueprints that change weather mid-session. Mirrors setWaterSun.
+   * Never throws; ignores bad input.
+   */
+  setWaterWeather(weather: string | null | undefined): void {
+    if (!this.waterMat) return;
+    try {
+      (this.waterMat.userData.uRain as { value: number }).value =
+        (weather === 'rain' || weather === 'storm') ? 1 : 0;
+    } catch {
+      // water rain ripple is cosmetic — never break the world over it
     }
   }
 
@@ -917,5 +1147,8 @@ export class Terrain {
     // the material is module-shared, never disposed).
     if (this.energyField) { disposeEnergyField(scene, this.energyField); this.energyField = undefined; }
     if (this.water) { scene.remove(this.water); this.water.geometry.dispose(); }
+    // D env2: the baked heightfield is a real GL texture — release it.
+    // (The water material itself was never disposed here; unchanged.)
+    if (this.waterHeightTex) { this.waterHeightTex.dispose(); this.waterHeightTex = undefined; }
   }
 }

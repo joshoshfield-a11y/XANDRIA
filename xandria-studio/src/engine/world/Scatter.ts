@@ -16,6 +16,7 @@ import type { Terrain } from './Terrain';
 import type { MaterialLibrary } from '../gfx/Materials';
 import { GROUP, type Physics } from '../core/Physics';
 import { Vegetation } from './Vegetation';
+import type { HeroSpot } from './Vegetation';
 import { Grass } from './Grass';
 import { definePropSets, propSetCtx, legacyTreeCount, type PropSetDef, type PlaceBounds } from './PropSets';
 import { LEGACY_MAX_SIZE } from './ChunkGrid';
@@ -33,6 +34,25 @@ export interface ScatterOptions {
   heroesOnly?: boolean;
   /** exclusion zones for hero props specifically (defaults to `exclusion`) */
   heroExclusion?: Array<{ x: number; z: number; r: number }>;
+  /**
+   * Graphics wave 2 (E): tier density multiplier for the CHUNKED path only.
+   * Scales per-chunk placement counts; pool capacities scale with it so draw
+   * calls stay flat. 1.0 = the pre-tier counts exactly (pinned by test).
+   * The legacy whole-world path ignores it (byte-identical promise).
+   */
+  densityMul?: number;
+  /**
+   * Graphics wave 2 (E): tier wind-sway intensity multiplier for vegetation
+   * (desktop 1.0 = authored sway; s25 0.5 = gentler). Pure ALU.
+   */
+  windMul?: number;
+  /**
+   * Landmark ring positions for hero specimen plants (wave 2B). Blueprints
+   * pass the landmark result's placed positions; Vegetation rings one
+   * oversized, amber-tinted specimen of the biome's signature species around
+   * each. Empty/omitted = no heroes (existing worlds unchanged).
+   */
+  heroSpots?: HeroSpot[];
 }
 
 export interface InstanceSet { mesh: THREE.InstancedMesh; positions: THREE.Vector3[]; radius: number; tag: 'base' | 'genre-hero' | 'biome' }
@@ -90,6 +110,7 @@ export class Scatter {
         colliders: this.colliders,
         physics,
         count: treeCount,
+        heroSpots: opts.heroSpots,
       });
       opts.engine?.onUpdate((dt) => {
         if (this.vegetation) {

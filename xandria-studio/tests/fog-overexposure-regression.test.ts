@@ -310,7 +310,7 @@ describe('D3 stylized water material', () => {
     // BIOME_DUSK table per D2's BiomeDefLike design — coastline biome tint.
     expect(mat.color.getHexString()).toBe('2a9fb0'); // BIOMES.coastline.water.tint
     expect((mat.userData.uSkyTint.value as THREE.Color).getHexString()).toBe('f0a868');
-    expect(mat.customProgramCacheKey()).toBe('xandria-water-v4');
+    expect(mat.customProgramCacheKey()).toBe('xandria-water-v5');
     // Stage 1b (workstream C): radial edge fade uniforms — on stage-1 sizes
     // the fade zone sits beyond the 3x quad, so the water is byte-identical.
     // Portals wave: open-world specs now build at 8000m, where the engine

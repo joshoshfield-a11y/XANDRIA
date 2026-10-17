@@ -13,6 +13,7 @@ import type { Terrain } from './Terrain';
 import { chunkSeed, ChunkSlotPool, MAX_RESIDENT_CHUNKS } from './ChunkGrid';
 import { chunkKey, chunkWorldRect, type ChunkGrid } from './chunkLayout';
 import type { PlaceBounds } from './PropSets';
+import { scaleBudget, scaleCount } from '../core/PerformanceManager';
 
 /**
  * Per-chunk grass budget: max tufts in one 256m chunk.
@@ -39,7 +40,7 @@ export interface GrassOptions {
    * pool sized GRASS_CHUNK_BUDGET × MAX_RESIDENT_CHUNKS so draw calls stay flat.
    * ChunkedScatter drives loadChunk/unloadChunk.
    */
-  chunked?: { grid: ChunkGrid };
+  chunked?: { grid: ChunkGrid; densityMul?: number };
 }
 
 export class Grass {
@@ -52,6 +53,8 @@ export class Grass {
   private quality: 'retro' | 'standard' | 'high' = 'retro';
   private density = 0;
   private slots = new ChunkSlotPool(GRASS_CHUNK_BUDGET * MAX_RESIDENT_CHUNKS);
+  /** Graphics wave 2 (E): tier density multiplier (1.0 = pre-tier path) */
+  private densityMul = 1;
   private grid!: ChunkGrid;
   private placer?: {
     spec: GameSpec; terrain: Terrain; maxSlope: number;
@@ -99,10 +102,15 @@ export class Grass {
 
     if (opts.chunked) {
       // ---- chunked streaming mode: one global pool, no initial placement
+      // Graphics wave 2 (E): the tier scales the per-chunk budget (budgets ×
+      // densityMul) so the desktop tier holds denser grass in the same pool.
       this.chunkedMode = true;
       this.grid = opts.chunked.grid;
+      this.densityMul = opts.chunked.densityMul ?? 1;
+      const budget = scaleBudget(GRASS_CHUNK_BUDGET, this.densityMul);
+      this.slots = new ChunkSlotPool(budget * MAX_RESIDENT_CHUNKS);
       const geo = this.buildGeometry();
-      const pool = new THREE.InstancedMesh(geo, mat, GRASS_CHUNK_BUDGET * MAX_RESIDENT_CHUNKS);
+      const pool = new THREE.InstancedMesh(geo, mat, budget * MAX_RESIDENT_CHUNKS);
       pool.castShadow = false;
       pool.receiveShadow = false;
       pool.frustumCulled = false;
@@ -238,8 +246,10 @@ export class Grass {
       z0: Math.max(rect.z0, -half), z1: Math.min(rect.z1, half),
     };
     const area = Math.max(0, b.x1 - b.x0) * Math.max(0, b.z1 - b.z0);
-    const target = Math.min(GRASS_CHUNK_BUDGET,
-      Math.round(QUALITY_COUNT[this.quality] * this.density * (area / GRASS_REF_AREA)));
+    // Graphics wave 2 (E): tier-scaled per-chunk target, capped by the
+    // tier-scaled budget so the pool can never overflow.
+    const target = Math.min(scaleBudget(GRASS_CHUNK_BUDGET, this.densityMul),
+      scaleCount(Math.round(QUALITY_COUNT[this.quality] * this.density * (area / GRASS_REF_AREA)), this.densityMul));
     const rng = new Rng(chunkSeed(this.worldSeed, 0x6a55, cx, cz));
     const gen = this.generateChunk(rng, b, target);
     const start = this.slots.alloc(key, gen.count);

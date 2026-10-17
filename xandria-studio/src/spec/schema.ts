@@ -246,6 +246,10 @@ export interface AudioSpec {
 export const QUALITY_MODES = ['retro', 'standard', 'high'] as const;
 export type QualityMode = (typeof QUALITY_MODES)[number];
 
+/** Graphics wave 2 (E): the two perf tiers — one build, two flag sets. */
+export const PERF_TIER_IDS = ['desktop', 's25'] as const;
+export type PerfTier = (typeof PERF_TIER_IDS)[number];
+
 export const FLORA_IDS = ['pine', 'oak', 'palm', 'cactus', 'deadtree', 'mushroom', 'crystalflora'] as const;
 export type FloraId = (typeof FLORA_IDS)[number];
 
@@ -500,6 +504,12 @@ export interface CustomSpec {
   enemyMods?: EnemyMods;
   weaponMods?: WeaponMods;
   quality?: QualityMode;
+  /**
+   * Graphics wave 2 (E): perf-tier preview override for the Studio
+   * ('desktop' | 's25'). Absent = auto-detect. Player setting and ?tier=
+   * still win at runtime — this is the authoring preview surface.
+   */
+  tier?: PerfTier;
   assets?: AssetPacks | Record<string, AssetOverride>;
   /**
    * Character customization (workstream D+E): skins + GLB import slots for the
@@ -1015,6 +1025,7 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
         }
       }
       if (c.quality !== undefined && !inEnum(c.quality, QUALITY_MODES)) err('custom.quality', `must be one of ${QUALITY_MODES.join('|')}`);
+      if (c.tier !== undefined && !inEnum(c.tier, PERF_TIER_IDS)) err('custom.tier', `must be one of ${PERF_TIER_IDS.join('|')}`);
       if (c.profileDamageMult !== undefined && !(typeof c.profileDamageMult === 'number' && isFinite(c.profileDamageMult) && c.profileDamageMult > 0))
         err('custom.profileDamageMult', 'must be a positive number');
       if (c.legacyOperators !== undefined) {

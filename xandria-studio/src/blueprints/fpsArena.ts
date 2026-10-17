@@ -91,15 +91,29 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
 
   // beauty wave: per-genre hero props (pylons + cover crates); the arena
   // dressing above stays untouched, this only adds scatter
-  new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint.
+  // Landmarks come before scatter so hero specimen plants can ring them (wave 2B).
+  const landmarks = structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+    exclusion: [{ x: 0, z: 0, r: 10 }], quality: engine.effectiveQuality(),
+    maxRealLights: engine.tiers.flags.maxRealLights, // graphics wave 2 (E): tier real-light budget
+  });
+  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     heroesOnly: true,
     exclusion: [{ x: 0, z: 0, r: 10 }],
     quality: engine.effectiveQuality(),
+    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier scatter density
+    windMul: engine.tiers.flags.windMul, // graphics wave 2 (E): tier wind-sway intensity
+    heroSpots: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })), // wave 2B: hero plants
   });
-  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
-  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+  // graphics wave 2 (workstream C): per-biome structure sets — hero cluster
+  // near spawn + chunk-deterministic satellite clusters, one shared
+  // instancer so draw calls stay flat (seeded per map via spec.meta.seed)
+  structures.structureSets(spec, terrain, scene, spec.meta.seed, {
     exclusion: [{ x: 0, z: 0, r: 10 }], quality: engine.effectiveQuality(),
+    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier structure density
+    structureShadows: engine.tiers.flags.structureShadows, // graphics wave 2 (E): s25 shadow diet
   });
+
   scatterAmberGlow(scene, rng.fork(0xe9a1), {
     mats: engine.mats,
     groundY: (x, z) => terrain.heightAt(x, z),

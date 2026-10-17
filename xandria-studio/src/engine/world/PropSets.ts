@@ -109,6 +109,8 @@ export function chunkTreeCount(ctx: PropSetCtx, chunkAreaM2: number): number {
 export const TREE_CHUNK_BUDGET = 740;
 /** Per-species per-chunk cap — keeps vegetation tier pools hard-bounded. */
 export const TREE_SPECIES_CHUNK_CAP = 500;
+/** Per-chunk cap on hero specimen plants (wave 2B) — sized into the same pools. */
+export const HERO_CHUNK_CAP = 4;
 
 /** Reference area the fixed legacy counts were authored against (220m world). */
 const REF_AREA = 220 * 220;

@@ -10,7 +10,9 @@ import { GROUP, type Physics } from '../core/Physics';
 import type { MaterialLibrary } from '../gfx/Materials';
 import type { Terrain } from './Terrain';
 import { resolveBiomeDef } from './Biomes';
+import { scatterGrid } from './ChunkGrid';
 import { placeLandmarks, type LandmarkOpts, type LandmarkResult, type LandmarkKind } from '../gfx/Landmarks';
+import { placeStructureSets, type StructureSetOpts, type StructureSetResult } from '../gfx/StructureSets';
 
 export class Structures {
   group = new THREE.Group();
@@ -135,6 +137,79 @@ export class Structures {
       addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },
     };
     const result = placeLandmarks(scene, rng, landmarkOpts);
+    this.group.add(result.group);
+    // Graphics wave 2, workstream A: trampled aprons around landmark bases +
+    // worn paths from spawn toward nearby landmarks, baked into terrain
+    // vertex colors (zero new draw calls — Terrain.addWearPoints repaints in
+    // place and future chunk builds pick it up). Corridors only for
+    // landmarks within ~220m of spawn; distant ones get aprons only.
+    const sx = terrain.spawnXZ.x, sz = terrain.spawnXZ.z;
+    const discs = result.placed.map((p) => ({
+      x: p.pos.x, z: p.pos.z, radius: p.radius * 1.8 + 5, strength: 0.45,
+    }));
+    const paths: Array<{ ax: number; az: number; bx: number; bz: number; width: number; strength: number }> = [];
+    for (const p of result.placed) {
+      const d = Math.hypot(p.pos.x - sx, p.pos.z - sz);
+      if (d > 40 && d < 220) {
+        paths.push({ ax: sx, az: sz, bx: p.pos.x, bz: p.pos.z, width: 4.5, strength: 0.4 });
+      }
+    }
+    terrain.addWearPoints(discs, paths);
+    return result;
+  }
+
+  /**
+   * Graphics wave 2 (workstream C): per-biome structure sets.
+   *
+   * Expands the landmark pass with the biome's authored architectural
+   * set-pieces — desert canyon ruins, forest/plains watchtowers, snow
+   * shrines, volcanic obsidian spires, coastline docks + lighthouses, cave
+   * crystal formations. Composition: a hero cluster (3 structures + amber
+   * rune ring) 30–55m from spawn as the arrival vignette, then
+   * chunk-deterministic satellite clusters across the map.
+   *
+   * Seeding: `seed` must be the map's derived build seed (blueprints pass
+   * spec.meta.seed, which the portals wave stamps as
+   * deriveMapSeed(worldSeed, mx, my)) — every map regenerates identically.
+   * Satellite placement rolls per chunk from chunkSeed(mapSeed, salt, cx, cz),
+   * so the same chunk always yields the same structures whatever the load
+   * order; the result's collidersByChunk map lets workstream E stream the
+   * static colliders through the ChunkStream lifecycle later.
+   *
+   * Draw calls stay flat: every structure emits into one shared Instancer
+   * (the AmberGlow pattern) — one draw per material bucket (rock, dark,
+   * amber, teal) for the whole map. Adds static physics colliders.
+   *
+   * Blueprint hook: `structures.structureSets(spec, terrain, scene,
+   * spec.meta.seed, { exclusion: [...] })` — one line, right after
+   * structures.landmarks(...).
+   */
+  structureSets(spec: GameSpec, terrain: Terrain, scene: THREE.Scene, seed: number, opts: {
+    exclusion?: Array<{ x: number; z: number; r: number }>;
+    quality?: 'retro' | 'standard' | 'high';
+    /** Graphics wave 2 (E): tier density multiplier for satellite clusters. */
+    densityMul?: number;
+    /** Graphics wave 2 (E): s25 disables structure shadows (diet for C's +5). */
+    structureShadows?: boolean;
+  } = {}): StructureSetResult {
+    const rng = new Rng((seed ^ 0x57c7) >>> 0);
+    const biome = resolveBiomeDef(spec);
+    const t = spec.world.terrain;
+    const setOpts: StructureSetOpts = {
+      mats: this.mats,
+      biome,
+      heightAt: (x, z) => terrain.heightAt(x, z),
+      mapSeed: seed >>> 0,
+      quality: opts.quality,
+      densityMul: opts.densityMul,
+      structureShadows: opts.structureShadows,
+      half: terrain.size / 2 - 12,
+      grid: scatterGrid(terrain),
+      exclusion: opts.exclusion,
+      waterLevel: t.water ? t.waterLevel : undefined,
+      addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },
+    };
+    const result = placeStructureSets(scene, rng, setOpts);
     this.group.add(result.group);
     return result;
   }

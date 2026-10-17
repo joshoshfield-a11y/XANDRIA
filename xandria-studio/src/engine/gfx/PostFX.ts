@@ -102,11 +102,14 @@ export class PostFX {
   /** true when the filmic grade pass is in the chain (standard/high, non-retro) */
   readonly gradeActive: boolean;
 
-  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, spec: GameSpec) {
+  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, spec: GameSpec, opts: { bloomBoost?: number } = {}) {
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
     const quality = spec.custom?.quality ?? 'retro';
+    // Graphics wave 2 (E): tier bloom multiplier for the desktop "heavier
+    // post" look. 1.0 = the authored strength. Same passes, same draw calls.
+    const bloomBoost = opts.bloomBoost ?? 1;
     try {
       // T1-1: MSAA inside the composer. three 0.182's EffectComposer builds its
       // default render target with samples: 0, so without an explicit
@@ -126,7 +129,7 @@ export class PostFX {
         // HDR emitters (neon glow 2.0+, crystals, muzzle flashes) still bloom.
         const bloom = new UnrealBloomPass(
           new THREE.Vector2(innerWidth, innerHeight),
-          quality === 'high' ? 0.35 : 0.45, 0.6, 1.0,
+          (quality === 'high' ? 0.35 : 0.45) * bloomBoost, 0.6, 1.0,
         );
         try {
           patchBloomOutputTransform(bloom);

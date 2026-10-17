@@ -39,6 +39,7 @@ import {
 } from './ChunkGrid';
 import { ChunkStream } from './ChunkStream';
 import { chunkKey, chunkWorldRect, type ChunkGrid } from './chunkLayout';
+import { scaleBudget, scaleCount } from '../core/PerformanceManager';
 import {
   definePropSets, propSetCtx, legacyTreeCount, chunkTreeCount,
   type PropSetDef, type PropSetCtx, type PlaceBounds,
@@ -73,6 +74,8 @@ export class ChunkedScatter {
   private grid: ChunkGrid;
   private stream: ChunkStream;
   private pools: Pool[] = [];
+  /** Graphics wave 2 (E): tier density multiplier (1.0 = pre-tier path) */
+  private readonly densityMul: number;
   /** loaded chunk keys (mirrors the stream's loaded set; test hook reads this) */
   private loadedSet = new Set<string>();
 
@@ -81,6 +84,11 @@ export class ChunkedScatter {
     this.physics = physics;
     this.scene = scene;
     this.ctx = propSetCtx(spec, terrain, mats, opts);
+    // Graphics wave 2 (E): tier density multiplier. Pool capacities scale
+    // with it (budgets × densityMul × MAX_RESIDENT_CHUNKS) so the pool SET —
+    // and therefore the draw-call count — is identical across tiers; only
+    // instance density changes. 1.0 reproduces the pre-tier path exactly.
+    this.densityMul = opts.densityMul ?? 1;
     // canonical grid from the terrain's own chunk fields (workstream A/B) —
     // scatter chunks align with terrain mesh + physics chunks exactly
     this.grid = scatterGrid(terrain);
@@ -88,16 +96,20 @@ export class ChunkedScatter {
     const quality = opts.quality ?? 'retro';
 
     // one global pool per prop set; sets with zero legacy count are skipped
-    // exactly like the legacy addSet early-return (same mesh set, same count)
+    // exactly like the legacy addSet early-return (same mesh set, same count).
+    // NOTE: the pool SET is tier-independent (built from the unscaled legacy
+    // counts) — densityMul only changes capacities and fill counts, never
+    // which pools exist. That is what keeps draw calls flat across tiers.
     const defs = definePropSets(this.ctx, mats).filter((d) => d.count > 0);
     for (const def of defs) {
-      const mesh = new THREE.InstancedMesh(def.makeGeo(), def.makeMat(mats), def.budget * MAX_RESIDENT_CHUNKS);
+      const poolBudget = scaleBudget(def.budget, this.densityMul);
+      const mesh = new THREE.InstancedMesh(def.makeGeo(), def.makeMat(mats), poolBudget * MAX_RESIDENT_CHUNKS);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.count = 0;
       mesh.visible = false;
       scene.add(mesh);
-      this.pools.push({ def, mesh, slots: new ChunkSlotPool(def.budget * MAX_RESIDENT_CHUNKS), chunks: new Map() });
+      this.pools.push({ def, mesh, slots: new ChunkSlotPool(poolBudget * MAX_RESIDENT_CHUNKS), chunks: new Map() });
       this.sets.push({ mesh, positions: [], radius: def.collideR, tag: def.tag });
     }
 
@@ -109,13 +121,19 @@ export class ChunkedScatter {
         maxSlope,
         physics,
         count: 0,
-        chunked: { grid: this.grid, treeCountFor: (area) => chunkTreeCount(this.ctx, area) },
+        windMul: opts.windMul,
+        heroSpots: opts.heroSpots,
+        chunked: {
+          grid: this.grid,
+          treeCountFor: (area) => scaleCount(chunkTreeCount(this.ctx, area), this.densityMul),
+          densityMul: this.densityMul,
+        },
       });
       this.grass = new Grass(spec, terrain, scene, {
         quality,
         exclusion: opts.exclusion,
         maxSlope,
-        chunked: { grid: this.grid },
+        chunked: { grid: this.grid, densityMul: this.densityMul },
       });
     }
 
@@ -221,7 +239,11 @@ export class ChunkedScatter {
     // order — identical placements no matter when or in what order the chunk loads
     const rng = new Rng(chunkSeed(this.spec.meta.seed, 0x5ca7, cx, cz));
     for (const pool of this.pools) {
-      const n = pool.def.chunkCount(area);
+      // Graphics wave 2 (E): tier-scaled per-chunk target, capped by the
+      // tier-scaled budget so the pool can never overflow (alloc < 0 is
+      // unreachable while resident chunks stay bounded).
+      const budget = scaleBudget(pool.def.budget, this.densityMul);
+      const n = Math.min(budget, scaleCount(pool.def.chunkCount(area), this.densityMul));
       if (n <= 0) continue;
       const gen = this.generateSet(pool.def, rng, b, n);
       if (gen.count <= 0) continue;

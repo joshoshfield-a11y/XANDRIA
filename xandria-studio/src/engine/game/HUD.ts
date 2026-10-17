@@ -698,7 +698,7 @@ export class HUD {
     const h = document.createElement('h1');
     h.textContent = 'SETTINGS';
     h.style.fontSize = '30px';
-    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const };
+    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const, tier: 'auto' as const };
     const wrap = document.createElement('div');
     wrap.className = 'settings';
 
@@ -735,6 +735,28 @@ export class HUD {
     });
     qrow.append(qlab, qsel);
 
+    // Graphics wave 2 (E): perf-tier override. Changing it live re-resolves
+    // the flags; density budgets apply on the next world build (a rebuild is
+    // needed for pool reallocation — same as a quality change needing one).
+    const trow = document.createElement('div');
+    trow.className = 'settings-row';
+    const tlab = document.createElement('span');
+    tlab.textContent = 'PERF TIER';
+    const tsel = document.createElement('select');
+    tsel.setAttribute('aria-label', 'Perf tier');
+    for (const t of ['auto', 'desktop', 's25'] as const) {
+      const o = document.createElement('option');
+      o.value = t;
+      o.textContent = t.toUpperCase();
+      if (t === s.tier) o.selected = true;
+      tsel.appendChild(o);
+    }
+    tsel.addEventListener('change', () => {
+      eng?.settings.set({ tier: tsel.value as typeof s.tier });
+      eng?.applySettings();
+    });
+    trow.append(tlab, tsel);
+
     const mrow = document.createElement('div');
     mrow.className = 'settings-row';
     const mlab = document.createElement('span');
@@ -752,7 +774,7 @@ export class HUD {
     const back = document.createElement('button');
     back.textContent = 'BACK';
     back.addEventListener('click', () => { eng?.audio.play('click'); this.showPause(); });
-    wrap.append(vrow, qrow, mrow);
+    wrap.append(vrow, qrow, trow, mrow);
     ov.append(h, wrap, back);
     this.overlay = ov;
   }

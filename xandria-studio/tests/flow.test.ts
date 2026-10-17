@@ -306,19 +306,28 @@ describe('HUD flow screens', () => {
     const btnWrap = ov.children[ov.children.length - 1];
     btnWrap.children[2].__fire('click'); // SETTINGS
     const wrap = ov.children.find((c: any) => c.className === 'settings');
-    expect(wrap.children).toHaveLength(3);
+    // graphics wave 2 (E): volume, quality, PERF TIER, mute
+    expect(wrap.children).toHaveLength(4);
     const vslider = wrap.children[0].children[1];
     vslider.value = '25';
     vslider.__fire('input');
     expect(eng.settings.data.volume).toBeCloseTo(0.25);
     expect(eng.applySettings).toHaveBeenCalled();
-    const mcheck = wrap.children[2].children[1];
+    // PERF TIER row (index 2): selecting s25 persists + applies
+    const tselect = wrap.children[2].children[1];
+    expect(tselect.tag).toBe('select');
+    tselect.value = 's25';
+    tselect.__fire('change');
+    expect(eng.settings.data.tier).toBe('s25');
+    const mcheck = wrap.children[3].children[1];
     mcheck.checked = true;
     mcheck.__fire('change');
     expect(eng.settings.data.muted).toBe(true);
     // persisted
     const raw = (globalThis as any).localStorage.__store['xandria.settings.v1'];
-    expect(JSON.parse(raw).muted).toBe(true);
+    const persisted = JSON.parse(raw);
+    expect(persisted.muted).toBe(true);
+    expect(persisted.tier).toBe('s25');
   });
 
   it('showEnd has RESTART and TITLE buttons', () => {

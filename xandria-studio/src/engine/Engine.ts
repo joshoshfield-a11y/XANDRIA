@@ -11,7 +11,8 @@ import { Physics } from './core/Physics';
 import { Input } from './core/Input';
 import { AudioEngine } from './core/Audio';
 import { PerfMonitor } from './core/Perf';
-import { MaterialLibrary } from './gfx/Materials';
+import { PerformanceManager, type PerfTier } from './core/PerformanceManager';
+import { MaterialLibrary, applyGroundDetailForQuality } from './gfx/Materials';
 import { createSky, type SkyRig } from './gfx/Sky';
 import { Particles } from './gfx/Particles';
 import { PostFX } from './gfx/PostFX';
@@ -60,6 +61,12 @@ export interface EngineOptions {
   noTerrain?: boolean;
   flatCenters?: THREE.Vector3[];
   flatRadius?: number;
+  /**
+   * Graphics wave 2 (E): explicit perf tier for this engine instance
+   * ('desktop' | 's25'). Overrides ?tier= / spec.custom.tier / auto-detect.
+   * Test + harness seam; the player path resolves without it.
+   */
+  tier?: PerfTier;
 }
 
 export class Engine {
@@ -88,6 +95,13 @@ export class Engine {
    * Reachable from the console as __XANDRIA__.engine.perf.
    */
   readonly perf = new PerfMonitor();
+  /**
+   * Graphics wave 2 (E): the resolved perf tier (desktop | s25) + its flag
+   * table. Resolved once at construction, held for the run's lifetime —
+   * never adaptive. Blueprints read engine.tiers.flags for density budgets,
+   * real-light caps, and sway. Reachable as __XANDRIA__.engine.tiers.
+   */
+  readonly tiers: PerformanceManager;
   sky!: SkyRig;
   terrain!: Terrain;
   /** low-res far-field shell under the detail terrain (workstream D); null on small worlds */
@@ -165,6 +179,12 @@ export class Engine {
     this.testMode = opts.testMode ?? new URLSearchParams(location.search).has('test');
     this.rng = new Rng(spec.meta.seed);
     this.settings = new Settings();
+    // Graphics wave 2 (E): resolve the perf tier once — settings override >
+    // explicit engine opt > ?tier= > spec.custom.tier > device auto-detect.
+    const search = typeof location !== 'undefined' ? location.search : '';
+    this.tiers = new PerformanceManager(spec, this.settings, {
+      tierParam: opts.tier ?? PerformanceManager.tierParamFromSearch(search),
+    });
 
     this.renderer = new THREE.WebGLRenderer({ antialias: !(spec.theme.retroFilter && (spec.custom?.quality ?? 'retro') === 'retro'), powerPreference: 'high-performance' });
     this.renderer.shadowMap.enabled = true;
@@ -172,11 +192,20 @@ export class Engine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     const quality = this.effectiveQuality();
+    // Graphics wave 2, workstream A: ground micro-detail layer follows the
+    // quality tier (shared uniforms — one material, no second code path).
+    // E integration: the perf tier provides a quality floor for this GFX
+    // fidelity knob (desktop → high), with max-semantics so an explicit
+    // s25+high user setting keeps A's quality behavior.
+    applyGroundDetailForQuality(this.detailQualityForTier(quality));
     const pr = quality === 'high' ? Math.min(devicePixelRatio, 2)
       : quality === 'standard' ? Math.min(devicePixelRatio, 1.5)
       : spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
       : Math.min(devicePixelRatio, 2);
-    this.renderer.setPixelRatio(pr);
+    // Graphics wave 2 (E): the tier caps the pixel ratio on top of the
+    // quality formula (s25 = tuned-down profile; desktop cap is a no-op on
+    // the base formulas — 2.0 only binds user-forced high on mobile).
+    this.renderer.setPixelRatio(Math.min(pr, this.tiers.flags.pixelRatioCap));
     this.renderer.setSize(container.clientWidth || innerWidth, container.clientHeight || innerHeight);
     container.appendChild(this.renderer.domElement);
     // Workstream E (instrumentation): renderer.info resets per render call by
@@ -206,10 +235,22 @@ export class Engine {
     this.hud.attachEngine(this);
     this.touch = new TouchControls(container, this.input, spec.meta.genre);
     this.hud.setTouchMode(this.touch.active);
-    this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec);
+    this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec, {
+      // Graphics wave 2 (E): desktop tier gets the heavier-post bloom look.
+      bloomBoost: this.tiers.flags.bloomBoost,
+    });
 
     this.sky = createSky(spec, this.scene, this.effectiveQuality());
     this.renderer.toneMappingExposure = this.sky.exposure;
+    // Graphics wave 2 (E): the tier may floor-raise the shadow-map
+    // resolution createSky just set (desktop 2048 = the "real-time shadows"
+    // look; s25 keeps the base 1024). Never lowers. Resolution changes GPU
+    // cost, never the draw-call census. applySettings keeps it in step with
+    // later pause-menu changes.
+    if (this.sky.sun) {
+      const want = this.tiers.flags.shadowMapSize;
+      if (this.sky.sun.shadow.mapSize.x < want) this.sky.sun.shadow.mapSize.set(want, want);
+    }
     // Wire the pooled flash-light pool into juice (muzzle flashes, explosions).
     this.juice.setFlash((color, pos, intensity, distance, duration) =>
       this.sky.lightLife.flash(color, pos, intensity, distance, duration));
@@ -481,19 +522,40 @@ export class Engine {
     return sq === 'high' || sq === 'standard' ? sq : 'retro';
   }
 
+  /**
+   * Graphics wave 2 (E integration): the perf tier provides a quality floor
+   * for the ground micro-detail layer (workstream A). Ordering: retro <
+   * standard < high. Desktop always gets 'high'; s25 gets max('retro', q).
+   */
+  detailQualityForTier(q: 'retro' | 'standard' | 'high'): 'retro' | 'standard' | 'high' {
+    const order = { retro: 0, standard: 1, high: 2 } as const;
+    const floor = this.tiers.flags.detailQuality;
+    return order[q] >= order[floor] ? q : floor;
+  }
+
   /** Apply settings to audio + renderer (called on boot and from the pause menu). */
   applySettings() {
     this.audio.setVolume(this.settings.data.volume);
     this.audio.setMuted(this.settings.data.muted);
     const quality = this.effectiveQuality();
+    // Graphics wave 2, workstream A: keep the ground detail layer in step
+    // with pause-menu quality changes (uniform update — no recompile).
+    // E integration: tier floor applies here too (see constructor).
+    applyGroundDetailForQuality(this.detailQualityForTier(quality));
     const pr = quality === 'high' ? Math.min(devicePixelRatio, 2)
       : quality === 'standard' ? Math.min(devicePixelRatio, 1.5)
       : this.spec.theme.retroFilter ? Math.min(devicePixelRatio, 1) * 0.66
       : Math.min(devicePixelRatio, 2);
-    this.renderer.setPixelRatio(pr);
+    this.renderer.setPixelRatio(Math.min(pr, this.tiers.flags.pixelRatioCap));
     // T1-4: keep the shadow map resolution in step with quality changes from
     // the pause menu (resizing a shadow map requires dropping the old one).
-    const shadowRes = quality === 'high' ? 2048 : 1024;
+    // Graphics wave 2 (E): the tier floor-raises it — desktop gets the
+    // 2048 "real-time shadows" look, s25 stays at the base 1024. Resolution
+    // changes GPU cost, never the draw-call census.
+    const shadowRes = Math.max(
+      quality === 'high' ? 2048 : 1024,
+      this.tiers.flags.shadowMapSize,
+    );
     const sun = this.sky?.sun;
     if (sun && sun.shadow.mapSize.x !== shadowRes) {
       sun.shadow.mapSize.set(shadowRes, shadowRes);

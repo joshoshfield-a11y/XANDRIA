@@ -31,6 +31,10 @@ import type { MaterialLibrary } from '../gfx/Materials';
 import { farShellBias, farShellSegmentsForWorldSize } from '../gfx/FarField';
 import { resolveBiomeDef, biomeTint } from './Biomes';
 import type { Terrain } from './Terrain';
+import {
+  deriveGroundColors, paintGroundVertex, highColorForGroundKind,
+  type GroundPaintCtx,
+} from './groundPaint';
 
 /**
  * Shell resolution (segments per side) for stage-1 sizes (<=2000m) — one
@@ -64,16 +68,25 @@ export class FarTerrain {
     const half = size / 2;
     const maxH = Math.max(1, t.maxHeight);
 
-    // Same color recipe as Terrain.ts — same Noise2D(seed), same world
-    // coords, so slope/patch noise values are identical to the detail mesh.
+    // Same color recipe as Terrain.ts — one shared function
+    // (groundPaint.paintGroundVertex), same Noise2D(seed), same world coords,
+    // so the shell reads as the same land at the streaming seam. The shell
+    // skips wear (it's hidden under the detail mesh wherever wear is
+    // visible) and uses a coarse finite-difference normal.
     const biome = resolveBiomeDef(spec);
     const noise = new Noise2D(spec.meta.seed);
     const cGround = biomeTint(spec.theme.palette.ground, biome.palette.ground);
     const cAlt = biomeTint(spec.theme.palette.groundAlt, biome.palette.groundAlt);
     const cRock = biomeTint(spec.theme.palette.rock, biome.palette.rock);
-    const cPatchDark = cGround.clone().lerp(cRock, 0.35).multiplyScalar(0.72);
-    const cPatchLight = cGround.clone().lerp(new THREE.Color(1, 1, 1), 0.28);
+    const paintCtx: GroundPaintCtx = {
+      colors: deriveGroundColors(cGround, cAlt, cRock, highColorForGroundKind(biome.ground.kind, cAlt)),
+      waterY: t.water ? t.waterLevel + (((spec.custom?.biome as { waterBias?: number } | undefined)?.waterBias) ?? 0) : null,
+      maxHeight: maxH,
+      discs: [],
+      paths: [],
+    };
     const tmp = new THREE.Color();
+    const scell = size / SEG; // shell grid step for the coarse slope estimate
 
     const n = SEG + 1;
     const positions = new Float32Array(n * n * 3);
@@ -88,16 +101,11 @@ export class FarTerrain {
         positions[k * 3] = x;
         positions[k * 3 + 1] = h + this.bias;
         positions[k * 3 + 2] = z;
-        // vertex color: ground→alt by slope noise, rock blend by height —
-        // Terrain.ts's formula verbatim (uses the unbiased height)
-        const slopeN = noise.get(x * 0.05, z * 0.05);
-        tmp.copy(cGround).lerp(cAlt, (slopeN + 1) / 2);
-        const hn = THREE.MathUtils.clamp(h / maxH - 0.6, 0, 1);
-        tmp.lerp(cRock, hn * 1.2);
-        const patchN = noise.get(x * 0.33 + 47.3, z * 0.33 - 23.7);
-        const pk = (patchN + 1) / 2;
-        if (pk < 0.42) tmp.lerp(cPatchDark, ((0.42 - pk) / 0.42) * 0.6);
-        else if (pk > 0.58) tmp.lerp(cPatchLight, ((pk - 0.58) / 0.42) * 0.4);
+        // coarse up-normal from central differences (uses the unbiased height)
+        const sx = (terrain.heightAt(x + scell, z) - terrain.heightAt(x - scell, z)) / (2 * scell);
+        const sz = (terrain.heightAt(x, z + scell) - terrain.heightAt(x, z - scell)) / (2 * scell);
+        const ny = 1 / Math.sqrt(sx * sx + sz * sz + 1);
+        paintGroundVertex(tmp, paintCtx, noise, x, z, h, ny);
         colors[k * 3] = tmp.r;
         colors[k * 3 + 1] = tmp.g;
         colors[k * 3 + 2] = tmp.b;

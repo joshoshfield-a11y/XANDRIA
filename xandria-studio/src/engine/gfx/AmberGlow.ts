@@ -148,8 +148,9 @@ export function makeRuneStrip(mats: MaterialLibrary, w = 1.5, h = 0.28): THREE.G
 /** Module-shared unit geometries for the instancer (never disposed). */
 const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
 const UNIT_SPHERE = new THREE.SphereGeometry(1, 10, 8);
+const UNIT_OCTA = new THREE.OctahedronGeometry(1, 0);
 
-type InstGeoKind = 'box' | 'sphere';
+type InstGeoKind = 'box' | 'sphere' | 'octa';
 
 interface InstBucket {
   geo: THREE.BufferGeometry;
@@ -171,7 +172,10 @@ export class Instancer {
     const key = `${kind}:${shadow ? 1 : 0}:${(mat as THREE.Material).uuid}`;
     let b = this.buckets.get(key);
     if (!b) {
-      b = { geo: kind === 'box' ? UNIT_BOX : UNIT_SPHERE, mat, shadow, matrices: [] };
+      b = {
+        geo: kind === 'box' ? UNIT_BOX : kind === 'sphere' ? UNIT_SPHERE : UNIT_OCTA,
+        mat, shadow, matrices: [],
+      };
       this.buckets.set(key, b);
     }
     b.matrices.push(m);
@@ -193,6 +197,20 @@ export class Instancer {
     _quat.identity();
     _scl.set(Math.max(1e-4, r), Math.max(1e-4, r), Math.max(1e-4, r));
     this.push('sphere', mat, shadow, new THREE.Matrix4().compose(_pos, _quat, _scl));
+  }
+
+  /**
+   * Octahedron "crystal shard" centered at (x, y, z), scaled to (sx, sy, sz).
+   * Matches the voxel-crystal language of the biome teal-crystal prop sets
+   * (PropSets 'biome-tealcrystals' uses OctahedronGeometry). Glow pieces
+   * default to no shadow.
+   */
+  octa(mat: THREE.Material, x: number, y: number, z: number, sx: number, sy: number, sz: number, ry = 0, shadow = false): void {
+    _pos.set(x, y, z);
+    _euler.set(0, ry, 0);
+    _quat.setFromEuler(_euler);
+    _scl.set(Math.max(1e-4, sx), Math.max(1e-4, sy), Math.max(1e-4, sz));
+    this.push('octa', mat, shadow, new THREE.Matrix4().compose(_pos, _quat, _scl));
   }
 
   /** Instances registered under a material — used for amber-accent accounting. */

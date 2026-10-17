@@ -7,11 +7,11 @@
  * styling is scoped under `.xed-` to coexist with the Studio shell.
  */
 import {
-  MOODS, ENVIRONMENTS, BIOME_IDS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
+  MOODS, ENVIRONMENTS, BIOME_IDS, FLORA_IDS, PERF_TIER_IDS, OBJECTIVES, ENEMY_KINDS, WEAPONS, ABILITIES,
   CHARACTER_PIVOTS,
   type GameSpec, type ObjectiveStage, type EnemySpec, type Weapon,
   type CharacterPivot, type SkinDef, type ItemSkinDef, type ItemDef,
-  type BiomeId,
+  type BiomeId, type FloraId, type PerfTier,
 } from '@spec';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -452,6 +452,58 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       if (v === 'auto') delete sp.custom.biome.biomeId;
       else sp.custom.biome.biomeId = v as BiomeId;
     }, true), 'Auto picks the biome from seed + genre. Override forces one look.'));
+
+    // Graphics wave 2 (E): perf-tier preview override. Auto = device
+    // auto-detect (?tier= and the player's pause-menu setting still win at
+    // runtime); forcing a tier previews the other build profile in Studio.
+    const curTier = s.custom?.tier ?? 'auto';
+    host.appendChild(field('PERF TIER — PREVIEW', select(['auto', ...PERF_TIER_IDS], curTier, (sp, v) => {
+      sp.custom = sp.custom ?? {};
+      if (v === 'auto') delete sp.custom.tier;
+      else sp.custom.tier = v as PerfTier;
+    }, true), 'Desktop = denser scatter, bigger shadow maps, more glow lights. S25 = the tuned-down profile of the same build. Draw calls stay flat on both.'));
+
+    // Graphics wave 2 (E): scatter density (the master 0..1 the chunked
+    // streaming budgets scale from) and the species mix (per-species
+    // weights 0..10 driving the vegetation species picker).
+    host.appendChild(field(
+      'SCATTER DENSITY',
+      slider(s.world.scatter.density, 0, 1, 0.05, (sp, v) => {
+        sp.world.scatter.density = Math.round(v * 100) / 100;
+      }, (v) => `${Math.round(v * 100)}%`),
+      'Master density for rocks, trees, grass and props. Chunk budgets keep the resident set bounded at any density.',
+    ));
+
+    host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
+    for (const species of FLORA_IDS) {
+      const w = s.custom?.biome?.floraMix?.[species] ?? 5;
+      host.appendChild(field(
+        species.toUpperCase(),
+        slider(w, 0, 10, 1, (sp, v) => {
+          sp.custom = sp.custom ?? {};
+          sp.custom.biome = sp.custom.biome ?? {};
+          sp.custom.biome.floraMix = sp.custom.biome.floraMix ?? {};
+          (sp.custom.biome.floraMix as Record<FloraId, number>)[species] = Math.round(v);
+        }, (v) => `${Math.round(v)}`),
+      ));
+    }
+
+    // Graphics wave 2 (E): water settings — the shoreline/depth work in
+    // this wave reads these; the plane + placement rebuild on Play.
+    host.appendChild(field(
+      'WATER — ENABLED',
+      checkbox('Water plane', s.world.terrain.water, (sp, v) => {
+        sp.world.terrain.water = v;
+      }, true),
+      'Off = dry world (placement ignores water level).',
+    ));
+    host.appendChild(field(
+      'WATER LEVEL',
+      slider(s.world.terrain.waterLevel, -50, 50, 0.5, (sp, v) => {
+        sp.world.terrain.waterLevel = Math.round(v * 2) / 2;
+      }, (v) => `${v.toFixed(1)}m`),
+      'Shoreline height. Scatter, grass and structures all place above it.',
+    ));
 
     // Open-world stage 1b: world size override (schema validates 60..8000).
     // Changing it then hitting Play rebuilds the world at the new size.

@@ -105,8 +105,13 @@ describe('Terrain chunk vertex rebase (camera-relative rendering)', () => {
   it('normals+colors are bit-identical to the pre-rebase build (220m hills)', () => {
     const { physics, scene, terrain } = buildWorld(220, 'hills', 7);
     try {
-      // digest captured from the pre-rebase code — see workers-max/B.md
-      expect(contentDigest(terrain)).toBe('d72f028d');
+      /* Digest re-captured for graphics wave 2, workstream A (terrain
+         detail): the color recipe changed intentionally (slope/height
+         bands, shoreline wetness, spawn wear); normals were verified
+         bit-identical to the pre-rebase build (95182dc0) via
+         scripts/digest-nc.ts against 0844c1f. Do not "fix" this by
+         reverting colors — future changes must keep THIS digest. */
+      expect(contentDigest(terrain)).toBe('2619648d');
     } finally {
       terrain.dispose(scene, physics);
     }
@@ -116,8 +121,9 @@ describe('Terrain chunk vertex rebase (camera-relative rendering)', () => {
     const { physics, scene, terrain } = buildWorld(1000, 'mountains', 7);
     try {
       expect(terrain.getChunkStats().chunkCount).toBe(16);
-      // digest captured from the pre-rebase code — see workers-max/B.md
-      expect(contentDigest(terrain)).toBe('7cb1da35');
+      // Re-captured for graphics wave 2, workstream A — see above.
+      // Normals verified bit-identical to pre-rebase (2e7c3c36).
+      expect(contentDigest(terrain)).toBe('cc8ca994');
     } finally {
       terrain.dispose(scene, physics);
     }

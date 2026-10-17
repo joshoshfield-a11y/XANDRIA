@@ -96,10 +96,26 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
 
   // scatter away from the track
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
-  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, { exclusion: trackExclusion, engine, quality: engine.effectiveQuality() });
-  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint
-  structures.landmarks(spec, terrain, scene, spec.meta.seed, {
+  // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint.
+  // Landmarks come before scatter so hero specimen plants can ring them (wave 2B).
+  const landmarks = structures.landmarks(spec, terrain, scene, spec.meta.seed, {
     exclusion: trackExclusion, quality: engine.effectiveQuality(),
+    maxRealLights: engine.tiers.flags.maxRealLights, // graphics wave 2 (E): tier real-light budget
+  });
+  // graphics wave 2 (workstream C): per-biome structure sets — hero cluster
+  // near spawn + chunk-deterministic satellite clusters, one shared
+  // instancer so draw calls stay flat (seeded per map via spec.meta.seed)
+  structures.structureSets(spec, terrain, scene, spec.meta.seed, {
+    exclusion: trackExclusion, quality: engine.effectiveQuality(),
+    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier structure density
+    structureShadows: engine.tiers.flags.structureShadows, // graphics wave 2 (E): s25 shadow diet
+  });
+
+  const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
+    exclusion: trackExclusion, engine, quality: engine.effectiveQuality(),
+    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier scatter density
+    windMul: engine.tiers.flags.windMul, // graphics wave 2 (E): tier wind-sway intensity
+    heroSpots: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })), // wave 2B: hero plants
   });
   scatterAmberGlow(scene, rng.fork(0xe9a1), {
     mats: engine.mats,

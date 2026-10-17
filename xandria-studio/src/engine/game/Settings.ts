@@ -3,6 +3,8 @@
  * localStorage so they survive restarts; the pause menu edits them live.
  * Storage access is guarded — headless/test environments get clean defaults.
  */
+import type { PerfTierSetting } from '../core/PerformanceManager';
+
 export type QualitySetting = 'auto' | 'retro' | 'standard' | 'high';
 
 export interface SettingsData {
@@ -11,12 +13,18 @@ export interface SettingsData {
   muted: boolean;
   /** 'auto' follows the spec's quality hint */
   quality: QualitySetting;
+  /**
+   * Graphics wave 2 (E): perf-tier override. 'auto' resolves via
+   * PerformanceManager (?tier= → spec.custom.tier → device auto-detect).
+   */
+  tier: PerfTierSetting;
 }
 
 const KEY = 'xandria.settings.v1';
 
-const DEFAULTS: SettingsData = { volume: 0.8, muted: false, quality: 'auto' };
+const DEFAULTS: SettingsData = { volume: 0.8, muted: false, quality: 'auto', tier: 'auto' };
 const QUALITIES: QualitySetting[] = ['auto', 'retro', 'standard', 'high'];
+const TIERS: PerfTierSetting[] = ['auto', 'desktop', 's25'];
 
 export class Settings {
   data: SettingsData;
@@ -25,6 +33,7 @@ export class Settings {
     this.data = { ...DEFAULTS, ...Settings.read() };
     this.data.volume = Settings.clampVol(this.data.volume);
     if (!QUALITIES.includes(this.data.quality)) this.data.quality = 'auto';
+    if (!TIERS.includes(this.data.tier)) this.data.tier = 'auto';
   }
 
   private static clampVol(v: unknown): number {
@@ -51,6 +60,9 @@ export class Settings {
     if (patch.quality !== undefined && !QUALITIES.includes(patch.quality)) {
       this.data.quality = 'auto';
     }
+    if (patch.tier !== undefined && !TIERS.includes(patch.tier)) {
+      this.data.tier = 'auto';
+    }
     try {
       localStorage.setItem(KEY, JSON.stringify(this.data));
     } catch {
@@ -64,5 +76,6 @@ export class Settings {
     if (fresh.volume !== undefined) this.data.volume = Settings.clampVol(fresh.volume);
     if (fresh.muted !== undefined) this.data.muted = !!fresh.muted;
     if (fresh.quality !== undefined && QUALITIES.includes(fresh.quality)) this.data.quality = fresh.quality;
+    if (fresh.tier !== undefined && TIERS.includes(fresh.tier)) this.data.tier = fresh.tier;
   }
 }
