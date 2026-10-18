@@ -474,6 +474,30 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'Master density for rocks, trees, grass and props. Chunk budgets keep the resident set bounded at any density.',
     ));
 
+    // NPCs wave (workstream C): ambient-NPC density + the low-tier count
+    // flag. Density 1 = the standard 8-NPC roster; the low-tier scale
+    // multiplies the roster on reduced-fidelity tiers (S25) so NPC draw
+    // cost stays proportional to the tier's other tuned-down budgets.
+    // Read at spawn time by resolveNpcCount (engine/game/npcTuning.ts).
+    host.appendChild(field(
+      'NPC DENSITY',
+      slider(s.custom?.npcs?.density ?? 1, 0, 1, 0.05, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.npcs = sp.custom.npcs ?? {};
+        sp.custom.npcs.density = Math.round(v * 100) / 100;
+      }, (v) => `${Math.round(v * 100)}%`),
+      'Ambient villager count = 8 × density. 0 = no NPCs. Spawns are map-seeded: the first N of the roster are identical at any density.',
+    ));
+    host.appendChild(field(
+      'NPC COUNT — LOW-TIER SCALE',
+      slider(s.custom?.npcs?.lowTierScale ?? 0.5, 0, 1, 0.05, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.npcs = sp.custom.npcs ?? {};
+        sp.custom.npcs.lowTierScale = Math.round(v * 100) / 100;
+      }, (v) => `${Math.round(v * 100)}%`),
+      'S25-tier NPC multiplier (desktop ignores this). 50% = half the desktop roster on the mobile profile.',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;

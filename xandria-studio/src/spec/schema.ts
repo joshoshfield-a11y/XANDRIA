@@ -164,6 +164,36 @@ export interface EnemySpec {
   weapon: Weapon | 'melee' | 'none';
 }
 
+/**
+ * Ambient NPC (villager) roster entry. Mirrors EnemySpec's minimal style:
+ * when `name` is absent the seeded generator in engine/game/npcNames.ts
+ * fills it from the spawn seed, so same seed → same name/palette.
+ */
+export interface NpcSpec {
+  /** explicit display name; omit to generate from the spawn seed */
+  name?: string;
+  /** flavor role (display only): 'villager' | 'merchant' | 'guard' | 'elder' */
+  role?: string;
+  /** seeded palette variation (cloth/armor/visor); omit to derive from seed */
+  palette?: NpcPaletteSpec;
+  /** wander radius (m) around the spawn point; default 6 */
+  wanderRadius?: number;
+  /** wander speed (m/s); default 1.2 */
+  speed?: number;
+  /** armor set id override (see VOXEL_ARMOR_SET_IDS); omit to pick per seed */
+  armorSet?: string;
+  /** roster size when spawned by a manager; default 1 */
+  count?: number;
+}
+
+/** Explicit (non-generated) NPC palette. */
+export interface NpcPaletteSpec {
+  cloth?: string;
+  pants?: string;
+  accent?: string;
+  visor?: string;
+}
+
 export interface ObjectiveSpec {
   type: ObjectiveType;
   count: number;       // collect N / eliminate N / laps / seconds survived
@@ -553,6 +583,28 @@ export interface CustomSpec {
    * deriveMapBiome. Not user-editable in the Studio.
    */
   portalMap?: { mx: number; my: number; worldSeed: number };
+  /**
+   * NPCs wave (workstream C): authoring controls for ambient NPCs.
+   * Master density scales the default roster (8 at 1.0); lowTierScale
+   * multiplies the count on reduced-fidelity tiers (s25). Config-only —
+   * never touches the seed. Read by resolveNpcCount (engine/game/npcTuning).
+   */
+  npcs?: NpcTuningCustom;
+}
+
+/**
+ * NPCs wave (workstream C): Studio-authored NPC tuning. Both fields are
+ * 0..1 multipliers; absent = 1.0 defaults.
+ */
+export interface NpcTuningCustom {
+  /** master NPC density multiplier (default 1 = the standard 8-NPC roster) */
+  density?: number;
+  /**
+   * count multiplier on reduced-fidelity tiers (default 0.5): the S25 tier
+   * spawns half the desktop roster so NPC draw cost stays proportional to
+   * the tier's other tuned-down budgets.
+   */
+  lowTierScale?: number;
 }
 
 export interface GameSpec {
@@ -561,6 +613,8 @@ export interface GameSpec {
   world: WorldSpec;
   player: PlayerSpec;
   enemies: EnemySpec[];
+  /** ambient NPC roster (gameplay wave: NPC core). Optional — absent = no NPCs. */
+  npcs?: NpcSpec[];
   objective: ObjectiveSpec;
   pickups: PickupSpec;
   rules: RulesSpec;

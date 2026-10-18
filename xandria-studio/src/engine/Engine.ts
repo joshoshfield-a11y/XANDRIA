@@ -28,6 +28,7 @@ import { PortalManager } from './world/PortalManager';
 // restore/spawn primitives. Engine changes here are only the two fields
 // and the two methods below.
 import { MapEntityRegistry } from './world/MapEntities';
+import { InteractionRegistry } from './game/Interaction';
 import { PortalMapCache, TerrainMapContext } from './world/MapCache';
 import { ORIGIN, stampOriginMap, type MapCoord } from './world/MapGraph';
 import { portalsEnabled } from '@spec';
@@ -140,6 +141,15 @@ export class Engine {
    * deterministically on arrival.
    */
   readonly portalEntities = new MapEntityRegistry();
+  /**
+   * NPCs wave (workstream C): engine-level registry for NPC Interactables
+   * ({ type: 'npc', prompt: 'Talk to <name>' }). NPC interactables live
+   * here — NOT in ItemWorld.interactions (chests) — so the chest activation
+   * path never sees NPC ids. Registered on spawn, unregistered on despawn
+   * (see engine/game/npcInteraction.ts); `requires`/`produces` stay
+   * undefined until the quest wave.
+   */
+  readonly npcInteractions = new InteractionRegistry();
   /**
    * PORTALS-D: visited-map LRU (world/MapCache.ts). Wired by the portal
    * transition flow (workstream B/C). Null = portals disabled; transitions

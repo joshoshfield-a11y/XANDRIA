@@ -41,6 +41,7 @@ import {
   wrapShieldDamage,
 } from './fx';
 import { ChapterDresser } from './dressing';
+import { NpcManager } from '../engine/game/NpcManager';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
@@ -98,6 +99,17 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier structure density
     structureShadows: engine.tiers.flags.structureShadows, // graphics wave 2 (E): s25 shadow diet
   });
+
+  // gameplay wave (workstream B): ambient NPC villagers settled near
+  // landmarks/structures, map-local lifecycle. The manager registers itself
+  // with engine.portalEntities ({ id: 'npcs' }) so portal transitions
+  // despawn/respawn the roster deterministically per map seed.
+  const npcManager = new NpcManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    specs: spec.npcs,
+  });
+  engine.portalEntities.register(npcManager);
+  npcManager.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
 
   scatterAmberGlow(scene, rng.fork(0xe9a1), {
     mats: engine.mats,
@@ -303,6 +315,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     }
 
     enemies.update(dt, avatar.ctrl.position, t);
+    npcManager.update(dt); // gameplay wave (B): ambient villagers tick
     variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
     pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());
@@ -351,5 +364,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
+  return { avatar, enemies, npcs: npcManager, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

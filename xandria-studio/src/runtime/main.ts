@@ -17,6 +17,15 @@ import {
 } from '../engine/game/Modding';
 import { applyLoadout, loadProfile } from '../engine/game/Profile';
 import { resolveSplash, showSplash } from './splash';
+import { spawnNpcsForMap } from '../engine/game/Npc';
+import {
+  NpcInteractionSession,
+  registerNpcInteractables,
+  unregisterNpcInteractables,
+} from '../engine/game/npcInteraction';
+import { resolveNpcCount } from '../engine/game/npcTuning';
+import { NpcInstancer } from '../engine/game/npcInstancing';
+import type { Npc } from '../engine/game/Npc';
 
 declare global {
   interface Window {
@@ -182,6 +191,33 @@ function boot() {
   const blueprint = build(engine, spec);
   // Preserve the pre-boot modding API when publishing the booted state.
   window.__XANDRIA__ = { ...window.__XANDRIA__, engine, spec, blueprint, errors: window.__XANDRIA_ERRORS };
+  // NPCs wave (workstream C): test-mode seam. The e2e and perf harnesses
+  // spawn NPCs against A's API directly (spawnNpcsForMap) and register the
+  // interactables manually — workstream B's manager is not on this path.
+  if (engine.testMode) {
+    (window.__XANDRIA__ as Record<string, unknown>).npcTest = {
+      spawnNpcsForMap,
+      registerNpcInteractables,
+      unregisterNpcInteractables,
+      NpcInteractionSession,
+      resolveNpcCount,
+      // Instancing pass: submit static (never-ticked) NPCs to the
+      // per-engine instancer once — instances persist, no per-frame work.
+      submitStaticNpcs: (npcs: Npc[]) => {
+        const inst = NpcInstancer.for(engine);
+        inst.beginFrame();
+        for (const n of npcs) {
+          inst.register(n);
+          inst.submit(n);
+        }
+        inst.endFrame();
+      },
+      /** Test seam: drop all buckets (restores direct rendering). */
+      resetInstancer: () => NpcInstancer.for(engine).reset(),
+      /** Test seam: bucket/instance diagnostics. */
+      instancerStats: () => NpcInstancer.for(engine).stats(),
+    };
+  }
   document.body.dataset.genre = spec.meta.genre;
   document.body.dataset.state = engine.state;
   engine.onUpdatePersistent(() => { document.body.dataset.state = engine.state; });

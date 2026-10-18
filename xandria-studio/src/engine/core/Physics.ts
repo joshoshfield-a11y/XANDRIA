@@ -10,6 +10,8 @@ export const GROUP = {
   PICKUP: 16,
   TRIGGER: 32,
   VEHICLE: 64,
+  /** ambient NPCs: collide with world/player/NPCs, never with projectiles */
+  NPC: 128,
 } as const;
 
 export interface RayHit {
