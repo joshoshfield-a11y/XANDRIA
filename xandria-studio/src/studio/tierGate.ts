@@ -85,12 +85,27 @@ export function upgradeNudge(action: Exclude<GatedAction, 'signin'>, tier: Tier 
 }
 
 export const SIGNIN_NUDGE =
-  'Sign in with your email to generate games — it\'s free, 5 generations a month, no card required.';
+  'Sign in with your email to generate games — it\'s free, 5 generations a month, no card required. Open the sign-in link in this same browser.';
 
 /** Truncate an email for the account chip (e.g. "verylongaddress…" at 22 chars). */
 export function truncateEmail(email: string, max = 22): string {
   if (email.length <= max) return email;
   return email.slice(0, max - 1) + '…';
+}
+
+/**
+ * Account-link indicator HTML for the studio's Account section.
+ * Truthful by construction: returns '' (rendered hidden) when signed out,
+ * so the UI can never claim a linked account the user doesn't have.
+ * (2026-10-18: the old static "✓ Linked account" label misled unsigned users
+ * into believing they were signed in, and the resulting silent gate block
+ * read as "generate does nothing".)
+ */
+export function linkedLabelHtml(email: string | null): string {
+  if (!email) return '';
+  const safe = truncateEmail(email)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `✓ Signed in as ${safe}`;
 }
 
 /** Tier badge label for the account chip. */

@@ -590,6 +590,16 @@ export interface CustomSpec {
    * never touches the seed. Read by resolveNpcCount (engine/game/npcTuning).
    */
   npcs?: NpcTuningCustom;
+  /**
+   * Enemies wave (workstream C): authoring controls for enemy counts.
+   * Master density scales every spec count on the portal-arrival path
+   * (round(count * density)); lowTierScale multiplies the density on
+   * reduced-fidelity tiers (s25). Config-only — never touches the seed.
+   * Read by resolveEnemyDensity (engine/game/enemyTuning), wired into
+   * EnemyManagerOpts.density by every blueprint that builds an
+   * EnemyManager.
+   */
+  enemies?: EnemyTuningCustom;
 }
 
 /**
@@ -603,6 +613,22 @@ export interface NpcTuningCustom {
    * count multiplier on reduced-fidelity tiers (default 0.5): the S25 tier
    * spawns half the desktop roster so NPC draw cost stays proportional to
    * the tier's other tuned-down budgets.
+   */
+  lowTierScale?: number;
+}
+
+/**
+ * Enemies wave (workstream C): Studio-authored enemy tuning. Both fields
+ * are 0..1 multipliers; absent = defaults (1.0 density, 0.5 low-tier
+ * scale). Applied per spec count in EnemyManager.spawnForMap.
+ */
+export interface EnemyTuningCustom {
+  /** master enemy density multiplier (default 1 = the authored spec counts) */
+  density?: number;
+  /**
+   * density multiplier on reduced-fidelity tiers (default 0.5): the S25
+   * tier spawns half the desktop roster so enemy draw cost stays
+   * proportional to the tier's other tuned-down budgets.
    */
   lowTierScale?: number;
 }

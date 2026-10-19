@@ -7,6 +7,8 @@ import type { GameSpec } from '@spec';
 import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
+import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
@@ -162,7 +164,16 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
       grantKillXp(prog, notifyLevelUp);
       objectives.addProgress(1, 'kill');
     },
+  }, {
+    // enemies wave (A): map-local lifecycle — portal departures despawn live
+    // enemies AND mid-tumble corpses; arrivals respawn the deterministic
+    // landmark-ringed roster per map seed.
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    // enemies wave (C): Studio ENEMY DENSITY slider (spec.custom.enemies)
+    // scales every spec count on the portal-arrival path.
+    density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
+  engine.portalEntities.register(enemies);
   // enemy variants: spikeballs (never stomp) + skyrays (sine patrol)
   const variants = new VariantDirector(engine, enemies, null, 31337);
   avatar = new PlayerAvatar(engine, spec, start.clone().add(new THREE.Vector3(0, 2, 0)), enemies, projectiles);
@@ -270,7 +281,12 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     avatar.ctrl.camYaw = 0;
     avatar.update(dt, t);
     itemKit?.update(dt);
+    // Enemies wave C: the blueprint drives the shared instancer frame
+    // (single begin/end per update — see tpAction).
+    const inst = NpcInstancer.for(engine);
+    inst.beginFrame(dt);
     enemies.update(dt, avatar.ctrl.position, t);
+    inst.endFrame();
     variants.update(dt, avatar.ctrl.position, t);
     pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());
     objectives.update(dt);

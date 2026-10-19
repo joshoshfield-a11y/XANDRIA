@@ -73,6 +73,26 @@ export function disposeOwned(root: THREE.Object3D) {
   });
 }
 
+/**
+ * Enemies wave C: dispose per-instance OWNED materials only — leaves
+ * geometries alone for the cache-shared path (geometry sharing without
+ * material sharing: damage-flash mutates owned materials, so they must
+ * stay per-instance on the direct-render path, while geometries dedup
+ * across the roster). Library-cached (non-owned) materials are never
+ * disposed here, same as disposeOwned.
+ */
+export function disposeOwnedMaterials(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mm of mats) {
+      const mat = mm as THREE.Material | undefined;
+      if (mat && mat.userData.owned) mat.dispose();
+    }
+  });
+}
+
 function box(w: number, h: number, d: number, mat: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   m.position.set(x, y, z);

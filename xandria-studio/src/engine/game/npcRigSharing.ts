@@ -44,6 +44,11 @@
  *    mutable owned materials across instances is safe. If a future wave
  *    gives NPCs damage flashes, this cache must be revisited (per-instance
  *    material clones again, or a flash that swaps to a shared overlay).
+ *  - ENEMIES WAVE C: enemies DO flash, so they share geometry only
+ *    (share(root, { geometriesOnly: true })) — materials stay per-instance
+ *    and the instancer renders the hit pulse as a per-instance tint.
+ *    Never pass shared (non-geometriesOnly) enemy materials anywhere
+ *    flash() can reach them.
  *  - share() never throws: on any failure it returns null and the caller
  *    falls back to the old per-instance disposeOwned path.
  *  - Per-instance Object3D trees are NOT shared (limb pivots animate
@@ -147,11 +152,21 @@ export class NpcRigCache {
 
   /**
    * Share a freshly built rig's GPU resources against the canonical cache.
+   *
+   * Enemies wave C: `opts.geometriesOnly` shares GEOMETRY only and leaves
+   * materials per-instance. Enemies mutate owned materials on damage
+   * (rig.flash() on the direct-render path) — sharing those across
+   * instances would cross-flash the whole roster, violating the
+   * shared-materials-are-never-mutated invariant. Geometry is the expensive
+   * part (the 5.6x win); the instancer canonicalizes materials per role
+   * anyway, so the instanced path loses nothing.
+   *
    * @returns the adopted signatures (pass to release() on dispose), or null
    * on any failure (caller keeps the old per-instance disposeOwned path).
    */
-  share(root: THREE.Object3D): NpcAdopted | null {
+  share(root: THREE.Object3D, opts?: { geometriesOnly?: boolean }): NpcAdopted | null {
     try {
+      const geoOnly = opts?.geometriesOnly ?? false;
       const adopted: NpcAdopted = { geos: [], mats: [] };
       root.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -169,6 +184,7 @@ export class NpcRigCache {
           gHit.refs++; // same object on two meshes of one rig
         }
         adopted.geos.push(gs);
+        if (geoOnly) return; // materials stay per-instance (enemy flash safety)
         // --- materials: only per-instance OWNED clones; library-cached
         // --- shared materials are already shared and stay as-is
         const mlist = Array.isArray(mesh.material) ? mesh.material : [mesh.material];

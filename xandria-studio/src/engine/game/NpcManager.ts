@@ -110,22 +110,33 @@ export class NpcManager implements MapLocalEntitySystem {
 
   /** Remove every live payload: NPCs + their shared rig resources. Idempotent. */
   despawnAll(): void {
-    this.instancer.reset();
+    // Enemies wave C: unregister per-entity from the SHARED instancer —
+    // reset() would wipe the enemy manager's buckets too (both managers
+    // own the same per-engine singleton; spawnForMap self-cleans via
+    // despawnAll, so a global reset on every spawn would drop the other
+    // roster's instancing on every portal arrival).
     for (const n of this.list) {
+      try { this.instancer.unregister(n); } catch { /* never strand the rest */ }
       try { n.dispose(); } catch { /* never strand the rest */ }
     }
     this.list = [];
     this.cache.clear();
   }
 
-  /** Tick every live NPC (blueprint wires this into engine.onUpdate). */
+  /**
+   * Tick every live NPC (blueprint wires this into engine.onUpdate).
+   * Submits each NPC's posed rig to the shared instancer. The blueprint
+   * drives the instancer frame (beginFrame/endFrame) around the manager
+   * updates — enemies wave C: with NpcManager + EnemyManager sharing one
+   * per-engine instancer, a single begin/end per update keeps both
+   * managers' submits accumulating into the same frame instead of the
+   * second manager's beginFrame zeroing the first's counts.
+   */
   update(dt: number): void {
-    this.instancer.beginFrame();
     for (const n of this.list) {
       n.update(dt);
       this.instancer.submit(n);
     }
-    this.instancer.endFrame();
   }
 
   /**

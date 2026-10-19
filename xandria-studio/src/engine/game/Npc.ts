@@ -155,7 +155,9 @@ export class Npc {
       [spawn.x, spawn.y + 1.4 * p.bulk, spawn.z], {
         mass: 60 * p.bulk,
         group: GROUP.NPC,
-        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.NPC,
+        // enemies wave (A): NPCs collide with enemies too — but NEVER with
+        // projectiles (no GROUP.PROJECTILE in this mask, by design).
+        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.NPC | GROUP.ENEMY,
       });
     // NPCs don't knock themselves or each other around: damp aggressively.
     this.body.linearDamping = 0.9;

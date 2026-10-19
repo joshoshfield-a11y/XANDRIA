@@ -498,6 +498,30 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'S25-tier NPC multiplier (desktop ignores this). 50% = half the desktop roster on the mobile profile.',
     ));
 
+    // Enemies wave (workstream C): enemy density + the low-tier count
+    // flag. Density 1 = the authored spec counts; each count is scaled as
+    // round(count × density) on the portal-arrival path (spawnForMap).
+    // Read at spawn time by resolveEnemyDensity (engine/game/enemyTuning.ts)
+    // and wired into EnemyManagerOpts.density by the blueprints.
+    host.appendChild(field(
+      'ENEMY DENSITY',
+      slider(s.custom?.enemies?.density ?? 1, 0, 1, 0.05, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.enemies = sp.custom.enemies ?? {};
+        sp.custom.enemies.density = Math.round(v * 100) / 100;
+      }, (v) => `${Math.round(v * 100)}%`),
+      'Enemy count = spec counts × density. 0 = no enemies. Spawns are map-seeded: the first N of the roster are identical at any density.',
+    ));
+    host.appendChild(field(
+      'ENEMY COUNT — LOW-TIER SCALE',
+      slider(s.custom?.enemies?.lowTierScale ?? 0.5, 0, 1, 0.05, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.enemies = sp.custom.enemies ?? {};
+        sp.custom.enemies.lowTierScale = Math.round(v * 100) / 100;
+      }, (v) => `${Math.round(v * 100)}%`),
+      'S25-tier enemy multiplier (desktop ignores this). 50% = half the desktop roster on the mobile profile.',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;

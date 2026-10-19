@@ -7,6 +7,8 @@ import type { GameSpec } from '@spec';
 import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
+import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
@@ -153,7 +155,16 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       }
     },
     onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
+  }, {
+    // enemies wave (A): map-local lifecycle — the roster rings landmarks so
+    // portal arrivals respawn deterministically per map seed; portal
+    // departures despawn live enemies AND mid-tumble corpses.
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    // enemies wave (C): Studio ENEMY DENSITY slider (spec.custom.enemies)
+    // scales every spec count on the portal-arrival path.
+    density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
+  engine.portalEntities.register(enemies);
   // enemy variants: shielded bruisers + ranged casters over the base kinds
   const variants = new VariantDirector(engine, enemies, projectiles);
 
@@ -314,8 +325,15 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       avatar.shoot(dir);
     }
 
+    // Enemies wave C: one shared instancer frame for the enemy + NPC
+    // managers. Both submit into the same per-engine buckets; a single
+    // begin/end per update keeps their instance counts accumulating
+    // instead of the second manager's beginFrame zeroing the first's.
+    const inst = NpcInstancer.for(engine);
+    inst.beginFrame(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
+    inst.endFrame();
     variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
     pickups.update(dt, avatar.ctrl.position, 2.6 * prog.magnetMult() * fx.magnetMult());

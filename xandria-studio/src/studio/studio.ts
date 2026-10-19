@@ -13,6 +13,7 @@ import { createEditorPanel, readProjectFile, escapeHtml, type EditorPanel } from
 import { projectToJson } from './editor/specOps';
 import { injectSpecScript } from '../../scripts/specInject';
 import { isBillingEnabled } from './auth';
+import { linkedLabelHtml } from './tierGate';
 import {
   apiGate,
   createBillingState,
@@ -220,7 +221,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
             <h2>Create Your Experience</h2>
             <p>Describe what you want to build. XANDRIA will generate a playable game based on your prompt.</p>
           </div></div>
-          ${billingOn ? `<div class="sect"><div class="lbl">Account</div><div id="acct-host"></div><div class="linked">✓ Linked account</div></div>` : ''}
+          ${billingOn ? `<div class="sect"><div class="lbl">Account</div><div id="acct-host"></div><div class="linked" id="linked-label" style="display:none"></div></div>` : ''}
           <div class="sect">
             <div class="lbl">Prompt</div>
             <div id="history" style="display:none"></div>
@@ -351,7 +352,12 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   // ---- Billing (subscription checkout). Additive and hook-based: when the
   // ---- supabase env vars are unset, `billing.enabled` is false and every
   // ---- gate below passes through, leaving launch behavior untouched.
-  const notifyMeta: Notify = (html) => { meta.innerHTML += `<br/>${html}`; };
+  const notifyMeta: Notify = (html) => {
+    meta.innerHTML += `<br/>${html}`;
+    // Gate blocks must be unmissable: on the mobile bottom-drawer layout the
+    // feedback area sits below the fold, which previously read as "nothing happens".
+    meta.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
   const creditsPill = root.querySelector<HTMLElement>('#credits-pill');
   const billing: BillingState = createBillingState(() => { renderAcct(); renderExportRow(); });
   const updateCredits = () => {
@@ -364,7 +370,18 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   const acctHost = root.querySelector<HTMLElement>('#acct-host');
   if (billing.enabled && acctHost) {
     const chipRender = mountAccountChip(acctHost, billing, notifyMeta);
-    renderAcct = () => { chipRender(); updateCredits(); };
+    const linkedLabel = root.querySelector<HTMLElement>('#linked-label');
+    renderAcct = () => {
+      chipRender();
+      updateCredits();
+      // Keep the link indicator truthful: only claim a linked account when
+      // a session actually exists.
+      if (linkedLabel) {
+        const html = linkedLabelHtml(billing.email);
+        linkedLabel.innerHTML = html;
+        linkedLabel.style.display = html ? 'flex' : 'none';
+      }
+    };
   }
   renderAcct();
   const renderExportRow = () => {

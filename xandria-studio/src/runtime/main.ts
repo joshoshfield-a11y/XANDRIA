@@ -26,6 +26,8 @@ import {
 import { resolveNpcCount } from '../engine/game/npcTuning';
 import { NpcInstancer } from '../engine/game/npcInstancing';
 import type { Npc } from '../engine/game/Npc';
+import { EnemyManager, ENEMY_SALT, type Enemy } from '../engine/game/EnemyAI';
+import { resolveEnemyDensity } from '../engine/game/enemyTuning';
 
 declare global {
   interface Window {
@@ -216,6 +218,42 @@ function boot() {
       resetInstancer: () => NpcInstancer.for(engine).reset(),
       /** Test seam: bucket/instance diagnostics. */
       instancerStats: () => NpcInstancer.for(engine).stats(),
+    };
+    // Enemies wave (workstream C): test-mode seam for the enemy e2e +
+    // perf harnesses — the manager + instancing + density resolution.
+    (window.__XANDRIA__ as Record<string, unknown>).enemyTest = {
+      EnemyManager,
+      ENEMY_SALT,
+      resolveEnemyDensity,
+      /** Test seam: submit never-ticked enemies once (instances persist). */
+      submitStaticEnemies: (enemies: Enemy[]) => {
+        const inst = NpcInstancer.for(engine);
+        inst.beginFrame();
+        for (const e of enemies) {
+          inst.registerEnemy(e);
+          inst.submit(e);
+        }
+        inst.endFrame();
+      },
+      /** Test seam: drop all buckets (restores direct rendering). */
+      resetEnemyInstancer: () => NpcInstancer.for(engine).reset(),
+      /**
+       * Test seam: drop THESE enemies from the buckets and re-show their
+       * source meshes (direct rendering), leaving other registrants (NPCs)
+       * instanced. For a clean instanced-vs-direct A/B on the enemy roster
+       * alone — reset() would also drop the villagers and confound the delta.
+       */
+      setEnemiesDirect: (enemies: Enemy[]) => {
+        const inst = NpcInstancer.for(engine);
+        for (const e of enemies) {
+          inst.unregister(e);
+          e.renderRoot?.traverse((o) => {
+            if ((o as { isMesh?: boolean }).isMesh) (o as { visible: boolean }).visible = true;
+          });
+        }
+      },
+      /** Test seam: bucket/instance diagnostics. */
+      enemyInstancerStats: () => NpcInstancer.for(engine).stats(),
     };
   }
   document.body.dataset.genre = spec.meta.genre;

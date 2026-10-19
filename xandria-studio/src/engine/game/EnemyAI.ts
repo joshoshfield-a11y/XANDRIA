@@ -10,12 +10,26 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import type { Engine } from '../Engine';
 import { GROUP, toV3 } from '../core/Physics';
-import { makeHumanoid, makeDrone, makeTurret, disposeOwned, type CharacterRig } from '../gfx/Characters';
+import { makeHumanoid, makeDrone, makeTurret, disposeOwned, disposeOwnedMaterials, type CharacterRig } from '../gfx/Characters';
+import { NpcInstancer } from './npcInstancing';
+import { NpcRigCache, type NpcAdopted } from './npcRigSharing';
 import { resolveSkinDef, applySkin, skinOptionsForSpec } from '../gfx/Skins';
+// ENEMIES WAVE B: hostile visual read — ember visor slits + spiked dark
+// armor over the kind tints below. Silhouette families (walker/brute =
+// makeHumanoid, drone/flyer = makeDrone, turret = makeTurret), behavior,
+// stats, aggro, and boss mechanics are untouched.
+import { applyEnemyArmor } from '../gfx/VoxelArmor';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { EnemySpec, EnemyKind } from '@spec';
 import type { Projectiles } from './Projectiles';
-import { Rng } from '../core/Rng';
+import type { MapLocalEntitySystem } from '../world/MapEntities';
+import { Rng, hashString } from '../core/Rng';
+
+/**
+ * Salt for the enemy roster stream — keeps it off the NPC stream and the
+ * engine.rng stream. Same mapSeed -> identical roster. ('ENEM')
+ */
+export const ENEMY_SALT = 0x454e454d;
 
 export interface EnemyEvents {
   onPlayerHit?: (damage: number, from: THREE.Vector3) => void;
@@ -24,9 +38,15 @@ export interface EnemyEvents {
   onPhase?: (e: Enemy, phase: number) => void;
 }
 
+/**
+ * ENEMIES WAVE B: kind tints are dark under-suits now — the hostile read
+ * comes from the ember visor + spiked enemy armor applied below, not from
+ * shirt colors (the old red/purple tints read villager-ish next to the
+ * forged rig). Accent doubles as the forged headgear's glow accent.
+ */
 const ENEMY_COLORS: Record<string, { shirt: string; pants: string; accent: string }> = {
-  walker: { shirt: '#7a2e2e', pants: '#2e2a26', accent: '#ff5533' },
-  brute: { shirt: '#4a2e5e', pants: '#241f28', accent: '#c97aff' },
+  walker: { shirt: '#2a1210', pants: '#1a1310', accent: '#ff2a00' },
+  brute: { shirt: '#1c1c20', pants: '#141214', accent: '#ff1a00' },
 };
 
 export class Enemy {
@@ -59,6 +79,28 @@ export class Enemy {
   private readonly kind: EnemyKind;
   /** group scale applied to the procedural rig (re-applied after an import-model swap) */
   private rigScale = 1;
+  /**
+   * ENEMIES WAVE C: geometry sharing. Adopted content-hash geometry
+   * signatures from the per-engine rig cache (geometries ONLY — materials
+   * stay per-instance so rig.flash() on the direct-render path can never
+   * cross-flash another enemy). Released in dispose()/swapToModel.
+   */
+  private adopted: NpcAdopted | null = null;
+  /**
+   * ENEMIES WAVE C: set by EnemyManager.spawnOne to the manager's
+   * per-engine instancer. damage() routes the hit-flash pulse through it
+   * (per-instance tint, never a shared-material mutation); null on the
+   * direct-render path (standalone enemies, blueprint initial builds).
+   */
+  instancer: NpcInstancer | null = null;
+
+  /**
+   * ENEMIES WAVE C: the instancible render root — rig group for
+   * walker/brute/drone/flyer, the turret assembly for turrets.
+   */
+  get renderRoot(): THREE.Group | null {
+    return this.rig?.group ?? this.turret?.group ?? null;
+  }
 
   constructor(
     private engine: Engine,
@@ -88,11 +130,28 @@ export class Enemy {
       this.body = engine.physics.capsule(0.42 * bulk, 1.7 * bulk, [spawn.x, spawn.y + 1.4 * bulk, spawn.z], {
         mass: 70 * bulk,
         group: GROUP.ENEMY,
-        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.ENEMY | GROUP.PROJECTILE,
+        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.ENEMY | GROUP.PROJECTILE | GROUP.NPC,
       });
-      this.rig = makeHumanoid(engine.mats, { ...(tint ?? ENEMY_COLORS[buildKind]), skin: '#8f8a80', bulk }, seed, engine.spec.custom?.forge);
+      // Enemies wave C: geometry look quantization (mirrors Npc.ts
+      // workstream B). The armor-set pick stays per-enemy-seeded so the
+      // roster keeps both sets, but the RIG seed derives ONLY from (kind,
+      // armor set) — one canonical body geometry per look for the whole
+      // roster — so NpcRigCache shares it and the instancer collapses
+      // per-enemy draws into the NPC-like range. Per-enemy identity rides
+      // on palette tints (per-instance) and behavior (this.rng, still the
+      // per-enemy seed); the constructor rng draw order is untouched.
+      const armorRng = new Rng((seed ^ 0xe9b1) >>> 0);
+      const armorSet = buildKind === 'brute' ? 'brutehide'
+        : armorRng.pick(['marauder', 'bloodreaver'] as const);
+      const rigSeed = hashString(`enemy:${buildKind}:${armorSet}`);
+      this.rig = makeHumanoid(engine.mats, { ...(tint ?? ENEMY_COLORS[buildKind]), skin: '#8f8a80', bulk }, rigSeed, engine.spec.custom?.forge);
       if (sz !== 1) this.rig.group.scale.setScalar(sz);
       this.rigScale = sz !== 1 ? sz : 1;
+      // ENEMIES WAVE B: hostile visual read — ember visor slits, spiked dark
+      // armor over the under-suit tints above. An explicit spec skin applied
+      // below still wins (applySkin strips skin-origin armor for skins
+      // without armor).
+      applyEnemyArmor(this.rig, armorSet, { origin: 'skin' });
       // DE — character customization: explicit spec skin wins over kind colors;
       // an import-model URL swaps the rig async (procedural fallback always).
       const slot = engine.spec.custom?.characters?.enemies?.[spec.kind]
@@ -105,25 +164,36 @@ export class Enemy {
       this.body = engine.physics.sphere(0.5 * sz, [spawn.x, spawn.y + 2.5, spawn.z], {
         mass: 8,
         group: GROUP.ENEMY,
-        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE,
+        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE | GROUP.NPC,
         material: engine.physics.slipperyMat,
       });
       this.body.linearDamping = 0.85;
-      this.rig = makeDrone(engine.mats, buildKind === 'flyer' ? '#8a4a2e' : '#5e2e2e', mods?.glow ?? '#ff4444', seed);
+      // ENEMIES WAVE B: dark rust hull + ember-red eye (the drone/flyer
+      // ember-glow treatment — silhouettes unchanged).
+      // ENEMIES WAVE C: same look quantization as walkers — one canonical
+      // drone/flyer geometry per kind (forgeDronePlan is seeded).
+      this.rig = makeDrone(engine.mats, buildKind === 'flyer' ? '#4a2e1c' : '#402020', mods?.glow ?? '#ff2a00', hashString(`enemy:${buildKind}`));
       if (sz !== 1) this.rig.group.scale.setScalar(sz);
       engine.scene.add(this.rig.group);
     } else if (buildKind === 'turret') {
       this.body = engine.physics.cylinder(0.65, 0.8, 1.4, [spawn.x, spawn.y + 0.7, spawn.z], {
         group: GROUP.ENEMY,
-        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE,
+        mask: GROUP.WORLD | GROUP.PLAYER | GROUP.PROJECTILE | GROUP.NPC,
       });
-      this.turret = makeTurret(engine.mats);
+      this.turret = makeTurret(engine.mats, '#232326', '#ff2200'); // ENEMIES WAVE B: charcoal hull + ember eye
       if (sz !== 1) this.turret.group.scale.setScalar(sz);
       this.turret.group.position.set(spawn.x, spawn.y, spawn.z);
       engine.scene.add(this.turret.group);
     }
     const glowRoot = this.rig?.group ?? this.turret?.group;
     if (mods?.glow && glowRoot) this.applyGlow(mods.glow, glowRoot);
+    // ENEMIES WAVE C: content-hash geometry sharing across the roster
+    // (geometries only — see the `adopted` field doc). Must run after the
+    // rig is fully built (armor applied above); the instancer buckets key
+    // off shared geometry identity, which is what collapses per-enemy
+    // draw calls into the instanced range.
+    const shareRoot = this.rig?.group ?? this.turret?.group;
+    if (shareRoot) this.adopted = NpcRigCache.for(engine).share(shareRoot, { geometriesOnly: true });
   }
 
   /**
@@ -139,9 +209,15 @@ export class Enemy {
     if (skinDef) applySkin(rig, skinDef, skinOptionsForSpec(this.engine.spec));
     if (this.rigScale !== 1) rig.group.scale.setScalar(this.rigScale);
     const old = this.rig;
+    // ENEMIES WAVE C: the old rig's geometries may be cache-shared — release
+    // adopted signatures instead of CharacterRig.dispose() (disposeOwned
+    // would kill canonicals other enemies still use). Re-register with the
+    // instancer when this enemy was on the instanced path.
+    const wasInstanced = this.instancer?.unregister(this) ?? false;
     this.engine.scene.remove(old!.group);
-    old!.dispose();
+    this.releaseRigResources(old!.group);
     this.rig = rig;
+    if (wasInstanced) this.instancer!.registerEnemy(this);
     this.engine.scene.add(rig.group);
   }
 
@@ -192,6 +268,13 @@ export class Enemy {
     if (!this.alive) return;
     this.health -= amount;
     this.rig?.flash();
+    // ENEMIES WAVE C: the instanced hit pulse. rig.flash() mutates the
+    // enemy's OWN owned materials on the hidden source meshes (invisible
+    // but harmless on the instanced path; the visible feedback on the
+    // direct-render path). The visible feedback on the instanced path is
+    // the per-instance tint pulse below — shared canonical materials are
+    // never mutated. Null on the direct-render path (no-op).
+    this.instancer?.flash(this);
     // polish wave: every combat hit reads — sparks + smoke + small shake
     this.engine.juice.combatHit(this.position, 0.9);
     if (this.turret) {
@@ -277,8 +360,10 @@ export class Enemy {
 
   /**
    * FIX: full lifecycle — remove the body from physics, detach the rig from the
-   * scene, and dispose per-instance GPU resources (geometries + owned materials).
-   * Shared MaterialLibrary-cached materials are never disposed. Idempotent.
+   * scene, and dispose per-instance GPU resources. Geometries adopted from the
+   * rig cache are released (ref-counted; zero-ref entries self-dispose) and
+   * per-instance owned materials are disposed — shared MaterialLibrary-cached
+   * materials are never disposed. Idempotent.
    */
   dispose() {
     if (this.body) {
@@ -288,10 +373,28 @@ export class Enemy {
     const root = this.rig?.group ?? this.turret?.group;
     if (root) {
       this.engine.scene.remove(root);
-      disposeOwned(root);
+      this.releaseRigResources(root);
     }
     this.rig = null;
     this.turret = null;
+  }
+
+  /**
+   * ENEMIES WAVE C: release one rig group's GPU resources. When geometries
+   * were cache-shared (the normal path), adopted signatures are released
+   * (the cache owns the canonicals) and only per-instance owned materials
+   * are disposed — disposeOwned would kill canonical geometries other
+   * enemies still render. Falls back to disposeOwned when share() failed.
+   * Idempotent.
+   */
+  private releaseRigResources(root: THREE.Group) {
+    if (this.adopted) {
+      NpcRigCache.for(this.engine).release(this.adopted);
+      this.adopted = null;
+      disposeOwnedMaterials(root);
+    } else {
+      disposeOwned(root);
+    }
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
@@ -391,31 +494,142 @@ export class Enemy {
   }
 }
 
+/** Point of interest: landmark/structure anchor for enemy placement. */
+export interface EnemyPoi {
+  x: number;
+  z: number;
+  /** footprint radius to stay outside of (default 0) */
+  r?: number;
+}
+
+export interface EnemyManagerOpts {
+  /** POIs to ring the roster around (blueprint passes landmarks.placed) */
+  pois?: Array<THREE.Vector3 | EnemyPoi>;
+  /** roster specs, cycled (default: engine.spec.enemies) */
+  specs?: EnemySpec[];
+  /** 0..1+ scales the spec counts (default 1) */
+  density?: number;
+  /**
+   * Replay hook fired per enemy spawned via spawnForMap, in spawn order.
+   * Blueprints use it to re-apply per-enemy decoration (e.g. variant
+   * registration) so portal arrivals get the same treatment as the
+   * initial build.
+   */
+  onSpawned?: (e: Enemy, index: number) => void;
+}
+
 /** Spawns and manages the full enemy roster from spec. */
-export class EnemyManager {
+export class EnemyManager implements MapLocalEntitySystem {
+  /** MapLocalEntitySystem id — the blueprint registers this with engine.portalEntities. */
+  readonly id = 'enemies';
   enemies: Enemy[] = [];
   killed = 0;
+  private readonly opts: EnemyManagerOpts;
+  /**
+   * ENEMIES WAVE C: the manager owns the per-engine instancer (same
+   * singleton NpcManager uses — buckets are shared across NPCs and
+   * enemies). registerEnemy on spawnForMap, beginFrame/submit/endFrame in
+   * update, reset first in despawnAll, unregister on the corpse sweep.
+   */
+  private readonly instancer: NpcInstancer;
 
   constructor(
     private engine: Engine,
     private projectiles: Projectiles | null,
     private events: EnemyEvents & { onDeath?: (e: Enemy) => void },
-  ) {}
+    opts: EnemyManagerOpts = {},
+  ) {
+    this.opts = opts;
+    this.instancer = NpcInstancer.for(engine);
+  }
+
+  /**
+   * Single-enemy spawn shared by spawnAll (blueprint initial build / waves)
+   * and spawnForMap (portal arrivals). Wiring is identical on both paths.
+   */
+  spawnOne(spec: EnemySpec, pos: THREE.Vector3, seed: number): Enemy {
+    const e = new Enemy(this.engine, spec, pos, this.projectiles, {
+      onPlayerHit: this.events.onPlayerHit,
+      // ANIMATION wave: the kill is counted at death; the roster entry is
+      // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
+      // so waves can't accumulate corpses forever
+      onDeath: (en) => { this.killed++; this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
+    }, seed);
+    // ENEMIES WAVE C: every manager-spawned enemy can route its hit-flash
+    // through the instancer; flash() no-ops for unregistered enemies, so
+    // the direct-render initial-build path is unaffected.
+    e.instancer = this.instancer;
+    this.enemies.push(e);
+    return e;
+  }
 
   spawnAll(specs: EnemySpec[], spawnFor: (kind: string, i: number, n: number) => THREE.Vector3) {
     for (const spec of specs) {
       for (let i = 0; i < spec.count; i++) {
-        const pos = spawnFor(spec.kind, i, spec.count);
-        const e = new Enemy(this.engine, spec, pos, this.projectiles, {
-          onPlayerHit: this.events.onPlayerHit,
-          // ANIMATION wave: the kill is counted at death; the roster entry is
-          // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
-          // so waves can't accumulate corpses forever
-          onDeath: (en) => { this.killed++; this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
-        }, this.engine.spec.meta.seed ^ (this.enemies.length * 7919));
-        this.enemies.push(e);
+        this.spawnOne(spec, spawnFor(spec.kind, i, spec.count),
+          this.engine.spec.meta.seed ^ (this.enemies.length * 7919));
       }
     }
+  }
+
+  /**
+   * MapLocalEntitySystem arrival path: spawn this map's deterministic roster
+   * from mapSeed ALONE — `new Rng(mapSeed ^ ENEMY_SALT)` only; never
+   * engine.rng (it advances across transitions), never Math.random/Date.now.
+   * Same mapSeed -> identical roster (kinds + positions).
+   * Idempotent: despawns any live roster first (an aborted transition can
+   * never double-spawn).
+   */
+  spawnForMap(mapSeed: number): void {
+    this.despawnAll();
+    const rng = new Rng((mapSeed ^ ENEMY_SALT) >>> 0);
+    const specs = this.opts.specs ?? this.engine.spec.enemies ?? [];
+    const density = this.opts.density ?? 1;
+    const raw = this.opts.pois?.length ? this.opts.pois : [{ x: 0, z: 0, r: 0 }];
+    const pois = raw.map((p) => p instanceof THREE.Vector3
+      ? { x: p.x, z: p.z, r: 0 }
+      : { x: p.x, z: p.z, r: p.r ?? 0 });
+    let index = 0;
+    for (const spec of specs) {
+      const count = Math.max(0, Math.round((spec.count ?? 1) * density));
+      for (let i = 0; i < count; i++) {
+        // NPC-wave pattern: ring each enemy around a POI anchor, outside the
+        // landmark footprint, grounded via terrain.heightAt.
+        const poi = rng.pick(pois);
+        const a = rng.range(0, Math.PI * 2);
+        const d = poi.r + 6 + rng.range(0, 10);
+        const x = poi.x + Math.cos(a) * d;
+        const z = poi.z + Math.sin(a) * d;
+        const y = (this.engine.terrain ? (this.engine.terrain.heightAt(x, z) ?? 0) : 0) + 1;
+        const seed = (mapSeed ^ Math.imul(index + 1, 0x9e3779b9)) >>> 0;
+        const e = this.spawnOne(spec, new THREE.Vector3(x, y, z), seed);
+        // ENEMIES WAVE C: portal-path enemies render instanced — one
+        // InstancedMesh per (geometry, material-role) bucket across the
+        // whole roster (shared with NPC buckets where roles match).
+        this.instancer.registerEnemy(e);
+        this.opts.onSpawned?.(e, index);
+        index++;
+      }
+    }
+  }
+
+  /**
+   * MapLocalEntitySystem departure path: dispose EVERY live enemy — live
+   * combatants AND mid-tumble corpses (their sim bodies are already gone;
+   * dispose() frees the rig group + GPU resources). Idempotent: calling it
+   * twice in a row is a no-op, never an error.
+   *
+   * ENEMIES WAVE C: unregister per-entity from the shared instancer (NOT
+   * reset() — the NPC manager shares this per-engine singleton, and
+   * spawnForMap self-cleans via despawnAll; a global reset here would
+   * drop the villagers' instancing on every enemy spawn).
+   */
+  despawnAll(): void {
+    for (const e of this.enemies) {
+      try { this.instancer.unregister(e); } catch { /* portal departures must never strand the rest */ }
+      try { e.dispose(); } catch { /* portal departures must never strand the rest */ }
+    }
+    this.enemies = [];
   }
 
   /** Remove a dead enemy from the roster (scene/physics/GPU already freed — at die() for
@@ -439,9 +653,23 @@ export class EnemyManager {
   }
 
   update(dt: number, playerPos: THREE.Vector3, t: number) {
+    // ENEMIES WAVE C: the blueprint drives the shared instancer frame
+    // (beginFrame/endFrame) around the manager updates — NpcManager and
+    // EnemyManager submit into the same per-engine buckets, so a single
+    // begin/end per update keeps both rosters' counts accumulating
+    // instead of the second beginFrame zeroing the first manager's
+    // submits. This only submits each enemy's posed rig here.
+    // Unregistered enemies (blueprint initial-build path) submit as no-ops.
     // iterate a copy: the roster can change mid-loop (custom kinds, death)
-    for (const e of [...this.enemies]) e.update(dt, playerPos, t);
-    // sweep finished corpses: their death tumble ran, scene + GPU freed
-    for (const e of this.enemies.filter((en) => en.corpseDone)) this.removeEnemy(e);
+    for (const e of [...this.enemies]) {
+      e.update(dt, playerPos, t);
+      this.instancer.submit(e);
+    }
+    // sweep finished corpses: their death tumble ran, scene + GPU freed.
+    // Unregister first so no stale parts linger in the buckets.
+    for (const e of this.enemies.filter((en) => en.corpseDone)) {
+      this.instancer.unregister(e);
+      this.removeEnemy(e);
+    }
   }
 }

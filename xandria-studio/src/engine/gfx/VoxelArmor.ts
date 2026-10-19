@@ -91,6 +91,17 @@ export interface VoxelArmorCtx {
     x: number, y: number, z: number, mat?: THREE.Material,
     rx?: number, rz?: number,
   ) => THREE.Mesh | null;
+  /**
+   * ENEMIES WAVE B (additive): add a cone spike to a pivot; rx/rz rotate the
+   * mesh (cones point +Y by default). Same tagging semantics as box, same
+   * null-on-missing-pivot contract. Villager sets don't use it — their
+   * builds are untouched.
+   */
+  cone: (
+    pivot: VoxelArmorPivot, r: number, h: number,
+    x: number, y: number, z: number, mat?: THREE.Material,
+    rx?: number, rz?: number,
+  ) => THREE.Mesh | null;
 }
 
 export interface Box { cx: number; cy: number; cz: number; sx: number; sy: number; sz: number }
@@ -257,6 +268,29 @@ function buildCtx(
         const parent = pivotFor(rig, pivot);
         if (!parent || !(w > 0 && h > 0 && d > 0)) return null;
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+        mesh.position.set(x, y, z);
+        if (rx) mesh.rotation.x = rx;
+        if (rz) mesh.rotation.z = rz;
+        mesh.castShadow = true;
+        mesh.userData.armorPiece = true;
+        mesh.userData.armorSet = set.id;
+        mesh.userData.armorOrigin = origin;
+        mesh.userData.armorSlot = ctx.pieceSlot ?? slot ?? armorSlotFor(pivot);
+        parent.add(mesh);
+        return mesh;
+      } catch {
+        return null;
+      }
+    },
+    // ENEMIES WAVE B: cone spikes reuse the exact box tagging contract
+    // (armorPiece/armorSet/armorOrigin/armorSlot) so clearVoxelArmor,
+    // the instancing bucket scans, and armor census tests treat them
+    // like any other armor piece.
+    cone: (pivot, r, h, x, y, z, mat = trim, rx = 0, rz = 0) => {
+      try {
+        const parent = pivotFor(rig, pivot);
+        if (!parent || !(r > 0 && h > 0)) return null;
+        const mesh = new THREE.Mesh(new THREE.ConeGeometry(r, h, 5), mat);
         mesh.position.set(x, y, z);
         if (rx) mesh.rotation.x = rx;
         if (rz) mesh.rotation.z = rz;
@@ -775,4 +809,140 @@ export function clearVoxelArmor(rig: CharacterRig, slot?: VoxelArmorSlot, origin
     }
     for (const mat of mats) mat.dispose();
   } catch { /* clearing armor never throws */ }
+}
+
+// ---------------------------------------------------------------------------
+// ENEMIES WAVE B — hostile armor sets
+// ---------------------------------------------------------------------------
+/**
+ * Enemy armor sets: the hostile visual read for the enemies wave. They ride
+ * the SAME VoxelArmor pipeline as the five villager sets (buildCtx, the
+ * shared piece builders, the six-pivot CharacterRig contract) but live in a
+ * SEPARATE registry — deliberately not in VOXEL_ARMOR_SETS and not in
+ * VOXEL_ARMOR_SET_IDS:
+ *  - pickVoxelArmorSetId's golden seeded picks (armor-sets.test.ts) must not
+ *    change, and villagers/players must never roll hostile sets;
+ *  - artdir-voxel.test.ts asserts VOXEL_ARMOR_SETS keys === VOXEL_ARMOR_SET_IDS;
+ *  - spec validation keeps enemy sets unselectable in player/villager specs.
+ *
+ * Hostility language (never villager): ember-red emissive visor slits
+ * (see isEmberHex — red-dominant, low green/blue; villagers are amber/
+ * orange/cream/green/cyan), spiked pauldrons + jagged back-spikes (cone
+ * geometry — a silhouette read, not just a tint), and darker palettes
+ * (dried-blood reds, charcoal, rust) that never share a hex with the
+ * villager armor/cloth palettes.
+ *
+ * Deterministic: pure functions of rig geometry — no RNG in the builders.
+ * applyEnemyArmor mirrors applyVoxelArmor (clear-then-build, never throws).
+ */
+
+/** Ember-family hex predicate: red-dominant, low green/blue — never amber/orange/cream. */
+export function isEmberHex(hex: string): boolean {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
+  if (!m) return false;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return r > 180 && g < r * 0.45 && b < r * 0.3;
+}
+
+/** Built-in enemy armor set ids (separate registry — see above). */
+export const ENEMY_ARMOR_SET_IDS = ['marauder', 'bloodreaver', 'brutehide'] as const;
+export type EnemyArmorSetId = (typeof ENEMY_ARMOR_SET_IDS)[number];
+
+const ENEMY_ARMOR_SETS: Record<string, VoxelArmorSetDef> = {};
+
+export function resolveEnemyArmorSet(id: string | undefined): VoxelArmorSetDef | undefined {
+  if (!id) return undefined;
+  return ENEMY_ARMOR_SETS[id];
+}
+
+/**
+ * Spiked pauldrons: layered shoulder boxes rimmed with three jagged cone
+ * spikes along the outer rim, tips leaning outward. The silhouette read
+ * that says "hostile" before the color does.
+ */
+function spikedPauldrons(ctx: VoxelArmorCtx, opts: { big?: boolean } = {}) {
+  const k = opts.big ? 2.9 : 2.4;
+  for (const [pivot, side] of [['armL', 1], ['armR', -1]] as const) {
+    const m = ctx.measure(pivot, 'shallow');
+    if (!m) continue;
+    const w = m.sx * k, d = m.sz * k;
+    const y = m.cy + 0.08;
+    ctx.box(pivot, w, 0.24, d, side * 0.02, y, m.cz, ctx.shell);
+    ctx.box(pivot, w * 0.6, 0.07, d * 0.6, side * 0.02, y + 0.15, m.cz, ctx.trim);
+    const heights = [0.36, 0.46, 0.32];
+    for (let i = 0; i < 3; i++) {
+      const t = i / 2; // 0 = inner … 1 = outer
+      const h = heights[i];
+      ctx.cone(pivot, 0.075, h,
+        side * (w * (0.14 + 0.34 * t)), y + 0.24 + h * 0.32, m.cz,
+        ctx.trim, 0, -side * (0.25 + 0.35 * t));
+    }
+  }
+}
+
+/** Jagged back-spikes down the torso (brute) — reads at silhouette distance. */
+function spineSpikes(ctx: VoxelArmorCtx) {
+  const m = ctx.measure('torso', 'self');
+  if (!m) return;
+  const heights = [0.42, 0.54, 0.4];
+  for (let i = 0; i < 3; i++) {
+    ctx.cone('torso', 0.095, heights[i],
+      0, m.cy + m.sy * 0.38 - i * 0.28, m.cz - m.sz * 0.62,
+      ctx.dark, -0.35);
+  }
+}
+
+function defineEnemySets() {
+  const S = ENEMY_ARMOR_SETS;
+  S.marauder = {
+    id: 'marauder', name: 'Marauder Harness',
+    palette: { shell: '#4a1a12', trim: '#8a5a1e', dark: '#120b09' }, // dried blood + rust
+    visor: { color: '#ff2a00', intensity: 2.8 },
+    build(ctx) {
+      forSlot(ctx, 'head', () => helm(ctx));
+      forSlot(ctx, 'torso', () => { chestPlate(ctx); belt(ctx); });
+      forSlot(ctx, 'legs', () => greaves(ctx));
+      forSlot(ctx, 'accessory', () => { spikedPauldrons(ctx); vambraces(ctx); });
+    },
+  };
+  S.bloodreaver = {
+    id: 'bloodreaver', name: 'Bloodreaver Mail',
+    palette: { shell: '#5e1410', trim: '#3a3a40', dark: '#100c0c' }, // blood red + ash
+    visor: { color: '#ff1a00', intensity: 2.8 },
+    build(ctx) {
+      forSlot(ctx, 'head', () => helm(ctx, { ridge: true }));
+      forSlot(ctx, 'torso', () => { chestPlate(ctx, { emblem: true }); belt(ctx); tabard(ctx); });
+      forSlot(ctx, 'legs', () => greaves(ctx));
+      forSlot(ctx, 'accessory', () => { spikedPauldrons(ctx, { big: true }); vambraces(ctx); });
+    },
+  };
+  S.brutehide = {
+    id: 'brutehide', name: 'Brutehide Plates',
+    palette: { shell: '#222226', trim: '#7a3a12', dark: '#0c0c0e' }, // charcoal + rust
+    visor: { color: '#ff2200', intensity: 3.0 },
+    build(ctx) {
+      forSlot(ctx, 'head', () => helm(ctx));
+      forSlot(ctx, 'torso', () => { chestPlate(ctx, { emblem: true }); belt(ctx); spineSpikes(ctx); });
+      forSlot(ctx, 'legs', () => greaves(ctx));
+      forSlot(ctx, 'accessory', () => { spikedPauldrons(ctx, { big: true }); vambraces(ctx); });
+    },
+  };
+}
+defineEnemySets();
+
+/**
+ * Apply an enemy armor set to a rig (replaces any same-origin armor already
+ * on it). Mirrors applyVoxelArmor exactly, resolving from the enemy
+ * registry instead of the villager one. Never throws; unknown set ids and
+ * missing pivots are silent no-ops.
+ */
+export function applyEnemyArmor(rig: CharacterRig, setId: string, opts: ApplyVoxelArmorOpts = {}): void {
+  try {
+    const set = resolveEnemyArmorSet(setId);
+    if (!rig || !set) return;
+    clearVoxelArmor(rig, undefined, opts.origin ?? 'skin');
+    rig.group.updateMatrixWorld(true);
+    set.build(buildCtx(rig, set, opts, null));
+  } catch { /* armor is decorative — never break the sim */ }
 }

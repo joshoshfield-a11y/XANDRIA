@@ -41,6 +41,17 @@ import { Npc, spawnNpcsForMap } from '../src/engine/game/Npc';
 import { NpcManager } from '../src/engine/game/NpcManager';
 import { NpcInstancer } from '../src/engine/game/npcInstancing';
 
+/**
+ * Enemies wave C: the blueprint drives the shared instancer frame, so
+ * tests ticking a manager directly must open/close the frame themselves.
+ */
+function tickNpcManager(m: NpcManager, engine: Engine, dt = 0.016): void {
+  const inst = NpcInstancer.for(engine);
+  inst.beginFrame(dt);
+  m.update(dt);
+  inst.endFrame();
+}
+
 beforeEach(() => {
   (globalThis as any).document = { createElement: (t: string) => makeEl(t), head: makeEl('head'), addEventListener() {}, removeEventListener() {} };
   (globalThis as any).localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
@@ -248,7 +259,7 @@ describe('NpcManager instancing integration', () => {
     const m = new NpcManager(engine, { pois: POIS, density: 1 });
     m.spawnForMap(20261012);
     expect(m.npcs.length).toBeGreaterThan(0);
-    m.update(0.016);
+    tickNpcManager(m, engine);
     const ims = instancedMeshes(engine);
     expect(ims.length).toBe(baseInst + NpcInstancer.for(engine).bucketCount);
     // roster draws no direct meshes anymore
@@ -270,11 +281,11 @@ describe('NpcManager instancing integration', () => {
     const baseInst = instancedMeshes(engine).length;
     const m = new NpcManager(engine, { pois: POIS, density: 1 });
     m.spawnForMap(20261012);
-    m.update(0.016);
+    tickNpcManager(m, engine);
     const buckets1 = NpcInstancer.for(engine).bucketCount;
     m.despawnAll();
     m.spawnForMap(20261012);
-    m.update(0.016);
+    tickNpcManager(m, engine);
     expect(NpcInstancer.for(engine).bucketCount).toBe(buckets1);
     expect(instancedMeshes(engine).length).toBe(baseInst + buckets1);
     m.despawnAll();
