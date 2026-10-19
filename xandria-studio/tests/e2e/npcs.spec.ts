@@ -69,8 +69,13 @@ test('npcs: spawn, prompt, dialogue stub, zero errors, desktop + mobile', async 
   });
   expect(roster).toHaveLength(4);
 
-  const registrySize = (): Promise<number> => page.evaluate(() =>
-    (window as unknown as { __XANDRIA__?: any }).__XANDRIA__.engine.npcInteractions.size);
+  const registrySize = (): Promise<number> => page.evaluate(() => {
+    const X = (window as unknown as { __XANDRIA__?: any }).__XANDRIA__;
+    // count only NPC interactables; the crafting wave also registers
+    // gathering nodes (type 'node') and stations (type 'station')
+    const V = X.engine.camera.position.constructor;
+    return X.engine.npcInteractions.near(new V(0, 0, 0), 1e9).filter((i: any) => i.type === 'npc').length;
+  });
   expect(await registrySize()).toBe(4);
 
   /** teleport the avatar to 2m from NPC i (inside the 3m prompt

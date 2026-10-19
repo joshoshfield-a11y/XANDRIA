@@ -27,6 +27,7 @@ const { makeEl, FakeWebGLRenderer } = vi.hoisted(() => {
       tag,
       children: [] as any[],
       style: {} as Record<string, string>,
+      dataset: {} as Record<string, string>,
       classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
       textContent: '',
       className: '',

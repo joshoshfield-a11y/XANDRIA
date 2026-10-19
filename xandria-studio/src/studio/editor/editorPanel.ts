@@ -522,6 +522,34 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'S25-tier enemy multiplier (desktop ignores this). 50% = half the desktop roster on the mobile profile.',
     ));
 
+    // Crafting wave (workstream C): master crafting toggle + gathering
+    // density. The toggle is the schema's custom.crafting.enabled (default
+    // true); off skips node spawn, station placement and the recipe UI.
+    // The slider writes custom.crafting.gathering.density (0..100, default
+    // 100); read at spawn time by resolveGatheringDensity
+    // (engine/game/crafting) and wired into GatheringManagerOpts.density by
+    // the blueprints — same portal-arrival-only semantics as enemy density.
+    host.appendChild(h(`<div class="xed-ns">CRAFTING</div>`));
+    host.appendChild(field(
+      'CRAFTING — ENABLED',
+      checkbox('Crafting system', s.custom?.crafting?.enabled ?? true, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.crafting = sp.custom.crafting ?? {};
+        sp.custom.crafting.enabled = v;
+      }, true),
+      'Off = no gathering nodes, no crafting stations, no recipe UI; craft() fails closed. Applies on the next Play.',
+    ));
+    host.appendChild(field(
+      'GATHERING DENSITY',
+      slider(s.custom?.crafting?.gathering?.density ?? 100, 0, 100, 5, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.crafting = sp.custom.crafting ?? {};
+        sp.custom.crafting.gathering = sp.custom.crafting.gathering ?? {};
+        sp.custom.crafting.gathering.density = Math.round(v);
+      }, (v) => `${Math.round(v)}%`),
+      'Gathering node count = 18 × density. 0 = no nodes. Spawns are map-seeded: the first N of the roster are identical at any density.',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;

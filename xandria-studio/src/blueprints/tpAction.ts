@@ -44,6 +44,10 @@ import {
 } from './fx';
 import { ChapterDresser } from './dressing';
 import { NpcManager } from '../engine/game/NpcManager';
+import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
+import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
+import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
+import { resolveGatheringDensity } from '../engine/game/crafting';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
@@ -172,7 +176,54 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
+  // crafting wave (workstream C): register the crafting item defs (materials
+  // + recipe outputs) before wireItems, when the spec has crafting enabled
+  // (default true). Idempotent; Studio-authored defs win (no-overwrite).
+  const craftingEnabled = resolveCraftingEnabled(spec);
+  if (craftingEnabled) ensureCraftingItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
+  // crafting wave (workstream B): harvestable gathering nodes (ore veins,
+  // fiber plants, salvage caches), map-local lifecycle. The manager
+  // registers itself with engine.portalEntities ({ id: 'gathering' }) so
+  // portal transitions despawn/respawn the node roster deterministically
+  // per map seed. Depleted state is NOT persisted across portals (design —
+  // arrival regenerates the identical roster, like NPCs/enemies).
+  const gathering = new GatheringManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    inventory: itemKit?.inventory ?? null,
+    // crafting wave (A): Studio GATHERING DENSITY slider (spec.custom.crafting)
+    // scales the roster on the portal-arrival path — same as the enemy density.
+    density: resolveGatheringDensity(spec),
+  });
+  engine.portalEntities.register(gathering);
+  // crafting wave (C): the gathering roster only spawns when crafting is
+  // enabled (schema: enabled=false skips node spawn, station placement and
+  // the recipe UI; the manager stays registered so the seam is uniform).
+  if (craftingEnabled) gathering.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  // crafting wave (workstream C): world-placeable crafting stations
+  // (workbench/anvil/forge/alchemy), map-local lifecycle. Registers with
+  // engine.portalEntities ({ id: 'stations' }) so portal transitions
+  // despawn/respawn the roster deterministically per map seed — the same
+  // contract as the gathering nodes. The station session owns the [E] Use
+  // prompt + the crafting panel; the gathering session defers to the open
+  // panel so [E] cannot harvest behind it.
+  const stations = new StationManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+  });
+  engine.portalEntities.register(stations);
+  if (craftingEnabled) stations.spawnForMap(spec.meta.seed);
+  const stationSession = craftingEnabled
+    ? new CraftingInteractionSession(engine, stations, {
+        recipes: () => buildRecipePool(spec),
+        defs: () => spec.custom?.items?.defs ?? {},
+        inventory: () => itemKit?.inventory ?? null,
+        playerLevel: () => prog.level,
+        toast: (m) => engine.hud.toast(m),
+      })
+    : null;
+  const gatheringSession = new GatheringInteractionSession(engine, gathering, {
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+  });
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -307,6 +358,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
     itemKit?.update(dt);
+    gatheringSession.update(dt); // crafting wave (B): [E] Harvest prompt + registration refresh
+    stationSession?.update(dt); // crafting wave (C): [E] Use prompt + crafting panel
 
     // attack input (melee damage scales with the damage upgrade multiplier)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
@@ -333,6 +386,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     inst.beginFrame(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
+    gathering.update(dt); // crafting wave (B): static node submits into the shared instancer frame
+    stations.update(dt); // crafting wave (C): static station submits into the shared instancer frame
     inst.endFrame();
     variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
@@ -382,5 +437,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, npcs: npcManager, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
+  return { avatar, enemies, npcs: npcManager, gathering, stations, stationSession, gatheringSession, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

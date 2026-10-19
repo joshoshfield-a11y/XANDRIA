@@ -7,6 +7,7 @@
  * Exposes window.__XANDRIA__ for automation/playtests.
  */
 import { normalizeSpec, validateSpec, type GameSpec } from '@spec';
+import type { Group } from 'three';
 import { Engine } from '../engine/Engine';
 import { BLUEPRINTS } from '../blueprints/index';
 import { generateSpec } from '../generator/generate';
@@ -28,6 +29,25 @@ import { NpcInstancer } from '../engine/game/npcInstancing';
 import type { Npc } from '../engine/game/Npc';
 import { EnemyManager, ENEMY_SALT, type Enemy } from '../engine/game/EnemyAI';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import {
+  GatheringManager,
+  GatheringInteractionSession,
+  GATHER_SALT,
+  MATERIAL_IDS,
+} from '../engine/game/gathering';
+import {
+  StationManager,
+  CraftingInteractionSession,
+  STATION_SALT,
+  STATION_IDS,
+} from '../engine/game/stations';
+import {
+  buildRecipePool,
+  checkCraft,
+  craft,
+  resolveCraftingEnabled,
+  ensureCraftingItemDefs,
+} from '../engine/game/crafting';
 
 declare global {
   interface Window {
@@ -254,6 +274,57 @@ function boot() {
       },
       /** Test seam: bucket/instance diagnostics. */
       enemyInstancerStats: () => NpcInstancer.for(engine).stats(),
+    };
+    // Crafting wave (workstream B): test-mode seam for the gathering e2e +
+    // perf harnesses — the manager, salts, material ids, session.
+    (window.__XANDRIA__ as Record<string, unknown>).gatheringTest = {
+      GatheringManager,
+      GatheringInteractionSession,
+      GATHER_SALT,
+      MATERIAL_IDS,
+      /** Test seam: the live gathering manager from the blueprint build (null when absent). */
+      liveManager: (): GatheringManager | null =>
+        (blueprint as { gathering?: GatheringManager }).gathering ?? null,
+      /** Test seam: the live gathering interaction session (null when UI disabled). */
+      liveSession: (): GatheringInteractionSession | null =>
+        (blueprint as { gatheringSession?: GatheringInteractionSession }).gatheringSession ?? null,
+    };
+    // Crafting wave (workstream C): test-mode seam for the stations + panel
+    // e2e and perf harnesses — the manager, session, salts, station ids,
+    // recipe/craft engine and the live blueprint handles.
+    (window.__XANDRIA__ as Record<string, unknown>).craftingTest = {
+      StationManager,
+      CraftingInteractionSession,
+      STATION_SALT,
+      STATION_IDS,
+      buildRecipePool,
+      checkCraft,
+      craft,
+      resolveCraftingEnabled,
+      ensureCraftingItemDefs,
+      /** Test seam: the live station manager from the blueprint build (null when absent). */
+      liveStations: (): StationManager | null =>
+        (blueprint as { stations?: StationManager }).stations ?? null,
+      /** Test seam: the live station session from the blueprint build (null when crafting disabled). */
+      liveSession: (): CraftingInteractionSession | null =>
+        (blueprint as { stationSession?: CraftingInteractionSession | null }).stationSession ?? null,
+      /**
+       * Test seam: submit never-ticked stations + nodes once (instances
+       * persist) — the perf harness's static layer needs no per-frame work.
+       * Must run while the engine is PAUSED: the running frame loop would
+       * otherwise zero the one-shot submits.
+       */
+      submitStaticLayer: (ents: Array<{ renderRoot: Group | null }>) => {
+        const inst = NpcInstancer.for(engine);
+        inst.beginFrame();
+        for (const e of ents) {
+          if (!inst.isRegistered(e)) inst.registerEnemy(e);
+          inst.submit(e);
+        }
+        inst.endFrame();
+      },
+      /** Test seam: bucket/instance diagnostics. */
+      craftingInstancerStats: () => NpcInstancer.for(engine).stats(),
     };
   }
   document.body.dataset.genre = spec.meta.genre;

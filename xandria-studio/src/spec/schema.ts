@@ -600,6 +600,15 @@ export interface CustomSpec {
    * EnemyManager.
    */
   enemies?: EnemyTuningCustom;
+  /**
+   * Crafting wave (workstream A): authoring controls for the crafting
+   * system. Master toggle, gathering-node density (0..100), and the seeded
+   * recipe-pool config. Config-only — never touches the seed. Read by
+   * resolveCraftingEnabled / resolveGatheringDensity / buildRecipePool
+   * (engine/game/crafting); the Studio CRAFTING toggle + GATHERING DENSITY
+   * slider write these fields (workstream C owns editorPanel.ts).
+   */
+  crafting?: CraftingCustom;
 }
 
 /**
@@ -631,6 +640,55 @@ export interface EnemyTuningCustom {
    * proportional to the tier's other tuned-down budgets.
    */
   lowTierScale?: number;
+}
+
+/**
+ * Crafting wave (workstream A): Studio-authored crafting controls. All
+ * fields optional; absent = defaults (enabled, density 100, poolSize 8).
+ */
+export interface CraftingCustom {
+  /**
+   * master crafting toggle (default true). When false, the crafting system
+   * is disabled: workstream B skips gathering-node spawn, workstream C
+   * skips station placement + recipe UI, and craft() fails closed with
+   * `crafting-disabled`. Read by resolveCraftingEnabled (engine/game/crafting).
+   */
+  enabled?: boolean;
+  /**
+   * gathering-node controls (workstream B). The Studio GATHERING DENSITY
+   * slider (0..100%) writes `density`; B resolves it per map/tier via
+   * resolveGatheringDensity (engine/game/crafting), which returns a 0..1
+   * fraction. Same as NPC/enemy density: applies on the portal-arrival
+   * (`spawnForMap`) path only — never touches the seed.
+   */
+  gathering?: GatheringTuningCustom;
+  /**
+   * seeded recipe-pool configuration. The pool itself is a pure function
+   * of (spec.meta.seed, poolSize) — buildRecipePool (engine/game/crafting)
+   * shuffles the fixed recipe catalog with Rng(seed ^ CRAFT_SALT) and
+   * takes the first poolSize entries. Same spec → identical pool.
+   */
+  recipes?: CraftingPoolCustom;
+}
+
+/** Crafting wave (workstream A): gathering-node density config. */
+export interface GatheringTuningCustom {
+  /**
+   * node spawn density 0..100 (default 100): the Studio GATHERING DENSITY
+   * slider writes this directly. 0 = no nodes, 100 = the full seeded roster.
+   */
+  density?: number;
+}
+
+/** Crafting wave (workstream A): seeded recipe-pool size config. */
+export interface CraftingPoolCustom {
+  /**
+   * how many recipes the seeded pool holds (default 8, clamped to
+   * 1..catalog length). Only the count is authored — which recipes appear
+   * is seeded, so a Studio author can regenerate variety by changing the
+   * spec seed, never by hand-picking.
+   */
+  poolSize?: number;
 }
 
 export interface GameSpec {
