@@ -76,12 +76,15 @@ describe('CharacterRig legacy contract', () => {
 describe('sub-pivot articulation', () => {
   it('knees bend one way as the leg swings forward, phase-offset from the hip', () => {
     const r = rig(44);
+    // stride angular frequency from the M2 ground-speed coupling
+    // (w = max(speed,6) / (0.7 * legL0)), not the old fixed 12 rad/s
+    const w = 6 / (0.7 * r.limbs.legL.position.y);
     // stride phase f = 3π/2 → legL at full forward swing
-    r.animate((3 * Math.PI) / 2 / 12, 6);
+    r.animate((3 * Math.PI) / 2 / w, 6);
     expect(r.limbs.legL.rotation.x).toBeCloseTo(-0.7, 4); // forward extreme
     expect(r.limbs.kneeL!.rotation.x).toBeCloseTo(0.93, 3); // knee near max bend
     // stride phase f = π/2 → legL at full back swing
-    r.animate(Math.PI / 2 / 12, 6);
+    r.animate(Math.PI / 2 / w, 6);
     expect(r.limbs.legL.rotation.x).toBeCloseTo(0.7, 4); // back extreme
     expect(r.limbs.kneeL!.rotation.x).toBeCloseTo(0.08, 3); // knee near straight
     r.dispose();
@@ -89,12 +92,14 @@ describe('sub-pivot articulation', () => {
 
   it('elbows counter-swing: bend grows as the arm swings back', () => {
     const r = rig(44);
+    // stride angular frequency from the M2 ground-speed coupling (see above)
+    const w = 6 / (0.7 * r.limbs.legL.position.y);
     // f = 3π/2 → armL swings back (opposite phase to legL)
-    r.animate((3 * Math.PI) / 2 / 12, 6);
+    r.animate((3 * Math.PI) / 2 / w, 6);
     expect(r.limbs.armL.rotation.x).toBeCloseTo(0.595, 3);
     expect(r.limbs.elbowL!.rotation.x).toBeCloseTo(-0.62, 3); // deep bend
     // f = π/2 → armL forward, elbow relaxes toward rest
-    r.animate(Math.PI / 2 / 12, 6);
+    r.animate(Math.PI / 2 / w, 6);
     expect(r.limbs.armL.rotation.x).toBeCloseTo(-0.595, 3);
     expect(r.limbs.elbowL!.rotation.x).toBeCloseTo(-0.12, 3);
     r.dispose();

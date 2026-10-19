@@ -11,7 +11,13 @@
  *     CharacterController does.
  *
  * M2: stride frequency must match foot speed to ground speed (no skating).
- *     (tests below)
+ *     The old `f = t * (8 + k*4)` kept cadence near-constant while the body
+ *     speed varied, so feet dragged ~1.2 m/s at full run. The fix derives
+ *     the stride angular frequency from ground speed:
+ *       w = max(speed, 6) / (0.7 * legL0)
+ *     so the foot's peak backward speed (legL0 * swingAmp * w) equals ground
+ *     speed. The test below measures the peak hip angular velocity
+ *     behaviorally from the driven rig and asserts footPeak ≈ ground speed.
  */
 import { describe, expect, it } from 'vitest';
 import { makeHumanoid, type CharacterRig } from '../src/engine/gfx/Characters';
@@ -63,5 +69,37 @@ describe('M1: AnimationAdjust lean is bounded across frames', () => {
     expect(Math.abs(rig.limbs.head.rotation.y)).toBeLessThanOrEqual(0.125 + 1e-9);
     driveFrames(rig, 60, 5, { accel: 0, brake: 0, turnRate: 0, weaponCarry: false });
     expect(Math.abs(rig.limbs.head.rotation.y)).toBeLessThan(0.01);
+  });
+});
+
+describe('M2: stride frequency matches foot speed to ground speed', () => {
+  it('foot peak speed ≈ ground speed across walk/run speeds', () => {
+    for (const speed of [1, 2, 3, 4.5, 6, 8]) {
+      const rig = rigOf();
+      // hip height ≈ hip-to-foot length (feet at y=0 by construction)
+      const legL0 = rig.limbs.legL.position.y;
+      expect(legL0).toBeGreaterThan(0.3);
+
+      // Sample the hip swing for 12 s at 60 fps; the peak |dθ/dt| times the
+      // leg length is the foot's peak horizontal speed. (Peak hip angular
+      // velocity occurs at the θ=0 crossing, where the knee is ~straight, so
+      // legL0 is the right radius.)
+      const dt = 1 / 60;
+      let prev = 0;
+      let maxW = 0;
+      rig.animate(0, speed, {});
+      prev = rig.limbs.legL.rotation.x;
+      for (let i = 1; i <= 720; i++) {
+        rig.animate(i * dt, speed, {});
+        const th = rig.limbs.legL.rotation.x;
+        maxW = Math.max(maxW, Math.abs(th - prev) / dt);
+        prev = th;
+      }
+      const footPeak = legL0 * maxW;
+      // 15% tolerance absorbs the boot sitting slightly below the hip pivot
+      // (~7%) and finite-difference sampling (~1%). Pre-fix, walk speeds were
+      // 16–34% off (foot too slow); full run was ~4% off (foot too fast).
+      expect(Math.abs(footPeak - speed) / speed).toBeLessThan(0.15);
+    }
   });
 });

@@ -519,7 +519,13 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
         armR.shoulder.rotation.z += (-0.7 - armR.shoulder.rotation.z) * Math.min(1, 3 * dt);
       } else {
         if (deadTumble) deadTumble = null;
-        const f = t * (8 + k * 4);
+        // M2 (2026-10-19): stride angular frequency from ground speed, not a
+        // fixed 8–12 rad/s. The foot's peak backward speed is
+        // legL0 * swingAmp * w; matching it to ground speed kills foot skating:
+        //   w = speed / (legL0 * 0.7 * k) = max(speed, 6) / (0.7 * legL0)
+        // (for speed ≤ 6, k = speed/6 and speed cancels — constant cadence with
+        // growing amplitude; above 6 m/s the cadence rises with speed).
+        const f = t * (Math.max(speed, 6) / (0.7 * legL0));
         const s = Math.sin(f);
         const sw = s * 0.7 * k;
         legL.hip.rotation.x = sw; legR.hip.rotation.x = -sw;
