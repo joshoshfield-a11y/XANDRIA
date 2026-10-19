@@ -50,11 +50,15 @@ export const AnimationAdjust = {
     const leanF = clamp(s.accel * 0.045, 0, 0.32);
     const leanB = clamp(s.brake * 0.055, 0, 0.38);
     const leanT = clamp(s.turnRate * 0.06, -0.25, 0.25);
-    if (leanF !== 0 || leanB !== 0) L.torso.rotation.x += leanF - leanB;
-    if (leanT !== 0) {
-      L.torso.rotation.y += leanT;
-      L.head.rotation.y -= leanT * 0.5; // head counter-stabilizes
-    }
+    // M1 (2026-10-19): SET absolute per-frame values — never +=. animate()
+    // never writes torso.rotation.x or head.rotation.y, so an accumulated +=
+    // integrates without bound (2.6 rad after one sprint burst, 9.8 after four).
+    L.torso.rotation.x = leanF - leanB;
+    // torso.rotation.y keeps += : animate() re-zeros it (or sets the attack
+    // coil) every frame before this post-pass runs, so it stays bounded AND
+    // composed with the coil. Head yaw is absolute so it can't drift.
+    L.torso.rotation.y += leanT;
+    L.head.rotation.y = -leanT * 0.5; // head counter-stabilizes into the turn
 
     // --- slope foot placement: pitch/roll the legs against the ground ---
     const n = s.slopeNormal;
