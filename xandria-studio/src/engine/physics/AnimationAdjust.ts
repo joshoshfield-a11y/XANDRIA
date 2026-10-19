@@ -4,9 +4,15 @@
  *
  * Characters.ts animate() is owned by another crew — this module is an
  * OPTIONAL post-pass: call `AnimationAdjust.apply(rig, state)` AFTER
- * rig.animate(t, speed, opts) and the coordinator wires it in. It only adds
- * small clamped rotations on top of whatever animate() posed, so it can never
- * break the base animation.
+ * rig.animate(t, speed, opts) and the coordinator wires it in. It applies
+ * small clamped rotations on top of whatever animate() posed.
+ *
+ * BOUNDEDNESS (M1, 2026-10-19): every adjustment here MUST be absolute
+ * per-frame (assignment, not +=). animate() does not reset every channel —
+ * it never writes torso.rotation.x or head.rotation.y — so an accumulated
+ * += integrates without bound across frames (the old lean reached 9.8 rad
+ * after four sprint bursts). Channels that animate() re-zeros every frame
+ * (torso.rotation.y, the limbs) may safely compose with +=.
  *
  *   - slope foot placement: counter-rotate the legs against ground pitch/roll
  *     so feet stay closer to planted on inclines
@@ -15,8 +21,8 @@
  *   - weapon-carry arm pose: relaxed raise of the weapon arm when carrying
  *     (skipped while the rig is mid-swing — pass attacking=true then)
  *
- * All rotations are additive and clamped; the hot path allocates nothing
- * (state is caller-owned). Dead rigs are skipped.
+ * All rotations are clamped and bounded per-frame (see BOUNDEDNESS above);
+ * the hot path allocates nothing (state is caller-owned). Dead rigs are skipped.
  */
 import * as THREE from 'three';
 import type { CharacterRig } from '../gfx/Characters';

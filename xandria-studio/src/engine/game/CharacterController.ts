@@ -254,7 +254,8 @@ export class CharacterController {
       land: this.landT * this.landDepth,
     });
     // physics wave (item 7): procedural animation post-pass, layered over animate().
-    // Additive + clamped, so it can never break the base animation.
+    // Clamped and bounded per-frame (M1 2026-10-19: absolute assignment, not
+    // accumulation — the old additive lean integrated to 9.8 rad).
     {
       const inst = dt > 1e-4 ? (planar - this.prevPlanar) / dt : 0;
       this.prevPlanar = planar;
