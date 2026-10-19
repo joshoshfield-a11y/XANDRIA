@@ -364,7 +364,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     if (!creditsPill || !billing.enabled) return;
     if (!billing.email) { creditsPill.style.display = 'none'; return; }
     creditsPill.style.display = 'inline-flex';
-    creditsPill.textContent = `⚡ ${billing.me ? billing.me.generations_remaining : '…'}`;
+    creditsPill.textContent = `⚡ ${!billing.me ? '…' : billing.me.unlimited ? '∞' : billing.me.generations_remaining}`;
   };
   let renderAcct: () => void = () => { updateCredits(); };
   const acctHost = root.querySelector<HTMLElement>('#acct-host');

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, methodNotAllowed } from "./_lib/http.js";
 import { requireUser, getServerClient } from "./_lib/supabase.js";
+import { isAdminEmail } from "./_lib/admin.js";
 import { SupabaseBillingStore, getSubscriptionByUserId } from "./_lib/subscriptions.js";
 import {
   TIER_CAPS,
@@ -44,6 +45,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     return;
   }
 
+  // Creator bypass: admins still increment the counter (usage stays visible
+  // in stats) but are never blocked by the cap.
+  const admin = isAdminEmail(user.email);
+
   try {
     await new SupabaseBillingStore().upsertProfile(user.id, user.email);
     const client = getServerClient();
@@ -63,7 +68,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (error) throw error;
 
     const current = (data as { count: number } | null)?.count ?? 0;
-    if (current >= cap) {
+    if (!admin && current >= cap) {
       json(res, 429, {
         error: "quota_exceeded",
         tier,
@@ -81,7 +86,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     );
     if (writeError) throw writeError;
 
-    json(res, 200, { used: next, remaining: generationsRemaining(tier, next) });
+    // Never serialize Infinity as `remaining`: JSON.stringify(Infinity) →
+    // null, which an older client would read as 0 remaining = blocked.
+    // The explicit `unlimited` boolean is the contract.
+    json(
+      res,
+      200,
+      admin
+        ? { used: next, remaining: null, unlimited: true }
+        : { used: next, remaining: generationsRemaining(tier, next) },
+    );
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error("generations error", err);

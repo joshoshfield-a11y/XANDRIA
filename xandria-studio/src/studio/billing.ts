@@ -18,9 +18,12 @@
  */
 import type { Tier } from '../billing/entitlements';
 import {
+  authErrorNudge,
   getAccessToken,
+  getSession,
   getUser,
   isBillingEnabled,
+  mapOtpError,
   onAuthChange,
   signInWithOtp,
   signOut,
@@ -42,7 +45,10 @@ export interface MeResponse {
   tier: Tier;
   status: string;
   generations_used: number;
-  generations_remaining: number;
+  /** Null for admins (see `unlimited`) — never Infinity (JSON → null). */
+  generations_remaining: number | null;
+  /** True for ADMIN_EMAILS allowlist members: quota never blocks. */
+  unlimited?: boolean;
   month: string;
 }
 
@@ -170,6 +176,10 @@ export async function gateGeneration(state: BillingState): Promise<GateResult> {
   const me = await fetchMe();
   if (!me) return { ok: false, reason: 'unavailable' };
   state.me = me;
+  if (me.unlimited) return { ok: true };
+  // Fail closed: a null remaining without the unlimited flag means the quota
+  // could not be verified — block rather than assume headroom.
+  if (me.generations_remaining === null) return { ok: false, reason: 'unavailable' };
   if (me.generations_remaining <= 0) return { ok: false, reason: 'limit' };
   return { ok: true };
 }
@@ -246,43 +256,135 @@ function esc(s: string): string {
  * Mount the account chip into `host` (placed under the studio H1).
  * Re-render by calling the returned function after state.refresh().
  */
+/** Cooldown between magic-link resends (spam/abuse guard). */
+const RESEND_COOLDOWN_S = 30;
+/** Session poll cadence after a magic link is sent. */
+const SESSION_POLL_MS = 3000;
+/** Stop polling after ~5 minutes; the user can resend or check again. */
+const SESSION_POLL_MAX = 100;
+
+/**
+ * Post-send watch (auth phase 1): after a magic link is requested, the
+ * session usually lands in a *different* browser context (the email app's
+ * in-app browser) and the studio tab never notices. Poll getSession() and
+ * give the user an explicit "check again" + resend path instead of leaving
+ * them staring at "check your email". Returns the poll timer so the caller
+ * can clear it on re-render.
+ */
+function startPostSendWatch(box: HTMLElement, state: BillingState): ReturnType<typeof setInterval> {
+  let polls = 0;
+  const setStatus = (html: string) => {
+    const el = box.querySelector<HTMLElement>('#acct-status');
+    if (el) el.innerHTML = html;
+  };
+  const checkNow = async (): Promise<boolean> => {
+    const session = await getSession();
+    if (session) {
+      await state.refresh();
+      return true;
+    }
+    return false;
+  };
+
+  box.querySelector('#acct-note')!.outerHTML = `
+    <div class="note" id="acct-sent">
+      ✉ Check your email for the sign-in link — then open it <b>in this browser</b>
+      (not inside your email app).
+      <div class="row" style="margin-top:8px">
+        <button id="acct-check">I OPENED THE LINK — CHECK AGAIN</button>
+        <button id="acct-resend" disabled>RESEND</button>
+      </div>
+      <div class="note" id="acct-status">Waiting for sign-in…</div>
+    </div>`;
+
+  const resendBtn = box.querySelector<HTMLButtonElement>('#acct-resend')!;
+  let resendAt = Date.now() + RESEND_COOLDOWN_S * 1000;
+  const tickResend = () => {
+    const left = Math.max(0, Math.ceil((resendAt - Date.now()) / 1000));
+    resendBtn.disabled = left > 0;
+    resendBtn.textContent = left > 0 ? `RESEND (${left}s)` : 'RESEND LINK';
+  };
+  const resendTick = setInterval(tickResend, 500);
+  tickResend();
+
+  box.querySelector('#acct-check')!.addEventListener('click', () => {
+    void checkNow().then((ok) => {
+      if (!ok) {
+        setStatus(
+          'Still not signed in — open the link in <b>this</b> browser tab. ' +
+          'Your email app opens links in its own private browser, where the studio can\'t see the sign-in.',
+        );
+      }
+    });
+  });
+  resendBtn.addEventListener('click', () => {
+    if (resendBtn.disabled) return;
+    resendAt = Date.now() + RESEND_COOLDOWN_S * 1000;
+    tickResend();
+    const email = box.querySelector<HTMLInputElement>('#acct-email')?.value.trim() ?? '';
+    void signInWithOtp(email).then((r) => {
+      setStatus(r.ok ? 'Fresh link sent — check your email.' : `Couldn't resend: ${esc(mapOtpError(r.error))}`);
+    });
+  });
+
+  const timer = setInterval(() => {
+    void checkNow().then((ok) => {
+      if (ok || ++polls >= SESSION_POLL_MAX) {
+        clearInterval(timer);
+        clearInterval(resendTick);
+        if (!ok) setStatus("Still waiting — if the link isn't arriving, check spam or resend a fresh one above.");
+      }
+    });
+  }, SESSION_POLL_MS);
+  return timer;
+}
+
 export function mountAccountChip(host: HTMLElement, state: BillingState, notify: Notify): () => void {
   ensureChipCss();
+  let postSendTimer: ReturnType<typeof setInterval> | null = null;
   const render = () => {
+    if (postSendTimer) {
+      clearInterval(postSendTimer);
+      postSendTimer = null;
+    }
     host.innerHTML = '';
     const box = document.createElement('div');
     box.id = 'acct';
     if (!state.email) {
+      // Surface a failed magic-link redirect (e.g. expired link clicked in
+      // email) as a human nudge instead of a silent no-op.
+      const urlNudge = authErrorNudge(location.href);
       box.innerHTML = `
         <div class="lbl">ACCOUNT — SIGN IN TO GENERATE</div>
+        ${urlNudge ? `<div class="err">${esc(urlNudge)}</div>` : ''}
         <div class="row"><input id="acct-email" type="email" placeholder="you@example.com" autocomplete="email"/>
         <button id="acct-send" class="primary">✉ SEND LINK</button></div>
-        <div class="note">Free: 5 generations/mo, no card. We email you a sign-in link.</div>`;
+        <div class="note" id="acct-note">Free: 5 generations/mo, no card. We email you a sign-in link.</div>`;
       const input = box.querySelector<HTMLInputElement>('#acct-email')!;
       const send = box.querySelector<HTMLButtonElement>('#acct-send')!;
       const doSend = async () => {
         const email = input.value.trim();
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-          box.querySelector('.note')!.outerHTML = `<div class="err">Enter a valid email address.</div>`;
+          box.querySelector('#acct-note')!.outerHTML = `<div class="err" id="acct-note">Enter a valid email address.</div>`;
           return;
         }
         send.disabled = true;
         send.textContent = 'SENDING…';
         const r = await signInWithOtp(email);
-        if (r.ok) {
-          box.querySelector('.note, .err')!.outerHTML =
-            `<div class="note">✉ Check <b>${esc(email)}</b> for your sign-in link.</div>`;
-        } else {
-          box.querySelector('.note, .err')!.outerHTML = `<div class="err">Couldn't send: ${esc(r.error)}</div>`;
-        }
         send.disabled = false;
         send.textContent = '✉ SEND LINK';
+        if (r.ok) {
+          postSendTimer = startPostSendWatch(box, state);
+        } else {
+          box.querySelector('#acct-note')!.outerHTML =
+            `<div class="err" id="acct-note">Couldn't send: ${esc(mapOtpError(r.error))}</div>`;
+        }
       };
       send.addEventListener('click', () => void doSend());
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') void doSend(); });
     } else {
       const tier = (state.me?.tier ?? 'free') as GateTier;
-      const left = state.me ? `${state.me.generations_remaining} left` : '…';
+      const left = !state.me ? '…' : state.me.unlimited ? '∞' : `${state.me.generations_remaining} left`;
       box.innerHTML = `
         <div class="chip">
           <span class="email" title="${esc(state.email)}">${esc(truncateEmail(state.email))}</span>

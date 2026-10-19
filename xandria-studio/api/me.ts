@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, methodNotAllowed } from "./_lib/http.js";
 import { requireUser, getServerClient } from "./_lib/supabase.js";
+import { isAdminEmail } from "./_lib/admin.js";
 import { SupabaseBillingStore, getSubscriptionByUserId } from "./_lib/subscriptions.js";
 import {
   generationsRemaining,
@@ -33,6 +34,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     await new SupabaseBillingStore().upsertProfile(user.id, user.email);
     const sub = await getSubscriptionByUserId(user.id);
     const tier = resolveTier(sub);
+    const admin = isAdminEmail(user.email);
 
     const month = monthKey(new Date());
     const { data, error } = await getServerClient()
@@ -48,7 +50,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       tier,
       status: sub?.status ?? "active",
       generations_used: used,
-      generations_remaining: generationsRemaining(tier, used),
+      // Admins get an explicit `unlimited` boolean — never Infinity, which
+      // JSON.stringify turns into null (an old client would read that as
+      // 0 remaining = blocked).
+      generations_remaining: admin ? null : generationsRemaining(tier, used),
+      unlimited: admin,
       month,
     });
   } catch (err) {
