@@ -275,7 +275,7 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
       28,
       () => new THREE.Vector3(1, 1, 1),
       0, 0, false, 0, course);
-  } else if (genre === 'top-down-shooter') {
+  } else if (genre === 'top-down-shooter' || genre === 'survivor' || genre === 'tower-defense') {
     hero('hero-barricades',
       () => { const g = new THREE.BoxGeometry(2.4, 0.95, 0.55); clampFootprint(g, 8); return g; },
       (m) => m.standard('metal', '#6a7078', { roughness: 0.55, metalness: 0.5 }),

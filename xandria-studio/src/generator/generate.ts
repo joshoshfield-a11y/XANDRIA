@@ -68,21 +68,47 @@ const GENRE_KEYS: [Genre, string[]][] = [
   ['platformer', ['platformer', 'platform', 'jumping', 'mario', 'side scroll', 'side-scroll', 'sidescroll']],
   ['top-down-shooter', ['top-down', 'topdown', 'top down', 'twin stick', 'twin-stick', 'twinstick', 'asteroids', 'overhead', 'horde']],
   ['third-person-action', ['adventure', 'quest', 'rpg', 'sword', 'knight', 'explore', 'third person', 'third-person', 'action', 'samurai', 'ninja']],
+  // variety wave: new genres live after the originals so they only win on a
+  // strictly better keyword score — legacy intents keep their old mapping.
+  ['survivor', ['survivor', 'survivors', 'bullet heaven', 'bullet-hell', 'vampire survivors', 'auto-shooter', 'auto shooter', 'swarm survivor', 'swarm']],
+  ['tower-defense', ['tower defense', 'tower-defense', 'turret defense', 'defend the base', 'base defense', 'defense']],
+  ['endless-runner', ['endless runner', 'endless-runner', 'runner', 'temple run', 'subway surfers', 'auto-run', 'auto run', 'lane runner']],
 ];
 
+/**
+ * Variety wave: pick the key with the most keyword hits instead of the first
+ * key with any hit (ties keep list order, so legacy genres win ties). This
+ * makes multi-aspect prompts ("snowy volcanic racing") resolve to the
+ * best-supported interpretation rather than list order.
+ */
+function matchScore(s: string, words: string[]): number {
+  let n = 0;
+  for (const w of words) if (has(s, w)) n++;
+  return n;
+}
+function bestMatch<T>(s: string, keys: [T, string[]][]): T | undefined {
+  let best: T | undefined;
+  let bestN = 0;
+  for (const [k, words] of keys) {
+    const n = matchScore(s, words);
+    if (n > bestN) { bestN = n; best = k; }
+  }
+  return best;
+}
+
 const ENV_KEYS: [Environment, string[]][] = [
-  ['neon-city', ['neon', 'cyberpunk', 'synthwave', 'cyber city', 'tokyo']],
-  ['space-station', ['space station', 'space-station', 'spaceship', 'spacecraft', 'station']],
-  ['volcanic', ['volcano', 'volcanic', 'lava', 'magma', 'inferno', 'hell']],
-  ['arctic', ['arctic', 'snow', 'snowy', 'ice', 'frozen', 'winter', 'glacier', 'tundra']],
-  ['desert', ['desert', 'sand', 'dune', 'dunes', 'sahara', 'oasis']],
-  ['wasteland', ['wasteland', 'apocalypse', 'apocalyptic', 'post-apocalyptic', 'fallout', 'ruined world']],
-  ['city', ['city', 'urban', 'downtown', 'street', 'streets', 'alley']],
-  ['ruins', ['ruins', 'ancient', 'temple', 'aztec', 'mayan', 'lost city', 'archaeology']],
-  ['dreamscape', ['dream', 'dreamscape', 'surreal', 'dreamy', 'liminal', 'void']],
-  ['islands', ['island', 'islands', 'tropical', 'archipelago', 'beach', 'ocean']],
-  ['jungle', ['jungle', 'rainforest', 'amazon']],
-  ['forest', ['forest', 'woods', 'woodland', 'grove', 'meadow']],
+  ['neon-city', ['neon', 'cyberpunk', 'cyber', 'synthwave', 'cyber city', 'tokyo']],
+  ['space-station', ['space station', 'space-station', 'spaceship', 'spacecraft', 'station', 'orbital', 'derelict ship']],
+  ['volcanic', ['volcano', 'volcanic', 'lava', 'magma', 'inferno', 'hell', 'molten', 'ashen']],
+  ['arctic', ['arctic', 'snow', 'snowy', 'ice', 'frozen', 'winter', 'glacier', 'tundra', 'polar', 'blizzard']],
+  ['desert', ['desert', 'sand', 'dune', 'dunes', 'sahara', 'oasis', 'badlands', 'dust']],
+  ['wasteland', ['wasteland', 'apocalypse', 'apocalyptic', 'post-apocalyptic', 'fallout', 'ruined world', 'barren', 'desolate']],
+  ['city', ['city', 'urban', 'downtown', 'street', 'streets', 'alley', 'metropolis', 'skyscraper']],
+  ['ruins', ['ruins', 'ancient', 'temple', 'aztec', 'mayan', 'lost city', 'archaeology', 'castle', 'fortress', 'catacombs', 'graveyard']],
+  ['dreamscape', ['dream', 'dreamscape', 'surreal', 'dreamy', 'liminal', 'void', 'ethereal', 'otherworldly']],
+  ['islands', ['island', 'islands', 'tropical', 'archipelago', 'beach', 'ocean', 'lagoon', 'atoll', 'shore', 'coast']],
+  ['jungle', ['jungle', 'rainforest', 'amazon', 'swamp', 'mangrove', 'bayou']],
+  ['forest', ['forest', 'woods', 'woodland', 'grove', 'meadow', 'pine', 'redwood']],
 ];
 
 const ENV_TERRAIN: Record<Environment, TerrainType> = {
@@ -108,14 +134,14 @@ const ENV_PALETTE: Record<Environment, Palette> = {
 };
 
 const MOOD_KEYS: [Mood, string[]][] = [
-  ['aggressive', ['brutal', 'intense', 'aggressive', 'hardcore', 'rage']],
-  ['dark', ['dark', 'horror', 'scary', 'grim', 'gothic', 'evil', 'demon']],
-  ['tense', ['tense', 'suspense', 'thriller', 'stealth', 'danger']],
-  ['mysterious', ['mysterious', 'mystery', 'enigma', 'strange', 'eerie', 'liminal']],
-  ['chill', ['chill', 'relaxing', 'calm', 'peaceful', 'cozy', 'gentle']],
-  ['retro', ['retro', 'arcade', 'synthwave', '8-bit', 'pixel']],
-  ['heroic', ['heroic', 'hero', 'legend', 'champion', 'save']],
-  ['epic', ['epic', 'grand', 'vast', 'massive', 'colossal']],
+  ['aggressive', ['brutal', 'intense', 'aggressive', 'hardcore', 'rage', 'savage', 'feral', 'bloodthirsty']],
+  ['dark', ['dark', 'horror', 'scary', 'grim', 'gothic', 'evil', 'demon', 'haunted', 'creepy', 'sinister', 'macabre']],
+  ['tense', ['tense', 'suspense', 'thriller', 'stealth', 'stealthy', 'danger']],
+  ['mysterious', ['mysterious', 'mystery', 'enigma', 'strange', 'eerie', 'liminal', 'uncanny']],
+  ['chill', ['chill', 'relaxing', 'calm', 'peaceful', 'cozy', 'gentle', 'serene', 'tranquil']],
+  ['retro', ['retro', 'arcade', 'synthwave', '8-bit', 'pixel', 'vaporwave']],
+  ['heroic', ['heroic', 'hero', 'legend', 'champion', 'save', 'valiant']],
+  ['epic', ['epic', 'grand', 'vast', 'massive', 'colossal', 'mythic', 'legendary']],
 ];
 
 const NAME_ADJ = ['Crimson', 'Hollow', 'Silent', 'Burning', 'Frozen', 'Neon', 'Ancient', 'Forgotten', 'Iron', 'Shadow', 'Golden', 'Broken', 'Emerald', 'Storm', 'Obsidian', 'Radiant'];
@@ -164,6 +190,7 @@ function foeWord(specs: { kind: string; count: number }[]): string {
 function buildNarrative(
   genre: Genre, mood: Mood, name: string, env: Environment,
   specs: { kind: string; count: number }[], laps: number,
+  runTarget = 0,
 ): NarrativeSpec {
   const E = ENV_DISPLAY[env];
   const Ecap = E[0].toUpperCase() + E.slice(1);
@@ -200,6 +227,24 @@ function buildNarrative(
         winText: `Checkered flag. ${name} takes the Grand Prix.`,
         loseText: `The pack pulls away. The Grand Prix slips through your fingers.`,
       };
+    case 'survivor':
+      return {
+        premise: `The ${tone} ${foe} come endlessly over ${E}. No walls, no mercy — only you, your weapon, and the swarm. Survive.`,
+        winText: `The swarm breaks and scatters. ${Ecap} is quiet — ${name} stands because you stood.`,
+        loseText: `The swarm takes another runner. ${Ecap} forgets your name.`,
+      };
+    case 'tower-defense':
+      return {
+        premise: `The ${tone} ${foe} march on the Core at the heart of ${E}. Build your turrets, hold the line, and break every wave.`,
+        winText: `The last wave breaks against your turrets. The Core hums on — ${name} holds.`,
+        loseText: `The Core goes dark. ${Ecap} belongs to the ${foe} now.`,
+      };
+    case 'endless-runner':
+      return {
+        premise: `Run. The ${name} gauntlet stretches ${runTarget}m through ${E} — obstacles, gaps, and no time to think.`,
+        winText: `You cross the far gate at full sprint — ${name} conquered.`,
+        loseText: `The gauntlet trips you. The dust settles over ${E}.`,
+      };
   }
 }
 
@@ -215,15 +260,16 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const seed = opts.seed ?? hashString(text || 'xandria');
   const rng = (() => { let s = seed >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
 
-  // --- genre
+  // --- genre (variety wave: score-based, best-supported interpretation wins)
   let genre: Genre | undefined = opts.genre;
-  if (!genre) for (const [g, words] of GENRE_KEYS) if (has(text, ...words)) { genre = g; break; }
+  if (!genre) genre = bestMatch(text, GENRE_KEYS);
   genre ??= 'third-person-action';
 
-  // --- environment
+  // --- environment (variety wave: score-based)
   let environment: Environment | undefined = opts.environment;
-  if (!environment) for (const [e, words] of ENV_KEYS) if (has(text, ...words)) { environment = e; break; }
-  environment ??= genre === 'fps-arena' || genre === 'top-down-shooter' ? 'arena' : genre === 'racing' ? 'wasteland' : 'forest';
+  if (!environment) environment = bestMatch(text, ENV_KEYS);
+  environment ??= genre === 'fps-arena' || genre === 'top-down-shooter' || genre === 'survivor' || genre === 'tower-defense'
+    ? 'arena' : genre === 'racing' ? 'wasteland' : 'forest';
 
   // --- mood / time / weather
   let mood: Mood = 'epic';
@@ -232,18 +278,19 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   if (environment === 'dreamscape') mood = 'mysterious';
   if (environment === 'volcanic') mood = 'aggressive';
 
-  const timeOfDay: TimeOfDay = has(text, 'night', 'midnight', 'moonlit') ? 'night'
-    : has(text, 'sunset', 'dusk', 'evening') ? 'dusk'
-    : has(text, 'dawn', 'sunrise', 'morning') ? 'dawn'
+  const timeOfDay: TimeOfDay = has(text, 'night', 'midnight', 'moonlit', 'moonlight', 'starlit', 'darkness') ? 'night'
+    : has(text, 'sunset', 'dusk', 'evening', 'twilight', 'golden hour') ? 'dusk'
+    : has(text, 'dawn', 'sunrise', 'morning', 'daybreak') ? 'dawn'
     : environment === 'neon-city' || environment === 'space-station' ? 'night' : 'day';
 
-  const weather: Weather = has(text, 'storm', 'thunder') ? 'storm'
-    : has(text, 'rain', 'rainy', 'drizzle') ? 'rain'
-    : has(text, 'fog', 'foggy', 'mist', 'misty') ? 'fog'
+  const weather: Weather = has(text, 'storm', 'thunder', 'lightning', 'tempest', 'sandstorm', 'hail') ? 'storm'
+    : has(text, 'rain', 'rainy', 'drizzle', 'downpour', 'monsoon') ? 'rain'
+    : has(text, 'fog', 'foggy', 'mist', 'misty', 'haze') ? 'fog'
+    : has(text, 'blizzard', 'sleet') ? 'snow'
     : environment === 'arctic' ? 'snow'
     : environment === 'volcanic' ? 'ash' : 'clear';
 
-  const difficulty = opts.difficulty ?? (has(text, 'nightmare', 'insane', 'brutal', 'very hard') ? 'hard' : has(text, 'easy', 'casual', 'relaxing') ? 'easy' : 'normal');
+  const difficulty = opts.difficulty ?? (has(text, 'nightmare', 'insane', 'brutal', 'very hard', 'extreme', 'hardest', 'merciless') ? 'hard' : has(text, 'easy', 'casual', 'relaxing', 'beginner', 'peaceful') ? 'easy' : 'normal');
   const diffK = difficulty === 'easy' ? 0.7 : difficulty === 'hard' ? 1.5 : 1;
 
   // --- name
@@ -251,22 +298,48 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const noun = NAME_NOUN[Math.floor(rng() * NAME_NOUN.length)];
   const name = `${adj} ${noun}`;
 
-  // --- weapon
-  const weapon: Weapon = has(text, 'sword', 'katana', 'blade', 'melee') ? 'sword'
-    : has(text, 'shotgun') ? 'shotgun'
-    : has(text, 'rifle', 'machine gun', 'smg') ? 'rifle'
+  // --- weapon (variety wave: wider synonym net; new genres get their own defaults)
+  const weapon: Weapon = has(text, 'sword', 'katana', 'blade', 'melee', 'knife', 'axe', 'bow', 'crossbow') ? 'sword'
+    : has(text, 'shotgun', 'grenade', 'rocket', 'bazooka') ? 'shotgun'
+    : has(text, 'rifle', 'machine gun', 'smg', 'pistol', 'gun', 'revolver', 'handgun') ? 'rifle'
+    : has(text, 'laser', 'plasma') ? 'blaster'
     : has(text, 'fists', 'unarmed', 'parkour') ? 'none'
     : genre === 'fps-arena' ? 'rifle'
     : genre === 'top-down-shooter' ? 'blaster'
+    : genre === 'survivor' ? 'blaster'
+    : genre === 'tower-defense' ? 'blaster'
     : genre === 'platformer' ? 'none'
+    : genre === 'endless-runner' ? 'none'
     : genre === 'racing' ? 'none' : 'sword';
 
   // --- enemies
+  // tower-defense wave count: "N waves" in the prompt wins, else 4 (5 on hard)
+  const RUN_TARGET = 200; // endless-runner: gauntlet length in meters
+  const tdWaveMatch = /(\d+)\s+waves?/i.exec(text);
+  const tdWaves = genre === 'tower-defense'
+    ? Math.max(2, Math.min(8, tdWaveMatch ? parseInt(tdWaveMatch[1], 10) : difficulty === 'hard' ? 5 : 4))
+    : 0;
+
   const enemySpecs: { kind: EnemyKind; count: number; health: number; speed: number; damage: number; weapon: Weapon | 'melee' | 'none' }[] = [];
-  if (genre !== 'racing') {
-    const wantsDrones = has(text, 'drone', 'drones', 'robot', 'robots', 'mech');
-    const wantsTurrets = has(text, 'turret', 'turrets', 'defense');
-    const wantsBoss = has(text, 'boss', 'giant', 'colossus');
+  const wantsDrones = has(text, 'drone', 'drones', 'robot', 'robots', 'mech');
+  const wantsTurrets = has(text, 'turret', 'turrets', 'defense');
+  const wantsBoss = has(text, 'boss', 'giant', 'colossus');
+  if (genre === 'endless-runner') {
+    // the gauntlet is obstacles, not enemies — the roster stays empty
+  } else if (genre === 'survivor') {
+    // endless-ish swarm; the blueprint runs its own wave director off the clock,
+    // these quotas keep the spec honest about scale and feed the narrative
+    enemySpecs.push({ kind: 'walker' as EnemyKind, count: Math.round(26 * diffK), health: Math.round(28 * diffK), speed: 4.5, damage: Math.round(9 * diffK), weapon: 'melee' as const });
+    enemySpecs.push({ kind: 'drone' as EnemyKind, count: Math.round(10 * diffK), health: Math.round(20 * diffK), speed: 6, damage: Math.round(8 * diffK), weapon: 'blaster' as const });
+    enemySpecs.push({ kind: 'brute' as EnemyKind, count: 1, health: Math.round(320 * diffK), speed: 3.5, damage: Math.round(20 * diffK), weapon: 'melee' as const });
+  } else if (genre === 'tower-defense') {
+    // one summed walker quota (the blueprint splits it per wave from stages);
+    // the alpha marches with the final wave
+    let tdTotal = 0;
+    for (let w = 0; w < tdWaves; w++) tdTotal += Math.round((8 + w * 3) * diffK);
+    enemySpecs.push({ kind: 'walker' as EnemyKind, count: tdTotal, health: Math.round(28 * diffK), speed: 4.2, damage: Math.round(9 * diffK), weapon: 'melee' as const });
+    enemySpecs.push({ kind: 'brute' as EnemyKind, count: 1, health: Math.round(320 * diffK), speed: 3.2, damage: Math.round(20 * diffK), weapon: 'melee' as const });
+  } else if (genre !== 'racing') {
     const baseCount = Math.round((genre === 'fps-arena' || genre === 'top-down-shooter' ? 10 : 6) * diffK);
     if (wantsBoss) {
       enemySpecs.push({ kind: 'brute' as EnemyKind, count: 1, health: Math.round(300 * diffK), speed: 3.5, damage: Math.round(22 * diffK), weapon: 'melee' as const });
@@ -299,6 +372,19 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     objectiveType = 'race';
     objectiveCount = has(text, 'long') ? 5 : 3;
     objectiveDesc = `Complete ${objectiveCount} laps`;
+  } else if (genre === 'survivor') {
+    objectiveType = 'survive';
+    objectiveCount = 0;
+    objectiveDesc = 'Survive the swarm';
+  } else if (genre === 'tower-defense') {
+    // winnable by construction: the quota never exceeds the summed roster
+    objectiveType = 'eliminate';
+    objectiveCount = enemySpecs.reduce((n, e) => n + e.count, 0);
+    objectiveDesc = `Repel ${tdWaves} waves`;
+  } else if (genre === 'endless-runner') {
+    objectiveType = 'reach';
+    objectiveCount = 0;
+    objectiveDesc = `Run ${RUN_TARGET}m and reach the far gate`;
   } else if (has(text, 'boss')) {
     objectiveType = 'boss';
     objectiveCount = enemySpecs.reduce((n, e) => n + e.count, 0);
@@ -328,8 +414,8 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const foeCount = (kinds: string[]) =>
     enemySpecs.filter((e) => kinds.includes(e.kind)).reduce((n, e) => n + e.count, 0);
   const nonBruteFoes = foeCount(['walker', 'drone', 'turret', 'flyer']);
-  // fps-arena and top-down chains end in a boss fight — guarantee the brute exists
-  if ((genre === 'fps-arena' || genre === 'top-down-shooter') && foeCount(['brute']) === 0) {
+  // fps-arena, top-down and survivor chains end in a boss fight — guarantee the brute exists
+  if ((genre === 'fps-arena' || genre === 'top-down-shooter' || genre === 'survivor') && foeCount(['brute']) === 0) {
     enemySpecs.push({ kind: 'brute' as EnemyKind, count: 1, health: Math.round(300 * diffK), speed: 3.5, damage: Math.round(22 * diffK), weapon: 'melee' as const });
   }
   const bruteFoes = foeCount(['brute']);
@@ -422,6 +508,27 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
         winText: `The brute falls. Silence over the field — ${name} holds because you held it.`,
       },
     ];
+  } else if (genre === 'survivor') {
+    stages = [
+      { id: 'swarm-1', type: 'survive', count: 0, timeLimit: 60, description: chapter(0, 'Survive the first swarm') },
+      { id: 'swarm-2', type: 'survive', count: 0, timeLimit: 75, description: chapter(1, 'Survive the deepening swarm') },
+      { id: 'alpha', type: 'boss', count: bruteFoes, timeLimit: 0, description: `${chapter(2, pickVerb('boss'))} — the swarm alpha descends` },
+    ];
+  } else if (genre === 'tower-defense') {
+    // one wave per stage; quotas are the winnable-by-construction split of the
+    // summed walker roster, the alpha marches with the final wave
+    stages = [];
+    for (let w = 0; w < tdWaves; w++) {
+      const q = Math.round((8 + w * 3) * diffK) + (w === tdWaves - 1 ? 1 : 0);
+      stages.push({
+        id: `wave-${w + 1}`, type: 'eliminate', count: q, timeLimit: 0,
+        description: `Wave ${w + 1} — repel the assault${w === tdWaves - 1 ? ' (the alpha marches with them)' : ''}`,
+      });
+    }
+  } else if (genre === 'endless-runner') {
+    stages = [
+      { id: 'gauntlet', type: 'reach', count: 0, timeLimit: 0, description: `Sprint the gauntlet — reach the far gate (${RUN_TARGET}m)` },
+    ];
   } else {
     // racing: Grand Prix, then the player's call — record attempt or victory lap
     stages = [
@@ -440,11 +547,11 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
 
   // coins must cover the collect stage (legacy single-collect path already does)
   const coins = Math.max(
-    objectiveType === 'collect' ? objectiveCount : genre === 'platformer' ? 60 : 12,
+    objectiveType === 'collect' ? objectiveCount : genre === 'platformer' ? 60 : genre === 'endless-runner' ? 60 : genre === 'survivor' ? 24 : 12,
     genre === 'third-person-action' || genre === 'platformer' ? collectCount : 0,
   );
 
-  const narrative = buildNarrative(genre, mood, name, environment, enemySpecs, objectiveCount);
+  const narrative = buildNarrative(genre, mood, name, environment, enemySpecs, objectiveCount, RUN_TARGET);
 
   // --- world
   const terrain: TerrainType = has(text, 'mountain', 'mountains', 'alpine') ? 'mountains'
@@ -467,10 +574,12 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     'off-road', 'offroad', 'cross-country', 'cross country', 'dakar');
   const isOpenWorldGame = genre === 'third-person-action' || wantsBigWorld;
   const portalsOn = isOpenWorldGame
-    && genre !== 'racing' && genre !== 'fps-arena' && genre !== 'top-down-shooter';
+    && genre !== 'racing' && genre !== 'fps-arena' && genre !== 'top-down-shooter'
+    && genre !== 'survivor' && genre !== 'tower-defense' && genre !== 'endless-runner';
   const worldSize = wantsRally ? 8000
     : isOpenWorldGame ? 8000
-    : genre === 'racing' ? 400 : genre === 'platformer' ? 260 : 220;
+    : genre === 'racing' ? 400 : genre === 'platformer' ? 260
+    : genre === 'endless-runner' ? 480 : genre === 'survivor' ? 240 : genre === 'tower-defense' ? 240 : 220;
 
   // --- assemble (partial → normalize fills the rest + validates)
   const partial: any = {
@@ -485,7 +594,7 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     },
     world: {
       terrain: {
-        type: genre === 'racing' || genre === 'fps-arena' || genre === 'top-down-shooter' ? 'flat' : terrain,
+        type: genre === 'racing' || genre === 'fps-arena' || genre === 'top-down-shooter' || genre === 'survivor' || genre === 'tower-defense' || genre === 'endless-runner' ? 'flat' : terrain,
         size: worldSize,
         // racing needs a truly flat ribbon — hills clip through the track
         maxHeight: genre === 'racing' ? 2 : terrain === 'mountains' ? 30 : 14,
@@ -511,11 +620,11 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     player: {
       type: genre === 'racing' ? 'vehicle' : 'humanoid',
       health: Math.round(100 / diffK),
-      speed: 7,
-      jump: 9,
-      abilities: genre === 'platformer' ? ['doubleJump', 'dash'] : genre === 'racing' ? [] : ['dash', 'sprint'],
+      speed: genre === 'endless-runner' ? 9 : 7,
+      jump: genre === 'endless-runner' ? 10 : 9,
+      abilities: genre === 'platformer' ? ['doubleJump', 'dash'] : genre === 'endless-runner' ? ['doubleJump', 'dash'] : genre === 'racing' ? [] : genre === 'survivor' ? ['dash'] : ['dash', 'sprint'],
       weapon,
-      camera: genre === 'fps-arena' ? 'first-person' : genre === 'platformer' ? 'side' : genre === 'top-down-shooter' ? 'top-down' : genre === 'racing' ? 'chase' : 'third-person',
+      camera: genre === 'fps-arena' ? 'first-person' : genre === 'platformer' ? 'side' : genre === 'top-down-shooter' ? 'top-down' : genre === 'survivor' ? 'top-down' : genre === 'tower-defense' ? 'top-down' : genre === 'racing' ? 'chase' : genre === 'endless-runner' ? 'chase' : 'third-person',
     },
     enemies: enemySpecs,
     objective: { type: objectiveType, count: objectiveCount, timeLimit, description: objectiveDesc, stages },
@@ -538,6 +647,17 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
       musicVolume: 0.7,
     },
   };
+
+  // --- variety wave: per-genre blueprint params (validated keys in schema CUSTOM_KEYS)
+  if (genre === 'endless-runner') {
+    partial.custom = { ...(partial.custom ?? {}), runner: { targetDistance: RUN_TARGET, obstacleGap: 26 } };
+  }
+  if (genre === 'tower-defense') {
+    partial.custom = { ...(partial.custom ?? {}), towerDefense: { waves: tdWaves, baseHealth: Math.round(120 * (difficulty === 'hard' ? 1.25 : 1)), turretCost: 150 } };
+  }
+  if (genre === 'survivor') {
+    partial.custom = { ...(partial.custom ?? {}), survivor: { autoFire: true, fireInterval: 0.55 } };
+  }
 
   // --- legacy operator bridge: lattice-era OP-N/name references degrade gracefully
   const legacyOperators = applyOperators(text);

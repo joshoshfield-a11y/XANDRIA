@@ -113,3 +113,95 @@ describe('generator', () => {
     expect(p.sky).toBe('#1a1a2e');        // sky never floored
   });
 });
+
+describe('generator variety wave', () => {
+  it.each([
+    ['vampire survivors bullet heaven swarm', 'survivor'],
+    ['auto-shooter bullet heaven run', 'survivor'],
+    ['tower defense: defend the base from the waves', 'tower-defense'],
+    ['turret defense of the core', 'tower-defense'],
+    ['endless runner temple run gauntlet', 'endless-runner'],
+    ['subway surfers style lane runner', 'endless-runner'],
+  ])('"%s" → %s (valid spec)', (intent, genre) => {
+    const spec = generateSpec(intent);
+    expect(spec.meta.genre).toBe(genre);
+    expect(validateSpec(spec).errors).toEqual([]);
+  });
+
+  it('legacy genre mappings are unchanged (new genres only win on better score)', () => {
+    // 'horde survival' must NOT become survivor — survivor needs its own keywords
+    expect(generateSpec('top-down twin stick horde survival').meta.genre).toBe('top-down-shooter');
+    expect(generateSpec('neon cyberpunk fps arena deathmatch').meta.genre).toBe('fps-arena');
+    expect(generateSpec('racing through a volcanic canyon').meta.genre).toBe('racing');
+  });
+
+  it('score-based matching picks the best-supported interpretation', () => {
+    // volcanic has 2 hits (volcanic) vs arctic 1 (snowy); racing 1 — genre wins, env is volcanic
+    const s = generateSpec('snowy volcanic racing');
+    expect(s.meta.genre).toBe('racing');
+    expect(s.theme.environment).toBe('volcanic');
+    // tie → list order: neon-city beats desert on a 1–1 tie
+    expect(generateSpec('neon desert fps').theme.environment).toBe('neon-city');
+  });
+
+  it('survivor spec: top-down, survive chapters + alpha boss, brute guaranteed', () => {
+    const s = generateSpec('vampire survivors bullet heaven');
+    expect(s.player.camera).toBe('top-down');
+    expect(s.player.weapon).toBe('blaster');
+    const types = s.objective.stages!.map((st) => st.type);
+    expect(types).toEqual(['survive', 'survive', 'boss']);
+    expect(s.objective.stages!.every((st) => st.timeLimit === undefined || st.timeLimit >= 0)).toBe(true);
+    expect(s.enemies.some((e) => e.kind === 'brute')).toBe(true);
+    expect(validateSpec(s).errors).toEqual([]);
+  });
+
+  it('tower-defense spec: N waves from the prompt, quotas winnable by construction', () => {
+    const s = generateSpec('tower defense, 6 waves, defend the base');
+    expect(s.meta.genre).toBe('tower-defense');
+    expect(s.objective.stages!.length).toBe(6);
+    const stageTotal = s.objective.stages!.reduce((n, st) => n + (st.count ?? 0), 0);
+    const rosterTotal = s.enemies.reduce((n, e) => n + e.count, 0);
+    expect(s.objective.count).toBe(rosterTotal);
+    expect(stageTotal).toBe(rosterTotal);
+    expect(s.objective.stages!.every((st) => st.type === 'eliminate')).toBe(true);
+    expect((s.custom as any)?.towerDefense?.waves).toBe(6);
+    expect(validateSpec(s).errors).toEqual([]);
+  });
+
+  it('tower-defense defaults to 4 waves without a count in the prompt', () => {
+    const s = generateSpec('tower defense base defense');
+    expect(s.objective.stages!.length).toBe(4);
+  });
+
+  it('endless-runner spec: chase cam, reach objective, empty roster, target in custom', () => {
+    const s = generateSpec('endless runner temple run');
+    expect(s.player.camera).toBe('chase');
+    expect(s.player.type).toBe('humanoid');
+    expect(s.objective.type).toBe('reach');
+    expect(s.enemies).toEqual([]);
+    expect((s.custom as any)?.runner?.targetDistance).toBe(200);
+    expect(s.world.terrain.size).toBeGreaterThan(400); // fits the 200m gauntlet
+    expect(validateSpec(s).errors).toEqual([]);
+  });
+
+  it('new genres are deterministic per intent', () => {
+    for (const intent of ['vampire survivors run', 'tower defense 5 waves', 'endless runner sprint']) {
+      expect(JSON.stringify(generateSpec(intent))).toBe(JSON.stringify(generateSpec(intent)));
+    }
+  });
+
+  it('weapon synonym net: pistol → rifle, laser → blaster, grenade → shotgun, bow → sword', () => {
+    expect(generateSpec('pistol duel at dawn').player.weapon).toBe('rifle');
+    expect(generateSpec('laser battle in space').player.weapon).toBe('blaster');
+    expect(generateSpec('grenade assault on the fortress').player.weapon).toBe('shotgun');
+    expect(generateSpec('bow hunter in the woods').player.weapon).toBe('sword');
+  });
+
+  it('environment synonym net: castle → ruins, lagoon → islands, blizzard → arctic snow', () => {
+    expect(generateSpec('adventure in a haunted castle').theme.environment).toBe('ruins');
+    expect(generateSpec('racing across the lagoon').theme.environment).toBe('islands');
+    const s = generateSpec('survive the blizzard');
+    expect(s.theme.environment).toBe('arctic');
+    expect(s.theme.weather).toBe('snow');
+  });
+});

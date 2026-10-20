@@ -119,6 +119,14 @@ export class PortalManager {
   private overlay: PortalTransitionOverlay | null;
   private player: PortalPlayerAdapter | null = null;
   private worldSeed: number;
+  /**
+   * Side-quests wave: the run's world seed (spec.custom.portalMap.worldSeed
+   * at boot, else spec.meta.seed) for cross-map derivation such as
+   * deriveMapBiome in quest explore objectives. Read-only.
+   */
+  get worldSeedValue(): number {
+    return this.worldSeed;
+  }
   private seq = 0;
   private detachHook: (() => void) | null = null;
   private warnedNoAvatar = false;
@@ -159,6 +167,11 @@ export class PortalManager {
       avatar: this.engine.portalsPlayerAvatar,
       inventory: null,
       progression: null,
+      // quest wave: the blueprint's player-scoped quest manager (null when
+      // quests are disabled) — snapshot/restore keeps quest progress across
+      // transitions even if a future flow ever rebuilds the blueprint.
+      quests: this.engine.questManager,
+      skills: null,
       getBuff: () => null,
       setBuff: () => {},
     };
@@ -207,11 +220,18 @@ export class PortalManager {
     if (!this.player) {
       this.player = bindPlayerAdapter(this.engine);
       if (!this.player) {
-        // Non-avatar genres (e.g. racing's vehicle) have no adapter yet —
-        // warn once and stay inert. Backlog: vehicle adapter (merge note).
+        // Portal-backlog wave (racing-adapter evaluation, kept inactive BY
+        // DESIGN): closed-loop genres (racing's vehicle) intentionally have
+        // no player adapter. Portal travel is only coherent for open-world
+        // avatar genres — arrival places the player at the opposite edge of
+        // a new map, but racing's laps/checkpoints/gates are track-scoped,
+        // so an arrival would strand the car off-track with no coherent
+        // gameplay. The generator never enables portals for racing (even
+        // 8000m rally); if the Studio toggle is flipped on anyway, warn once
+        // and stay inert rather than strand the player.
         if (!this.warnedNoAvatar) {
           this.warnedNoAvatar = true;
-          console.warn('[portals] no player adapter for this genre — portal travel inert');
+          console.warn('[portals] no player adapter for this genre — portal travel inert (closed-loop genres intentionally unsupported)');
         }
         return;
       }

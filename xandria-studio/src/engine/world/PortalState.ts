@@ -11,6 +11,9 @@
  * - inventory: full backpack + equipped slots (Inventory.serialize round-trip)
  * - progression: level, xp, upgrade counts (+ the firerate multiplier that
  *   'firerate' upgrades fold into spec.custom.weaponMods)
+ * - quests: the main-story quest line — statuses + per-objective progress
+ *   (QuestManager.portalSnapshot round-trip). Player-scoped, like
+ *   progression: the manager itself is never despawned by transitions.
  * - timed buffs (blueprint itemKit): buffUntil is engine-time based and
  *   engine.time is NOT reset by a transition, so until/mult restore verbatim
  *
@@ -51,6 +54,8 @@ import type { Engine } from '../Engine';
 import type { PlayerAvatar } from '@blueprints/common';
 import type { Inventory } from '../game/items/Inventory';
 import type { Progression } from '../game/Progression';
+import type { QuestManager, QuestPortalSnapshot } from '../game/quests';
+import type { SkillSystem } from '../game/skills';
 import type { Terrain } from './Terrain';
 import { TerrainMapContext, type CachedMap } from './MapCache';
 
@@ -71,6 +76,11 @@ export interface PortalProgressionSnapshot {
   counts: Record<string, number>;
 }
 
+/** Skills slice of the snapshot (SkillSystem.portalSnapshot shape). */
+export interface PortalSkillsSnapshot {
+  xp: Record<string, number>;
+}
+
 /**
  * Everything the player earned, frozen at the moment of crossing. Plain
  * JSON-serializable data (versioned) — no object references, no functions.
@@ -87,6 +97,10 @@ export interface PlayerStateSnapshot {
   /** Inventory.serialize() JSON — full backpack + equipped slots. */
   inventory: string;
   progression: PortalProgressionSnapshot | null;
+  /** QuestManager.portalSnapshot() JSON — quest statuses + objective progress. */
+  quests: QuestPortalSnapshot | null;
+  /** skills: per-skill XP; null when the blueprint has no SkillSystem */
+  skills: PortalSkillsSnapshot | null;
   /** spec.custom.weaponMods.rateOfFire after 'firerate' upgrades; null = untouched. */
   weaponRateOfFire: number | null;
   buff: PortalBuffState | null;
@@ -101,6 +115,10 @@ export interface PortalParts {
   avatar: PlayerAvatar | null;
   inventory: Inventory | null;
   progression: Progression | null;
+  /** quest wave: the blueprint's player-scoped QuestManager (null = quests off) */
+  quests?: QuestManager | null;
+  /** the blueprint's SkillSystem (skills wave); null/undefined when absent */
+  skills?: SkillSystem | null;
   /** current timed buff, or null when the blueprint has none / none active */
   getBuff(): PortalBuffState | null;
   /** install a restored buff, or clear when null */
@@ -132,6 +150,8 @@ export function capturePlayerState(engine: Engine, parts: PortalParts): PlayerSt
     velocity: vel,
     inventory: parts.inventory ? parts.inventory.serialize() : new InventoryShim().serialize(),
     progression: parts.progression ? parts.progression.portalSnapshot() : null,
+    quests: parts.quests ? parts.quests.portalSnapshot() : null,
+    skills: parts.skills ? parts.skills.portalSnapshot() : null,
     weaponRateOfFire: readWeaponRateOfFire(engine),
     buff: buff ? { until: buff.until, mult: buff.mult } : null,
   };
@@ -163,6 +183,8 @@ export function applyPlayerState(engine: Engine, parts: PortalParts, snap: Playe
   }
   if (parts.inventory) parts.inventory.restore(snap.inventory);
   if (parts.progression && snap.progression) parts.progression.portalRestore(snap.progression);
+  if (parts.quests && snap.quests) parts.quests.portalRestore(snap.quests);
+  if (parts.skills && snap.skills) parts.skills.portalRestore(snap.skills);
   writeWeaponRateOfFire(engine, snap.weaponRateOfFire);
   parts.setBuff(snap.buff ? { until: snap.buff.until, mult: snap.buff.mult } : null);
 }

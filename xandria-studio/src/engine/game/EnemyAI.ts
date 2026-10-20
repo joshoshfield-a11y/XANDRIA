@@ -24,6 +24,17 @@ import type { EnemySpec, EnemyKind } from '@spec';
 import type { Projectiles } from './Projectiles';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import { Rng, hashString } from '../core/Rng';
+import { buildLootRng, rollLoot, type LootDrop } from './loot';
+/**
+ * UPGRADE LOOP (enemy-scaling): world difficulty scaling — enemies spawn
+ * with stat bands derived from max(player Progression level, map depth),
+ * all tuning in enemyScaling.ts. Additive: the authored spec is never
+ * mutated; spawnOne derives a scaled copy per enemy.
+ */
+import {
+  applyEnemyScaling,
+  mapDistanceFromSpec,
+} from './enemyScaling';
 
 /**
  * Salt for the enemy roster stream — keeps it off the NPC stream and the
@@ -34,6 +45,7 @@ export const ENEMY_SALT = 0x454e454d;
 export interface EnemyEvents {
   onPlayerHit?: (damage: number, from: THREE.Vector3) => void;
   onDeath?: (e: Enemy) => void;
+
   /** boss phase transitions (1 at ≤66% HP, 2 at ≤33% HP) */
   onPhase?: (e: Enemy, phase: number) => void;
 }
@@ -93,6 +105,17 @@ export class Enemy {
    * direct-render path (standalone enemies, blueprint initial builds).
    */
   instancer: NpcInstancer | null = null;
+  /**
+   * UPGRADE LOOP (enemy-scaling): XP multiplier for this enemy's kill
+   * (the band's xpMult; 1 when scaling is inactive). Set by
+   * EnemyManager.spawnOne; blueprints pass it to grantKillXp.
+   */
+  xpMult = 1;
+  /**
+   * UPGRADE LOOP (enemy-scaling): level-band index this enemy spawned in
+   * (0 = identity band). Informational — drives nothing by itself.
+   */
+  scalingBand = 0;
 
   /**
    * ENEMIES WAVE C: the instancible render root — rig group for
@@ -502,7 +525,25 @@ export interface EnemyPoi {
   r?: number;
 }
 
+/**
+ * ITEMS-EXPANSION: enemy loot-drop grant hooks. Blueprints set
+ * `manager.lootHooks` after the item world exists; null (default) means
+ * no drops and the die() path is byte-identical to before this wave.
+ */
+export interface EnemyLootHooks {
+  /** fired once per rolled drop on the die() path, with the death position */
+  onLoot: (drop: LootDrop, pos: THREE.Vector3) => void;
+}
+
 export interface EnemyManagerOpts {
+  /**
+   * ITEMS-EXPANSION: map seed for the loot stream (Rng(mapSeed ^
+   * LOOT_SALT)). Defaults to engine.spec.meta.seed — the portals
+   * contract says meta.seed IS the initial map's build seed. Every
+   * spawnForMap (portal arrival) re-seeds the stream with the new map's
+   * seed, so each map's kill sequence rolls identically.
+   */
+  lootSeed?: number;
   /** POIs to ring the roster around (blueprint passes landmarks.placed) */
   pois?: Array<THREE.Vector3 | EnemyPoi>;
   /** roster specs, cycled (default: engine.spec.enemies) */
@@ -516,6 +557,12 @@ export interface EnemyManagerOpts {
    * initial build.
    */
   onSpawned?: (e: Enemy, index: number) => void;
+  /**
+   * UPGRADE LOOP (enemy-scaling): live player Progression level, read at
+   * spawn time. Default () => 1 (band 0 = identity band, byte-identical
+   * spawns). Blueprints wire () => prog.level.
+   */
+  playerLevel?: () => number;
 }
 
 /** Spawns and manages the full enemy roster from spec. */
@@ -532,6 +579,17 @@ export class EnemyManager implements MapLocalEntitySystem {
    * update, reset first in despawnAll, unregister on the corpse sweep.
    */
   private readonly instancer: NpcInstancer;
+  /**
+   * ITEMS-EXPANSION: loot-drop grant hooks (blueprint-set, after the item
+   * world exists). Null = no drops; the death path is unchanged.
+   */
+  lootHooks: EnemyLootHooks | null = null;
+  /**
+   * ITEMS-EXPANSION: the per-map loot stream, Rng(mapSeed ^ LOOT_SALT).
+   * Re-seeded on every spawnForMap; lazily primed from opts.lootSeed /
+   * spec.meta.seed on the initial-build spawnAll path. Never engine.rng.
+   */
+  private lootRng: Rng | null = null;
 
   constructor(
     private engine: Engine,
@@ -548,17 +606,45 @@ export class EnemyManager implements MapLocalEntitySystem {
    * and spawnForMap (portal arrivals). Wiring is identical on both paths.
    */
   spawnOne(spec: EnemySpec, pos: THREE.Vector3, seed: number): Enemy {
-    const e = new Enemy(this.engine, spec, pos, this.projectiles, {
+    // UPGRADE LOOP (enemy-scaling): additive difficulty scaling. The band
+    // derives from max(player Progression level, map depth) at spawn time;
+    // the authored spec object is never mutated — the Enemy gets a scaled
+    // copy. Band 0 (levels 1-5) is the identity band (mults 1.0, variance 0),
+    // so fresh-player spawns are byte-identical to pre-scaling builds.
+    const scaled = applyEnemyScaling(
+      spec,
+      seed,
+      this.opts.playerLevel?.() ?? 1,
+      mapDistanceFromSpec(this.engine.spec),
+    );
+    const e = new Enemy(this.engine, scaled.spec, pos, this.projectiles, {
       onPlayerHit: this.events.onPlayerHit,
       // ANIMATION wave: the kill is counted at death; the roster entry is
       // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
       // so waves can't accumulate corpses forever
-      onDeath: (en) => { this.killed++; this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en); },
+      onDeath: (en) => {
+        this.killed++; this.engine.hooks.emit('onKill', { enemy: en }); this.events.onDeath?.(en);
+        // ITEMS-EXPANSION: seeded loot drops off the die() path. The
+        // stream is Rng(mapSeed ^ LOOT_SALT) — reset on every spawnForMap
+        // so each map's kill sequence rolls identically. A grant failure
+        // must never break the death path (variants, score, XP run above).
+        if (this.lootHooks) {
+          if (!this.lootRng) {
+            this.lootRng = buildLootRng(this.opts.lootSeed ?? this.engine.spec.meta.seed);
+          }
+          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss)) {
+            try { this.lootHooks.onLoot(drop, en.position); } catch { /* loot is cosmetic */ }
+          }
+        }
+      },
     }, seed);
     // ENEMIES WAVE C: every manager-spawned enemy can route its hit-flash
     // through the instancer; flash() no-ops for unregistered enemies, so
     // the direct-render initial-build path is unaffected.
     e.instancer = this.instancer;
+    // UPGRADE LOOP (enemy-scaling): per-enemy band metadata (see fields).
+    e.xpMult = scaled.xpMult;
+    e.scalingBand = scaled.bandIndex;
     this.enemies.push(e);
     return e;
   }
@@ -579,9 +665,18 @@ export class EnemyManager implements MapLocalEntitySystem {
    * Same mapSeed -> identical roster (kinds + positions).
    * Idempotent: despawns any live roster first (an aborted transition can
    * never double-spawn).
+   *
+   * UPGRADE LOOP (enemy-scaling): enemy STATS additionally depend on
+   * (playerLevel, mapDist) via enemyScaling.ts — same (mapSeed,
+   * playerLevel, map) -> identical encounters. Positions/kinds remain
+   * mapSeed-ALONE; variance streams use SCALING_SALT so the spawn-order
+   * stream above is untouched.
    */
   spawnForMap(mapSeed: number): void {
     this.despawnAll();
+    // ITEMS-EXPANSION: fresh map, fresh loot stream — the arrival kill
+    // sequence rolls identically for the same mapSeed.
+    this.lootRng = buildLootRng(mapSeed);
     const rng = new Rng((mapSeed ^ ENEMY_SALT) >>> 0);
     const specs = this.opts.specs ?? this.engine.spec.enemies ?? [];
     const density = this.opts.density ?? 1;

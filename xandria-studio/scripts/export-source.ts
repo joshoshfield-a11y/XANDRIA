@@ -66,6 +66,9 @@ const GENRE_SOURCE: Record<string, { file: string; buildFn: string; label: strin
   racing: { file: 'racing.ts', buildFn: 'buildRacing', label: 'Racing', intent: 'arcade rally race at sunset' },
   platformer: { file: 'platformer.ts', buildFn: 'buildPlatformer', label: 'Platformer', intent: 'jump-and-run platformer through floating ruins' },
   'top-down-shooter': { file: 'topdown.ts', buildFn: 'buildTopDown', label: 'Top-Down Shooter', intent: 'twin-stick top-down space shooter' },
+  survivor: { file: 'survivor.ts', buildFn: 'buildSurvivor', label: 'Survivor', intent: 'horde-survivor auto-shooter with XP gems and upgrades' },
+  'tower-defense': { file: 'towerDefense.ts', buildFn: 'buildTowerDefense', label: 'Tower Defense', intent: 'defend the core through waves, build turrets' },
+  'endless-runner': { file: 'endlessRunner.ts', buildFn: 'buildEndlessRunner', label: 'Endless Runner', intent: 'auto-running obstacle dodger to the finish gate' },
 };
 
 // Pinned to the exact versions the studio builds against.

@@ -369,6 +369,14 @@ describe('HUD — story cards', () => {
   const hudRoot = () => container.children[0];
   const findInRoot = (cls: string) =>
     hudRoot().children.find((c: any) => c.className === cls);
+  /**
+   * HUD-polish wave: blocking modals (level-up / branch choice) live in the
+   * dedicated .xhud-modals layer, not in .xhud.
+   */
+  const modalLayer = () =>
+    container.children.find((c: any) => c.className === 'xhud-modals');
+  const findInModals = (cls: string) =>
+    modalLayer().children.find((c: any) => c.className === cls);
   beforeEach(() => {
     installDom();
     container = makeEl('div');
@@ -420,7 +428,7 @@ describe('HUD — story cards', () => {
     const p = hud.showLevelUp(choices);
     expect(eng.pause).toHaveBeenCalled();
     expect(eng.state).toBe('paused');
-    const overlay = findInRoot('overlay');
+    const overlay = findInModals('overlay');
     expect(overlay).toBeDefined();
     const opts = overlay.children.find((c: any) => c.className === 'lvlopts');
     expect(opts.children).toHaveLength(3);
@@ -456,8 +464,9 @@ describe('HUD — story cards', () => {
 
     const hud2 = new HUD(container, spec);
     hud2.showEnd(false, base);
-    // hud2 appended a second .xhud root — its overlay lives there
-    const lastRoot = container.children[container.children.length - 1];
+    // hud2 appended a second .xhud root (plus its .xhud-modals layer) —
+    // the end overlay lives in the last .xhud root
+    const lastRoot = container.children.filter((c: any) => c.className === 'xhud').pop();
     overlay = lastRoot.children.filter((c: any) => c.className === 'overlay').pop();
     expect(overlay.children.find((c: any) => c.className === 'sub').textContent).toBe('You fell, hero.');
   });

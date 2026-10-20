@@ -101,6 +101,10 @@ const STAGE_DEFAULTS: Record<string, Partial<ObjectiveStage>> = {
   platformer: { type: 'collect', count: 8, timeLimit: 0 },
   'top-down-shooter': { type: 'survive', count: 0, timeLimit: 45 },
   racing: { type: 'race', count: 2, timeLimit: 0 },
+  // variety wave: editor stage presets for the new genres
+  survivor: { type: 'survive', count: 0, timeLimit: 60 },
+  'tower-defense': { type: 'eliminate', count: 8, timeLimit: 0 },
+  'endless-runner': { type: 'reach', count: 0, timeLimit: 0 },
 };
 
 export function getStages(spec: GameSpec): ObjectiveStage[] {

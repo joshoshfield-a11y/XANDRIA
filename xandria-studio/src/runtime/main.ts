@@ -30,6 +30,15 @@ import type { Npc } from '../engine/game/Npc';
 import { EnemyManager, ENEMY_SALT, type Enemy } from '../engine/game/EnemyAI';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
 import {
+  SCALING_SALT,
+  ENEMY_LEVEL_BANDS,
+  SCALING_BAND_WIDTH,
+  effectiveSpawnLevel,
+  bandIndexForLevel,
+  mapDistanceFromSpec,
+  applyEnemyScaling,
+} from '../engine/game/enemyScaling';
+import {
   GatheringManager,
   GatheringInteractionSession,
   GATHER_SALT,
@@ -48,6 +57,50 @@ import {
   resolveCraftingEnabled,
   ensureCraftingItemDefs,
 } from '../engine/game/crafting';
+import {
+  LOOT_SALT,
+  LOOT_MATERIAL_IDS,
+  LOOT_GEAR_IDS,
+  LOOT_TIER2_OUTPUT_IDS,
+  LOOT_CATALOG_RECIPES,
+  buildLootRng,
+  rollLoot,
+  ensureLootItemDefs,
+  lootItemDefs,
+} from '../engine/game/loot';
+import {
+  QuestManager,
+  buildQuestPool,
+  resolveQuestsEnabled,
+  validateQuestDef,
+  QUEST_SALT,
+} from '../engine/game/quests';
+import { SIDE_QUEST_SALT, buildSideQuestPool } from '../engine/game/sidequests';
+import { QuestTalkSession } from '../engine/game/questTalk';
+import {
+  BOSS_SALT,
+  BOSS_DEFS,
+  BOSS_ATTACKS,
+  DEFAULT_BOSS_ID,
+  planBossArena,
+  phaseIndexFor,
+  pickNextAttack,
+  rollCooldown,
+  attackHitsPlayer,
+  bossEnabled,
+  resolveBossDef,
+  resolveArenaRadius,
+  BossEncounter,
+} from '../engine/game/bosses';
+import type { BossBar } from '../engine/ui/BossBar';
+import {
+  SkillSystem,
+  SKILL_DEFS,
+  SKILL_IDS,
+  resolveSkillsEnabled,
+  resolveSkillsXpMultiplier,
+} from '../engine/game/skills';
+import { SkillsPanel } from '../engine/ui/SkillsPanel';
 
 declare global {
   interface Window {
@@ -245,6 +298,17 @@ function boot() {
       EnemyManager,
       ENEMY_SALT,
       resolveEnemyDensity,
+      // UPGRADE LOOP (enemy-scaling): pure scaling functions for the e2e
+      // band assertions (same shipped code the spawn path uses).
+      enemyScaling: {
+        SCALING_SALT,
+        ENEMY_LEVEL_BANDS,
+        SCALING_BAND_WIDTH,
+        effectiveSpawnLevel,
+        bandIndexForLevel,
+        mapDistanceFromSpec,
+        applyEnemyScaling,
+      },
       /** Test seam: submit never-ticked enemies once (instances persist). */
       submitStaticEnemies: (enemies: Enemy[]) => {
         const inst = NpcInstancer.for(engine);
@@ -325,6 +389,98 @@ function boot() {
       },
       /** Test seam: bucket/instance diagnostics. */
       craftingInstancerStats: () => NpcInstancer.for(engine).stats(),
+    };
+    // Items-expansion wave: test-mode seam for the loot e2e + unit
+    // harnesses — salts, ids, the seeded roll functions, and the live
+    // blueprint handles (manager owns the loot stream, item world
+    // receives the drops, inventory collects them).
+    (window.__XANDRIA__ as Record<string, unknown>).lootTest = {
+      LOOT_SALT,
+      LOOT_MATERIAL_IDS,
+      LOOT_GEAR_IDS,
+      LOOT_TIER2_OUTPUT_IDS,
+      LOOT_CATALOG_RECIPES,
+      buildLootRng,
+      rollLoot,
+      ensureLootItemDefs,
+      lootItemDefs,
+      /** Test seam: the live enemy manager from the blueprint build (owns the loot stream). */
+      liveManager: (): EnemyManager | null =>
+        (blueprint as { enemies?: EnemyManager }).enemies ?? null,
+      /** Test seam: the live item world (receives the drops). */
+      liveItemWorld: (): { liveItems: readonly { id: string; count: number }[] } | null =>
+        (blueprint as { itemWorld?: { liveItems: readonly { id: string; count: number }[] } | null }).itemWorld ?? null,
+      /** Test seam: the live player inventory. */
+      liveInventory: (): {
+        count: (id: string) => number;
+        equip: (id: string) => unknown;
+        getEquipped: (slot: string) => string | null;
+      } | null =>
+        (blueprint as { itemKit?: { inventory?: {
+          count: (id: string) => number;
+          equip: (id: string) => unknown;
+          getEquipped: (slot: string) => string | null;
+        } } | null }).itemKit?.inventory ?? null,
+    };
+    // Quest wave: test-mode seam for the quest e2e harness — the pool
+    // builder, salts, manager class and the live blueprint handles.
+    // Side-quests wave: SIDE_QUEST_SALT + buildSideQuestPool ride the same
+    // seam for the side-quest e2e harness.
+    (window.__XANDRIA__ as Record<string, unknown>).questTest = {
+      QuestManager,
+      QuestTalkSession,
+      QUEST_SALT,
+      SIDE_QUEST_SALT,
+      buildQuestPool,
+      buildSideQuestPool,
+      resolveQuestsEnabled,
+      validateQuestDef,
+      /** Test seam: the live quest manager from the blueprint build (null when disabled). */
+      liveManager: (): QuestManager | null =>
+        (blueprint as { quests?: QuestManager | null }).quests ?? null,
+      /** Test seam: the live talk session from the blueprint build (null when absent). */
+      liveTalkSession: (): QuestTalkSession | null =>
+        (blueprint as { talkSession?: QuestTalkSession | null }).talkSession ?? null,
+    };
+    // Boss-fights wave: test-mode seam for the boss e2e + unit harnesses —
+    // the salt, the data-driven defs, the pure placement/phase/pick
+    // functions, and the live blueprint handles (encounter + bar).
+    (window.__XANDRIA__ as Record<string, unknown>).bossTest = {
+      BOSS_SALT,
+      BOSS_DEFS,
+      BOSS_ATTACKS,
+      DEFAULT_BOSS_ID,
+      planBossArena,
+      phaseIndexFor,
+      pickNextAttack,
+      rollCooldown,
+      attackHitsPlayer,
+      bossEnabled,
+      resolveBossDef,
+      resolveArenaRadius,
+      BossEncounter,
+      /** Test seam: the live boss encounter from the blueprint build (null when absent). */
+      liveEncounter: (): BossEncounter | null =>
+        (blueprint as { bosses?: BossEncounter }).bosses ?? null,
+      /** Test seam: the live boss bar from the blueprint build (null when absent). */
+      liveBar: (): BossBar | null =>
+        (blueprint as { bossBar?: BossBar }).bossBar ?? null,
+    };
+    // Skills wave: test-mode seam for the skills e2e harness — the system,
+    // defs, resolvers, and the live blueprint handles.
+    (window.__XANDRIA__ as Record<string, unknown>).skillsTest = {
+      SkillSystem,
+      SKILL_DEFS,
+      SKILL_IDS,
+      SkillsPanel,
+      resolveSkillsEnabled,
+      resolveSkillsXpMultiplier,
+      /** Test seam: the live SkillSystem from the blueprint build (null when absent). */
+      liveSkills: (): SkillSystem | null =>
+        (blueprint as { skills?: SkillSystem }).skills ?? null,
+      /** Test seam: the live skills panel (null when skills disabled or UI absent). */
+      livePanel: (): SkillsPanel | null =>
+        (blueprint as { skillsPanel?: SkillsPanel | null }).skillsPanel ?? null,
     };
   }
   document.body.dataset.genre = spec.meta.genre;

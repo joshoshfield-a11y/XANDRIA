@@ -119,6 +119,21 @@ export interface GatheringManagerOpts {
   count?: number;
   /** where harvested materials land (blueprint passes itemKit?.inventory); null = harvest depletes the node but grants nothing */
   inventory?: InventoryLike | null;
+  /**
+   * Skills wave: flat harvest-yield bonus from the foraging skill rank
+   * (blueprint passes () => skills.harvestYieldBonus()). Deterministic —
+   * the bonus is a pure function of rank, never RNG.
+   */
+  yieldBonus?: () => number;
+  /**
+   * Fired after a successful harvest with the final granted counts
+   * (base yield + foraging bonus). Blueprints grant foraging XP here
+   * (skills wave) and report the grant to QuestManager.onHarvest
+   * (quest wave — fires even when no inventory is wired; the quest
+   * counts effort, not the landing). Additive — no behavior change
+   * when unwired.
+   */
+  onHarvested?: (grant: { materialId: string; count: number }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,17 +392,27 @@ export class GatheringManager implements MapLocalEntitySystem {
 
   /**
    * Harvest a node by interactable id: starts its collapse and grants the
-   * materials to the inventory (when one is wired). Returns the grant, or
-   * null when the id is unknown / already harvested.
+   * materials to the inventory (when one is wired). Returns the grant
+   * (base yield + foraging yield bonus), or null when the id is unknown /
+   * already harvested.
    */
   harvestById(id: string): { materialId: string; count: number } | null {
     const node = this.list.find((n) => n.interactable.id === id && !n.retired);
     if (!node) return null;
     const grant = node.harvest();
-    if (grant && this.opts.inventory) {
-      this.opts.inventory.add(grant.materialId, grant.count);
+    if (!grant) return null;
+    // Skills wave: the foraging rank adds a flat deterministic bonus on
+    // top of the seeded base yield.
+    const bonus = Math.max(0, Math.floor(this.opts.yieldBonus?.() ?? 0));
+    const total = { materialId: grant.materialId, count: grant.count + bonus };
+    if (this.opts.inventory) {
+      this.opts.inventory.add(total.materialId, total.count);
     }
-    return grant;
+    // Quest wave + skills wave: report the final grant — the quest
+    // counts the harvest even when no inventory is wired (effort, not
+    // the landing); blueprints grant foraging XP from the same event.
+    this.opts.onHarvested?.(total);
+    return total;
   }
 
   /**

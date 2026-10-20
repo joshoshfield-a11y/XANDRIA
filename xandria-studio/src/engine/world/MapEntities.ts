@@ -31,6 +31,9 @@
  *    (`new Rng(mapSeed ^ SALT)`), NEVER `engine.rng` — engine.rng keeps
  *    advancing across transitions, so consuming it would desync revisit
  *    spawns. Do not use Math.random or Date.now.
+ *    Sanctioned exception (upgrade loop, enemy-scaling): enemy STATS may
+ *    additionally depend on (playerLevel, mapDist) — same (mapSeed,
+ *    playerLevel, map) → identical stats; positions/kinds stay mapSeed-alone.
  * 3. Systems run in registration order on both paths; a throwing system must
  *    not abort the others (the registry try/catches and reports).
  * 4. Loot/pickup *state* (a chest already opened, an item already taken) is

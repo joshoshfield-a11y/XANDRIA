@@ -22,7 +22,7 @@
  *
  * Check order (documented so the Studio UI can mirror it):
  *   crafting-disabled -> recipe-not-found -> unknown-output /
- *   unknown-ingredient -> min-level -> missing-station ->
+ *   unknown-ingredient -> min-level -> missing-skill -> missing-station ->
  *   missing-ingredients -> no-room
  *
  * NPC/enemy behavior contracts are untouched; blueprints, npcInteraction.ts
@@ -31,6 +31,8 @@
 import type { GameSpec, ItemDef } from '@spec';
 import { Rng } from '../core/Rng';
 import { ItemBuilder } from './items/ItemBuilder';
+import { LOOT_CATALOG_RECIPES, lootTier2OutputDefs } from './loot';
+import type { SkillsLike } from './skills';
 
 // ---------------------------------------------------------------- salts
 
@@ -93,11 +95,14 @@ export interface CraftingRecipe {
   /** progression level gate; undefined = no gate */
   minLevel?: number;
   /**
-   * STUB for the skills wave: skill-gated recipes will key off this id.
-   * No gating is applied in this wave — the field exists so the skills
-   * wave doesn't have to reshape the schema.
+   * Skills wave: skill-gated recipes key off this id (one of the
+   * SKILL_IDS in engine/game/skills.ts — 'foraging' / 'smithing' /
+   * 'alchemy'). checkCraft() fails closed with 'missing-skill' when the
+   * player's rank is below minSkillRank (default 1). Undefined = no gate.
    */
   skillId?: string;
+  /** required skill rank for skillId-gated recipes; default 1 */
+  minSkillRank?: number;
 }
 
 /**
@@ -105,7 +110,7 @@ export interface CraftingRecipe {
  * this table (see buildRecipePool) — the catalog itself never changes at
  * runtime, so recipe ids are stable content references for B/C/e2e.
  */
-const RECIPE_CATALOG: readonly CraftingRecipe[] = [
+const BASE_RECIPE_CATALOG: readonly CraftingRecipe[] = [
   {
     id: 'recipe_field_kit',
     name: 'Field Repair Kit',
@@ -125,6 +130,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     output: { itemId: 'craft_iron_edge', count: 1 },
     stationId: STATION_ANVIL,
     minLevel: 2,
+    skillId: 'smithing',
+    minSkillRank: 2,
   },
   {
     id: 'recipe_fiber_weave',
@@ -141,6 +148,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     ],
     output: { itemId: 'craft_scrap_buckler', count: 1 },
     stationId: STATION_WORKBENCH,
+    skillId: 'smithing',
+    minSkillRank: 1,
   },
   {
     id: 'recipe_ember_tonic',
@@ -152,6 +161,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     output: { itemId: 'craft_ember_tonic', count: 1 },
     stationId: STATION_ALCHEMY,
     minLevel: 3,
+    skillId: 'alchemy',
+    minSkillRank: 2,
   },
   {
     id: 'recipe_spark_charge',
@@ -162,6 +173,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     ],
     output: { itemId: 'craft_spark_charge', count: 1 },
     stationId: STATION_FORGE,
+    skillId: 'smithing',
+    minSkillRank: 1,
   },
   {
     id: 'recipe_grip_wrap',
@@ -173,6 +186,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     output: { itemId: 'craft_grip_wrap', count: 1 },
     stationId: STATION_WORKBENCH,
     minLevel: 2,
+    skillId: 'smithing',
+    minSkillRank: 1,
   },
   {
     id: 'recipe_alloy_greaves',
@@ -180,6 +195,8 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     ingredients: [{ itemId: MAT_ORE, count: 4 }],
     output: { itemId: 'craft_alloy_greaves', count: 1 },
     stationId: STATION_FORGE,
+    skillId: 'smithing',
+    minSkillRank: 3,
   },
   {
     id: 'recipe_trail_mix',
@@ -196,6 +213,17 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
     ],
     output: { itemId: 'craft_whetstone', count: 1 },
   },
+];
+
+/**
+ * Items-expansion wave: tier-2 recipes (forged from tier-1 crafting
+ * outputs + enemy-drop materials) ride the same seeded pool. Appended
+ * after the base catalog so smaller pools stay exact prefixes of larger
+ * ones for the same seed (the prefix property the tests pin).
+ */
+const RECIPE_CATALOG: readonly CraftingRecipe[] = [
+  ...BASE_RECIPE_CATALOG,
+  ...LOOT_CATALOG_RECIPES,
 ];
 
 /** Catalog length — poolSize clamps to 1..this. */
@@ -266,10 +294,12 @@ export function materialItemDefs(): Record<string, ItemDef> {
 /**
  * Item defs for every recipe output in the catalog. Callers merge these
  * (with materialItemDefs) into the item tables before crafting runs —
- * see ensureCraftingItemDefs.
+ * see ensureCraftingItemDefs. Items-expansion: includes the tier-2
+ * outputs (lootTier2OutputDefs) so the tier-2 recipes validate.
  */
 export function craftedItemDefs(): Record<string, ItemDef> {
   return {
+    ...lootTier2OutputDefs(),
     craft_field_kit: new ItemBuilder('craft_field_kit')
       .named('Field Repair Kit')
       .consumable()
@@ -404,6 +434,7 @@ export type CraftFailureReason =
   | 'unknown-output'
   | 'unknown-ingredient'
   | 'min-level'
+  | 'missing-skill'
   | 'missing-station'
   | 'missing-ingredients'
   | 'no-room';
@@ -442,6 +473,12 @@ export interface CraftOptions {
   enabled?: boolean;
   /** player progression level for minLevel gates; default 0 */
   playerLevel?: number;
+  /**
+   * skill ranks for skillId-gated recipes (engine/game/skills SkillsLike).
+   * Omitted = rank 0, so skill-gated recipes fail closed with
+   * 'missing-skill'. Ungated recipes are unaffected.
+   */
+  skills?: SkillsLike;
   /**
    * station ids present in this map (workstream C supplies these).
    * A recipe with stationId fails closed ('missing-station') when its
@@ -521,6 +558,18 @@ export function checkCraft(
       'min-level',
       `Requires level ${recipe.minLevel} (player is ${level}).`,
     );
+  }
+  if (recipe.skillId !== undefined) {
+    const reqRank = recipe.minSkillRank ?? 1;
+    const haveRank = opts.skills ? opts.skills.rankOf(recipe.skillId) : 0;
+    if (haveRank < reqRank) {
+      const skillName = opts.skills ? opts.skills.skillName(recipe.skillId) : recipe.skillId;
+      return fail(
+        recipeId,
+        'missing-skill',
+        `Requires ${skillName} rank ${reqRank} (you are rank ${haveRank}).`,
+      );
+    }
   }
   if (recipe.stationId !== undefined && !hasStation(opts.stations, recipe.stationId)) {
     return fail(

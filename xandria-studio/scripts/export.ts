@@ -26,6 +26,9 @@ const GENRE_LABEL: Record<string, string> = {
   racing: 'racing',
   platformer: 'platformer',
   'top-down-shooter': 'top-down shooter',
+  survivor: 'survivor',
+  'tower-defense': 'tower defense',
+  'endless-runner': 'endless runner',
 };
 
 // ESM-safe __dirname (package is "type": "module", so __dirname doesn't exist)
@@ -125,6 +128,28 @@ function controlsFor(spec: GameSpec): string[] {
         'WASD / Arrow keys — move',
         'Mouse — aim · Left-click — shoot',
         'Space — dash · Shift — sprint',
+        'Esc or P — pause',
+      ];
+    case 'survivor':
+      return [
+        'WASD / Arrow keys — move',
+        'Weapon auto-fires at the nearest enemy',
+        'Collect XP gems to level up and choose upgrades',
+        'Survive the chapters, then slay the swarm alpha',
+        'Esc or P — pause',
+      ];
+    case 'tower-defense':
+      return [
+        'WASD / Arrow keys — move',
+        'Mouse — aim · Left-click — shoot',
+        'Stand on a pad and press E — build turret (150 score)',
+        'Esc or P — pause',
+      ];
+    case 'endless-runner':
+      return [
+        'A/D or Arrow keys — steer',
+        'Space — jump (press again mid-air to double-jump)',
+        'Dodge obstacles and reach the finish gate',
         'Esc or P — pause',
       ];
     default:

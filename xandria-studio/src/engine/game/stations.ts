@@ -76,6 +76,7 @@ import {
   type CraftingRecipe,
   type CraftingInventory,
 } from './crafting';
+import type { SkillsLike } from './skills';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 
 export { STATION_IDS };
@@ -421,8 +422,31 @@ export interface CraftingSessionOpts {
   inventory: () => CraftingInventory | null;
   /** player progression level for minLevel gates */
   playerLevel: () => number;
+  /**
+   * Skills wave: skill ranks for skillId-gated recipes (null = no skill
+   * data; gated recipes fail closed). Passed through to the panel.
+   * Optional — omitted behaves like () => null.
+   */
+  skills?: () => SkillsLike | null;
+  /**
+   * Skills wave: craft-queue time multiplier per station id. Passed
+   * through to the panel.
+   */
+  craftTimeMult?: (stationId: string | null) => number;
+  /**
+   * Skills wave: fired after a successful craft() with the completed
+   * recipe. Passed through to the panel. (Quest wave rides the same
+   * callback — blueprints report recipe.id to QuestManager.onCraft.)
+   */
+  onCrafted?: (recipe: CraftingRecipe) => void;
   /** toast surface for craft success/failure feedback */
   toast: (msg: string) => void;
+  /**
+   * Quest wave: true while another modal UI (the quest dialogue) owns
+   * input — the station prompt defers so [E] can't open the crafting
+   * panel behind it. Additive.
+   */
+  isModalOpen?: () => boolean;
 }
 
 /** Stale-session guard: one live session per engine (mirrors the gathering session rule). */
@@ -464,13 +488,16 @@ export class CraftingInteractionSession {
       recipes: opts.recipes,
       stationIds: () => new Set(stations.stationIds()),
       playerLevel: opts.playerLevel,
+      skills: opts.skills,
+      craftTimeMult: opts.craftTimeMult,
+      onCrafted: opts.onCrafted,
       toast: opts.toast,
     });
     this.prompt = new InteractionPrompt(container, engine.npcInteractions, {
       getPlayerPos: () => this.playerPos(),
       getRival: (pos) => this.chestRival(pos),
       onActivate: (target) => this.openFor(target.id),
-      isModalOpen: () => this.panel?.isOpen ?? false,
+      isModalOpen: () => (this.panel?.isOpen ?? false) || (this.opts.isModalOpen?.() ?? false),
     }, doc);
   }
 

@@ -89,9 +89,11 @@ export function makeLevelUpFlow(
   };
 }
 
-/** XP for a kill; triggers the level-up queue when a level is gained. */
-export function grantKillXp(prog: Progression, notifyLevelUp: () => void): void {
-  if (prog.onKill()) notifyLevelUp();
+/** XP for a kill; triggers the level-up queue when a level is gained.
+ * UPGRADE LOOP (enemy-scaling): xpMult is the killed enemy's band XP
+ * multiplier (defaults to 1 — unscaled); blueprints pass e.xpMult. */
+export function grantKillXp(prog: Progression, notifyLevelUp: () => void, xpMult = 1): void {
+  if (prog.onKill(xpMult)) notifyLevelUp();
 }
 
 /** XP for a pickup; triggers the level-up queue when a level is gained. */

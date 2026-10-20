@@ -44,17 +44,26 @@ import {
 } from './fx';
 import { ChapterDresser } from './dressing';
 import { NpcManager } from '../engine/game/NpcManager';
+import { QuestManager, buildQuestPool, resolveQuestsEnabled } from '../engine/game/quests';
+import { buildSideQuestPool } from '../engine/game/sidequests';
+import { QuestTalkSession } from '../engine/game/questTalk';
+import { QuestTracker } from '../engine/ui/QuestTracker';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
+import { ensureLootItemDefs } from '../engine/game/loot';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
+import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { SkillsPanel } from '../engine/ui/SkillsPanel';
 import { resolveGatheringDensity } from '../engine/game/crafting';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { Structures } from '../engine/world/Structures';
+import { LandmarkSystem } from '../engine/world/LandmarkSystem';
 import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
 import { buildItemKit, type BlueprintItemKit } from './itemKit';
+import { wireBossFights } from './bosses';
 
 export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud } = engine;
@@ -69,6 +78,15 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
 
   // campaign layer: XP progression (the intro card is shown by Engine.beginPlay)
   const prog = new Progression(engine);
+  // skills wave: data-driven skill system (foraging / smithing / alchemy)
+  // with per-skill XP and ranks. Blueprint-owned like prog — rides the
+  // live object across portal transitions. Rank-ups toast; the levelup
+  // audio cue fires inside SkillSystem.addXp.
+  const skills = new SkillSystem(engine, {
+    onRankUp: (def, rank) => {
+      engine.hud.toast(`${def.name} rank ${rank}!`);
+    },
+  });
   let notifyLevelUp: () => void = () => {};
   // content depth: enemy variants, timed pickup effects, chapter dressing
   const fx = new EffectState();
@@ -85,10 +103,12 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   scene.add(structures.group);
   // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint.
   // Landmarks come before scatter so hero specimen plants can ring them (wave 2B).
-  const landmarks = structures.landmarks(spec, terrain, scene, spec.meta.seed, {
-    exclusion: [{ x: 0, z: 0, r: 12 }], quality: engine.effectiveQuality(),
-    maxRealLights: engine.tiers.flags.maxRealLights, // graphics wave 2 (E): tier real-light budget
-  });
+  // Portal-backlog wave: landmarks (+ structure sets) are a map-local entity
+  // system (id 'landmarks') — despawned on portal departure, rebuilt from
+  // the derived map seed on arrival.
+  const landmarks = new LandmarkSystem(engine, { exclusion: [{ x: 0, z: 0, r: 12 }] });
+  engine.portalEntities.register(landmarks);
+  landmarks.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
   const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: [{ x: 0, z: 0, r: 12 }],
     engine,
@@ -96,14 +116,6 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier scatter density
     windMul: engine.tiers.flags.windMul, // graphics wave 2 (E): tier wind-sway intensity
     heroSpots: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })), // wave 2B: hero plants
-  });
-  // graphics wave 2 (workstream C): per-biome structure sets — hero cluster
-  // near spawn + chunk-deterministic satellite clusters, one shared
-  // instancer so draw calls stay flat (seeded per map via spec.meta.seed)
-  structures.structureSets(spec, terrain, scene, spec.meta.seed, {
-    exclusion: [{ x: 0, z: 0, r: 12 }], quality: engine.effectiveQuality(),
-    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier structure density
-    structureShadows: engine.tiers.flags.structureShadows, // graphics wave 2 (E): s25 shadow diet
   });
 
   // gameplay wave (workstream B): ambient NPC villagers settled near
@@ -147,8 +159,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       hud.setScore(engine.score);
       // N6: grant XP before recording the kill — addProgress may end the run
       // (engine.win), and the level-up modal must never open over the end screen
-      grantKillXp(prog, notifyLevelUp);
+      grantKillXp(prog, notifyLevelUp, e.xpMult);
       objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
+      quests?.onKill(e.spec.kind); // quest wave: kills feed kill objectives
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
@@ -166,6 +179,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
     // enemies wave (C): Studio ENEMY DENSITY slider (spec.custom.enemies)
     // scales every spec count on the portal-arrival path.
+    // UPGRADE LOOP (enemy-scaling): live player level feeds the spawn stat band.
+    playerLevel: () => prog.level,
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
   engine.portalEntities.register(enemies);
@@ -181,19 +196,92 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // (default true). Idempotent; Studio-authored defs win (no-overwrite).
   const craftingEnabled = resolveCraftingEnabled(spec);
   if (craftingEnabled) ensureCraftingItemDefs(spec);
+  // items-expansion wave: enemy loot-drop defs (materials + gear + tier-2
+  // outputs). Merges only when custom.items exists — never activates the
+  // item system on its own (preserves wireItems' null contract).
+  ensureLootItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
+  // items-expansion wave: enemy loot drops — seeded per-map drop tables
+  // off the EnemyManager die() path, granted as world pickups the player
+  // walks over to collect. Independent of the CRAFTING toggle (loot is an
+  // items-wave feature, not a crafting feature).
+  if (itemKit) {
+    const kit = itemKit;
+    enemies.lootHooks = {
+      onLoot: (drop, pos) => {
+        kit.itemWorld.drop(drop.itemId, pos.clone().add(new THREE.Vector3(0, 0.8, 0)), undefined, drop.count);
+        const def = spec.custom?.items?.defs?.[drop.itemId];
+        engine.hud.toast(`Loot: ${drop.count > 1 ? `${drop.count}\u00d7 ` : ''}${def?.name ?? drop.itemId}`);
+      },
+    };
+  }
+  // boss-fights wave: data-driven boss encounters (seeded arena, telegraphed
+  // attacks, boss bar). Map-local lifecycle via engine.portalEntities
+  // (id 'boss'); the arena + scheduler run only when the spec's boss flag
+  // is enabled (default: any boss objective stage).
+  const { encounter: bosses, bar: bossBar } = wireBossFights(engine, spec, {
+    manager: enemies,
+    terrain,
+    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+  });
   // crafting wave (workstream B): harvestable gathering nodes (ore veins,
   // fiber plants, salvage caches), map-local lifecycle. The manager
   // registers itself with engine.portalEntities ({ id: 'gathering' }) so
   // portal transitions despawn/respawn the node roster deterministically
   // per map seed. Depleted state is NOT persisted across portals (design —
   // arrival regenerates the identical roster, like NPCs/enemies).
+  // quest wave: the main-story quest line. The QuestManager is PLAYER-SCOPED,
+  // not map-local — it is never registered in engine.portalEntities, so
+  // portal departure/arrival leaves quest progress untouched (same standing
+  // as Progression/Inventory; see engine/game/quests.ts). engine.questManager
+  // exposes it to PortalState's snapshot/restore.
+  // quest wave: declared early — the QuestManager's onQuestsChanged thunk
+  // references it, and the manager notifies during its own construction
+  // (refreshTracker in the constructor), so the binding must exist first.
+  let talkSession: QuestTalkSession | null = null;
+  const questsEnabled = resolveQuestsEnabled(spec);
+  const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
+  // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
+  if (questTracker) questTracker.onRender = () => engine.touch.repositionPauseButton();
+  const quests = questsEnabled
+    ? new QuestManager({
+        defs: [...buildQuestPool(spec, { includeTalk: true }),
+          // side-quests wave: independent side quests ride the same
+          // manager (available from the start, no chaining).
+          ...buildSideQuestPool(spec, { includeTalk: true })],
+        inventory: () => itemKit?.inventory ?? null,
+        defsTable: () => spec.custom?.items?.defs ?? {},
+        progression: prog,
+        tracker: questTracker,
+        toast: (m) => engine.hud.toast(m),
+        getTransitions: () => engine.portalManager?.transitions ?? 0,
+        // side-quests wave: explore objectives with target 'maps' /
+        // 'biomes' sample the portal manager's map coordinate; the world
+        // seed (NOT spec.meta.seed, the map build seed) feeds deriveMapBiome.
+        getCurrentMap: () => engine.portalManager?.coord ?? null,
+        worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onLevelUp: () => notifyLevelUp(),
+        // quest wave: an open quest dialogue live-refreshes when its quest
+        // completes underneath it (talk objective fired on open). The thunk
+        // is lazy — talkSession is constructed just below.
+        onQuestsChanged: () => talkSession?.refreshOpenDialogue(),
+      })
+    : null;
+  engine.questManager = quests;
   const gathering = new GatheringManager(engine, {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
     inventory: itemKit?.inventory ?? null,
     // crafting wave (A): Studio GATHERING DENSITY slider (spec.custom.crafting)
     // scales the roster on the portal-arrival path — same as the enemy density.
     density: resolveGatheringDensity(spec),
+    // skills wave: foraging rank adds a flat deterministic yield bonus;
+    // every harvest grants foraging XP. quest wave: harvests also feed
+    // gather objectives, counted with the final granted counts.
+    yieldBonus: () => skills.harvestYieldBonus(),
+    onHarvested: (grant) => {
+      skills.onHarvest();
+      quests?.onHarvest(grant.materialId, grant.count);
+    },
   });
   engine.portalEntities.register(gathering);
   // crafting wave (C): the gathering roster only spawns when crafting is
@@ -218,12 +306,46 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         defs: () => spec.custom?.items?.defs ?? {},
         inventory: () => itemKit?.inventory ?? null,
         playerLevel: () => prog.level,
+        // skills wave: skillId-gated recipes, craft-speed bonus, craft XP.
+        skills: () => skills,
+        craftTimeMult: (stationId) => skills.craftTimeMult(stationId ?? undefined),
+        onCrafted: (recipe) => {
+          skills.onCraft(recipe.stationId);
+          // quest wave: crafts feed craft objectives
+          quests?.onCraft(recipe.id);
+        },
         toast: (m) => engine.hud.toast(m),
+        // quest wave: the quest dialogue owns E while open so the panel
+        // can't open behind it
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
       })
     : null;
+  // quest wave: the [E] Talk prompt + quest dialogue for villagers. The
+  // session is manager-based (per-frame refresh), so portal respawns need
+  // no special handling; it stamps requires/produces onto the NPC
+  // interactables (see engine/game/questTalk.ts). Assigned (not declared)
+  // here — the binding was hoisted above the QuestManager construction.
+  talkSession = questsEnabled && quests
+    ? new QuestTalkSession(engine, npcManager, quests)
+    : null;
   const gatheringSession = new GatheringInteractionSession(engine, gathering, {
-    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
   });
+  // skills wave: the skills panel (K key / SKILLS chip toggle). Never
+  // opens while the crafting panel owns input. Not built when skills
+  // are disabled in the spec.
+  const skillsPanel = resolveSkillsEnabled(spec)
+    ? new SkillsPanel({
+        container: engine.container,
+        skills: () => skills,
+        recipes: () => buildRecipePool(spec),
+        defs: () => spec.custom?.items?.defs ?? {},
+        inventory: () => itemKit?.inventory ?? null,
+        stationIds: () => new Set(stations.stationIds()),
+        playerLevel: () => prog.level,
+        isModalOpen: () => stationSession?.isPanelOpen ?? false,
+      })
+    : null;
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -360,6 +482,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     itemKit?.update(dt);
     gatheringSession.update(dt); // crafting wave (B): [E] Harvest prompt + registration refresh
     stationSession?.update(dt); // crafting wave (C): [E] Use prompt + crafting panel
+    talkSession?.update(dt); // quest wave: [E] Talk prompt + quest dialogue + requires/produces refresh
+    quests?.update(dt); // quest wave: explore objectives read the portal transition counter
 
     // attack input (melee damage scales with the damage upgrade multiplier)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
@@ -427,15 +551,16 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       if (b) bossAura.position.copy(b.position).add(new THREE.Vector3(0, 3, 0));
     }
 
-    // FIX 5: combat intensity decays to baseline; boss bar during boss fights
-    // (legacy boss objective or boss stage)
+    // FIX 5: combat intensity decays to baseline
     combatT = Math.max(0, combatT - dt * 0.25);
     engine.audio.setIntensity(0.35 + combatT * 0.6);
-    variants.updateBossBar(spec.objective.type === 'boss' || isBossStageActive(spec, objectives));
+    // boss-fights wave: arena tether + telegraphed attacks + boss bar
+    // (the encounter no-ops when the spec's boss flag is off)
+    bosses.update(dt, avatar.ctrl.position);
 
     // camera
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, npcs: npcManager, gathering, stations, stationSession, gatheringSession, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null };
+  return { avatar, enemies, skills, skillsPanel, npcs: npcManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar };
 }

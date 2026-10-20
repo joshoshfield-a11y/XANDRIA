@@ -69,14 +69,24 @@ test('npcs: spawn, prompt, dialogue stub, zero errors, desktop + mobile', async 
   });
   expect(roster).toHaveLength(4);
 
-  const registrySize = (): Promise<number> => page.evaluate(() => {
+  const registryIds = (): Promise<string[]> => page.evaluate(() => {
     const X = (window as unknown as { __XANDRIA__?: any }).__XANDRIA__;
     // count only NPC interactables; the crafting wave also registers
     // gathering nodes (type 'node') and stations (type 'station')
     const V = X.engine.camera.position.constructor;
-    return X.engine.npcInteractions.near(new V(0, 0, 0), 1e9).filter((i: any) => i.type === 'npc').length;
+    return X.engine.npcInteractions.near(new V(0, 0, 0), 1e9)
+      .filter((i: any) => i.type === 'npc')
+      .map((i: any) => i.id);
   });
-  expect(await registrySize()).toBe(4);
+  // Quest wave: the blueprint's own villager roster is registered into the
+  // same registry (that is what makes villagers talkable in the live game),
+  // so the total is the test's 4 NPCs + the blueprint roster — assert the
+  // test's 4 are present rather than an exact total.
+  const ids = await registryIds();
+  expect(ids.length).toBeGreaterThanOrEqual(4);
+  const testIds: string[] = await page.evaluate(() =>
+    (window as unknown as { __NPCS__?: any }).__NPCS__.npcs.map((n: any) => n.interactable.id));
+  for (const id of testIds) expect(ids).toContain(id);
 
   /** teleport the avatar to 2m from NPC i (inside the 3m prompt
    *  radius, outside the 1.8m repulsion keep-out; NPCs are frozen apart) */
@@ -94,13 +104,18 @@ test('npcs: spawn, prompt, dialogue stub, zero errors, desktop + mobile', async 
     return el.textContent;
   });
 
-  const dialogueShown = (): Promise<boolean> => page.evaluate(() => {
-    const el = document.getElementById('xandria-dialogue-panel') as HTMLElement | null;
-    return !!el && el.style.display === 'block';
+  // Quest wave: the blueprint's QuestTalkSession owns its own dialogue
+  // panel with the same id, so read the VISIBLE one (the stub this test
+  // opens), not merely the first in DOM order. (Text is extracted inside
+  // the page — DOM elements can't cross the evaluate boundary.)
+  const visibleDialogueText = (): Promise<string | null> => page.evaluate(() => {
+    const els = Array.from(document.querySelectorAll('#xandria-dialogue-panel')) as HTMLElement[];
+    const vis = els.find((el) => el.style.display === 'block');
+    return vis ? vis.textContent : null;
   });
+  const dialogueShown = async (): Promise<boolean> => (await visibleDialogueText()) !== null;
 
-  const dialogueText = (): Promise<string> => page.evaluate(() =>
-    (document.getElementById('xandria-dialogue-panel') as HTMLElement | null)?.textContent ?? '');
+  const dialogueText = async (): Promise<string> => (await visibleDialogueText()) ?? '';
 
   /** full prompt -> E -> dialogue -> Escape cycle for NPC i */
   const talkCycle = async (i: number) => {

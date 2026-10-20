@@ -62,6 +62,10 @@ describe('GameSpec schema', () => {
       if (g === 'fps-arena') s.player.camera = 'first-person';
       if (g === 'platformer') s.player.camera = 'side';
       if (g === 'top-down-shooter') s.player.camera = 'top-down';
+      // variety wave: new genres carry their own camera locks (schema coherence rules)
+      if (g === 'survivor') s.player.camera = 'top-down';
+      if (g === 'tower-defense') s.player.camera = 'top-down';
+      if (g === 'endless-runner') s.player.camera = 'chase';
       expect(validateSpec(s).ok).toBe(true);
     }
   });

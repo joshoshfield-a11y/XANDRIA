@@ -98,6 +98,11 @@ const GENRE_BIAS: Record<Genre, [number, number, number]> = {
   racing: [1.5, 1.0, 2.5],
   platformer: [0.8, 2.0, 1.5],
   'top-down-shooter': [2.0, 1.0, 0.8],
+  // variety wave: survivor mirrors the arena; tower-defense wants towers as
+  // sight markers around the core; the runner wants arches over the track.
+  survivor: [2.0, 1.0, 0.8],
+  'tower-defense': [2.2, 1.2, 0.8],
+  'endless-runner': [1.0, 2.2, 1.5],
 };
 
 const KIND_ORDER: LandmarkKind[] = ['beam-tower', 'ruin-arch', 'bridge'];

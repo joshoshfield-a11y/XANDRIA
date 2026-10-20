@@ -109,6 +109,29 @@ export function layoutForGenre(genre: string): TouchLayout {
           { label: 'JUMP', action: 'jump', kind: 'tap', right: 24, bottom: 96, size: 88 },
         ],
       };
+    case 'survivor':
+      return {
+        move: 'stick', aim: 'rstick', autoForward: false,
+        buttons: [
+          { label: 'DASH', action: 'dash', kind: 'tap', right: 24, bottom: 216, size: 60 },
+        ],
+      };
+    case 'tower-defense':
+      return {
+        move: 'stick', aim: null, autoForward: false,
+        buttons: [
+          { label: 'BUILD', action: 'interact', kind: 'tap', right: 24, bottom: 96, size: 88 },
+          { label: 'DASH', action: 'dash', kind: 'tap', right: 128, bottom: 44, size: 60 },
+        ],
+      };
+    case 'endless-runner':
+      return {
+        move: 'stick', aim: null, autoForward: true,
+        buttons: [
+          { label: 'JUMP', action: 'jump', kind: 'tap', right: 24, bottom: 96, size: 88 },
+          { label: 'DASH', action: 'dash', kind: 'tap', right: 128, bottom: 44, size: 60 },
+        ],
+      };
     default:
       return {
         move: 'stick', aim: null, autoForward: false,
@@ -264,6 +287,9 @@ export class TouchControls {
    * R3-T1: place the pause button below the HUD score panel's measured bottom
    * edge (+ PAUSE_BUTTON_GAP). The panel is 81–101 px tall depending on genre
    * and CSS breakpoint, so a hard-coded offset can't clear it everywhere.
+   * HUD-polish: also clears the quest tracker (#xandria-quest-tracker), which
+   * sits top-right below the score panel and otherwise paints over the
+   * button on touch layouts.
    * No-ops (keeping the CSS fallback) when there is no HUD score panel in the
    * container or it isn't laid out yet.
    */
@@ -274,8 +300,25 @@ export class TouchControls {
     if (!score) return; // no HUD score panel — keep the CSS fallback
     const sr = score.getBoundingClientRect();
     if (sr.height <= 0) return; // not laid out yet — keep the CSS fallback
+    let bottom = sr.bottom;
+    const tracker = this.container.querySelector('#xandria-quest-tracker') as HTMLElement | null;
+    if (tracker && tracker.style.display !== 'none') {
+      const tr = tracker.getBoundingClientRect();
+      if (tr.height > 0) bottom = Math.max(bottom, tr.bottom);
+    }
     const rr = this.root.getBoundingClientRect();
-    pb.style.top = `${pauseButtonTop(sr.bottom, rr.top)}px`;
+    pb.style.top = `${pauseButtonTop(bottom, rr.top)}px`;
+  }
+
+  /**
+   * HUD-polish: re-run the pause-button layout after the quest tracker
+   * re-renders (quests accepted/completed mid-run change its height and
+   * visibility). Blueprints wire `questTracker.onRender` to this. No-op when
+   * touch controls are inactive.
+   */
+  repositionPauseButton() {
+    if (!this.active) return;
+    this.positionPauseButton();
   }
 
   /**

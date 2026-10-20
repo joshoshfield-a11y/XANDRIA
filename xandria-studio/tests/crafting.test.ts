@@ -34,6 +34,7 @@ import {
   craft,
   type CraftOptions,
 } from '../src/engine/game/crafting';
+import { lootItemDefs } from '../src/engine/game/loot';
 
 function specWith(seed: number): GameSpec {
   const s = defaultSpec(seed);
@@ -62,6 +63,17 @@ function opts(inv: Inventory, extra?: Partial<CraftOptions>): CraftOptions {
 function give(inv: Inventory, id: string, n: number) {
   expect(inv.add(id, n)).toBe(0);
 }
+
+/**
+ * Skills wave: several catalog recipes are now skill-gated. Tests whose
+ * intent is a LATER gate (station, ingredients) pass max ranks so the
+ * skill gate is not what fires; the missing-skill gate itself is covered
+ * in tests/skills.test.ts.
+ */
+const skillsStub = (rank: number) => ({
+  rankOf: (_id: string) => rank,
+  skillName: (id: string) => id,
+});
 
 describe('recipe pool determinism', () => {
   it('same spec -> identical pool (ids, order, contents)', () => {
@@ -140,7 +152,15 @@ describe('material + crafted item defs', () => {
     for (const r of pool) {
       expect(defs[r.output.itemId]).toBeDefined();
       for (const ing of r.ingredients) {
-        expect(materialItemDefs()[ing.itemId]).toBeDefined();
+        // items-expansion: tier-2 recipes consume tier-1 crafting outputs
+        // (craft_*) and enemy-drop materials (mat_*) alongside the base
+        // raw materials — all three tables are legitimate defs.
+        expect(
+          materialItemDefs()[ing.itemId] ??
+            craftedItemDefs()[ing.itemId] ??
+            lootItemDefs()[ing.itemId],
+          ing.itemId,
+        ).toBeDefined();
         expect(ing.count).toBeGreaterThan(0);
       }
       if (r.stationId !== undefined) expect(STATION_IDS).toContain(r.stationId);
@@ -215,7 +235,7 @@ describe('craft() transaction', () => {
     give(inv, MAT_ORE, 3);
     give(inv, MAT_SCRAP, 1);
     const pool = buildRecipePool(specWithCrafting(12, { recipes: { poolSize: RECIPE_CATALOG_SIZE } }));
-    const noStation = craft(pool, 'recipe_iron_edge', opts(inv, { playerLevel: 5 }));
+    const noStation = craft(pool, 'recipe_iron_edge', opts(inv, { playerLevel: 5, skills: skillsStub(3) }));
     expect(noStation.ok).toBe(false);
     expect(noStation.reason).toBe('missing-station');
     // nothing consumed on the failure path
@@ -225,7 +245,7 @@ describe('craft() transaction', () => {
     const withStation = craft(
       pool,
       'recipe_iron_edge',
-      opts(inv, { playerLevel: 5, stations: new Set([STATION_ANVIL]) }),
+      opts(inv, { playerLevel: 5, stations: new Set([STATION_ANVIL]), skills: skillsStub(3) }),
     );
     expect(withStation.ok).toBe(true);
     expect(inv.count('craft_iron_edge')).toBe(1);
@@ -241,10 +261,10 @@ describe('craft() transaction', () => {
       return inv;
     };
     const stations = new Set([STATION_ANVIL]);
-    const low = craft(pool, 'recipe_iron_edge', opts(mk(), { playerLevel: 1, stations }));
+    const low = craft(pool, 'recipe_iron_edge', opts(mk(), { playerLevel: 1, stations, skills: skillsStub(3) }));
     expect(low.ok).toBe(false);
     expect(low.reason).toBe('min-level');
-    const exact = craft(pool, 'recipe_iron_edge', opts(mk(), { playerLevel: 2, stations }));
+    const exact = craft(pool, 'recipe_iron_edge', opts(mk(), { playerLevel: 2, stations, skills: skillsStub(3) }));
     expect(exact.ok).toBe(true);
   });
 
@@ -344,7 +364,7 @@ describe('craft() transaction', () => {
     give(inv, MAT_SCRAP, 3);
     give(inv, MAT_ORE, 1);
     const pool = buildRecipePool(specWithCrafting(20, { recipes: { poolSize: RECIPE_CATALOG_SIZE } }));
-    const res = craft(pool, 'recipe_scrap_buckler', opts(inv, { stations: (id) => id === STATION_WORKBENCH }));
+    const res = craft(pool, 'recipe_scrap_buckler', opts(inv, { stations: (id) => id === STATION_WORKBENCH, skills: skillsStub(1) }));
     expect(res.ok).toBe(true);
     expect(inv.count('craft_scrap_buckler')).toBe(1);
   });

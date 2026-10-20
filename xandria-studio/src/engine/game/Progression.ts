@@ -88,9 +88,13 @@ export class Progression {
     return leveled;
   }
 
-  /** Convenience: XP for a kill. Returns true on level-up. */
-  onKill(): boolean {
-    return this.addXp(this.opts.xpPerKill);
+  /**
+   * Convenience: XP for a kill. Returns true on level-up.
+   * UPGRADE LOOP (enemy-scaling): xpMult is the killed enemy's band XP
+   * multiplier (1 = unscaled); additive optional param.
+   */
+  onKill(xpMult = 1): boolean {
+    return this.addXp(this.opts.xpPerKill * xpMult);
   }
 
   /** Convenience: XP for a pickup. Returns true on level-up. */

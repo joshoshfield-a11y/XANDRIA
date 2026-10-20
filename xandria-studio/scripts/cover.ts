@@ -217,6 +217,9 @@ const GENRE_LABEL: Record<string, string> = {
   racing: 'RACING',
   platformer: 'PLATFORMER',
   'top-down-shooter': 'TOP-DOWN SHOOTER',
+  survivor: 'SURVIVOR',
+  'tower-defense': 'TOWER DEFENSE',
+  'endless-runner': 'ENDLESS RUNNER',
 };
 
 /** Wrap a title into lines that fit maxWidth at the given scale. */

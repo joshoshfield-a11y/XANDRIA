@@ -33,6 +33,7 @@ import {
   type CraftingRecipe,
   type CraftingInventory,
 } from '../game/crafting';
+import type { SkillsLike } from '../game/skills';
 
 export interface CraftingPanelOpts {
   container: HTMLElement;
@@ -48,6 +49,24 @@ export interface CraftingPanelOpts {
   stationIds: () => ReadonlySet<string>;
   /** player progression level for minLevel gates */
   playerLevel: () => number;
+  /**
+   * Skills wave: skill ranks for skillId-gated recipes (null = no skill
+   * data; gated recipes fail closed). Blueprints pass () => skills.
+   * Optional — omitted behaves like () => null.
+   */
+  skills?: () => SkillsLike | null;
+  /**
+   * Skills wave: craft-queue time multiplier for the open station
+   * (blueprint passes (stationId) => skills.craftTimeMult(stationId)).
+   * 1 = the default queueSeconds.
+   */
+  craftTimeMult?: (stationId: string | null) => number;
+  /**
+   * Skills wave: fired after a successful craft() transaction with the
+   * completed recipe. Blueprints grant smithing/alchemy XP here and
+   * report the craft to QuestManager.onCraft (quest wave).
+   */
+  onCrafted?: (recipe: CraftingRecipe) => void;
   /** toast surface for craft success/failure feedback */
   toast: (msg: string) => void;
   /** per queued craft, seconds of timed progress (default 1.2) */
@@ -243,7 +262,9 @@ export class CraftingPanel {
     }
     const recipe = this.opts.recipes().find((r) => r.id === recipeId);
     if (!recipe) return;
-    this.queue.push({ recipeId, recipeName: recipe.name, t: 0, dur: this.queueSeconds, barEl: null });
+    // Skills wave: the craft-queue speed bonus rides the open station.
+    const mult = this.opts.craftTimeMult?.(this.currentStationId) ?? 1;
+    this.queue.push({ recipeId, recipeName: recipe.name, t: 0, dur: this.queueSeconds * mult, barEl: null });
     this.renderQueue();
   }
 
@@ -276,6 +297,7 @@ export class CraftingPanel {
       defs: this.opts.defs(),
       enabled: true,
       playerLevel: this.opts.playerLevel(),
+      skills: this.opts.skills?.() ?? undefined,
       stations: this.activeStations(),
     };
     const verdict = checkCraft(recipes, recipeId, craftOpts);
@@ -289,6 +311,9 @@ export class CraftingPanel {
     if (res.ok && res.granted) {
       const def = this.opts.defs()[res.granted.itemId];
       this.opts.toast(`Crafted ${res.granted.count > 1 ? `${res.granted.count}× ` : ''}${def?.name ?? res.granted.itemId}`);
+      // Skills wave + quest wave: the craft really happened — feed
+      // skill XP (by station) and report it to the quest manager.
+      this.opts.onCrafted?.(recipe);
     } else {
       this.opts.toast(`${recipe.name}: ${res.detail ?? res.reason}`);
     }
@@ -323,6 +348,7 @@ export class CraftingPanel {
       defs,
       enabled: true,
       playerLevel: this.opts.playerLevel(),
+      skills: this.opts.skills?.() ?? undefined,
       stations: this.activeStations(),
     };
     while (this.rowsEl.firstChild) this.rowsEl.firstChild.remove();

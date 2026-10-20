@@ -254,6 +254,11 @@ const GENRE_ALTERNATES: Partial<Record<Genre, BiomeId[]>> = {
   'third-person-action': ['plains', 'forest', 'desert-canyon', 'snow', 'coastline', 'caves'],
   'top-down-shooter': ['plains', 'desert-canyon', 'volcanic', 'caves'],
   'platformer': ['plains', 'forest', 'coastline'],
+  // variety wave: survivor/TD share the arena's biome grammar; the runner
+  // favors open ground so the track stays readable
+  survivor: ['plains', 'desert-canyon', 'volcanic', 'caves'],
+  'tower-defense': ['plains', 'desert-canyon', 'volcanic', 'caves'],
+  'endless-runner': ['plains', 'forest', 'desert-canyon'],
 };
 
 /** Only these base biomes ever roll an alternate — volcanic/snow/coastline/

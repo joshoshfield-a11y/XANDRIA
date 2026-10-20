@@ -168,6 +168,39 @@ const DAY_TABLE: Record<Genre, Omit<GenreGrade, 'exposure'>> = {
       saturation: 1.06, vignette: 0.50,
     },
   },
+  // variety wave: survivor reads like the top-down arena it descends from;
+  // tower-defense matches the arena look with denser fog for depth;
+  // endless-runner keeps the horizon thin so the far gate reads at speed.
+  survivor: {
+    fogDensity: 0.5, fogLuminance: 0.85,
+    sun: 1.0, hemi: 1.0, ambient: 1.0,
+    clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
+    grade: {
+      lift: [0.000, 0.000, 0.005], gamma: [1.0, 1.0, 1.0], gain: [0.98, 1.0, 1.03],
+      saturation: 1.06, vignette: 0.50,
+    },
+  },
+  'tower-defense': {
+    fogDensity: 0.65, fogLuminance: 0.85,
+    sun: 1.0, hemi: 1.0, ambient: 1.0,
+    clouds: 0.7, cloudColor: '#f4f6fa', sky: 0.5, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
+    grade: {
+      lift: [0.000, 0.000, 0.005], gamma: [1.0, 1.0, 1.0], gain: [0.98, 1.0, 1.03],
+      saturation: 1.06, vignette: 0.50,
+    },
+  },
+  'endless-runner': {
+    fogDensity: 0.55, fogLuminance: 0.85,
+    sun: 1.05, hemi: 1.0, ambient: 1.0,
+    clouds: 0.7, cloudColor: '#ffffff', sky: 0.45, fogTint: null, godRays: 1.0,
+    biomeFog: null, biomeFogDensity: null, waterTint: null, waterSky: null,
+    grade: {
+      lift: [0.015, 0.005, -0.010], gamma: [1.0, 1.0, 1.0], gain: [1.03, 1.0, 0.96],
+      saturation: 1.08, vignette: 0.45,
+    },
+  },
 };
 
 const DAY_EXPOSURE: Record<Genre, number> = {
@@ -176,6 +209,9 @@ const DAY_EXPOSURE: Record<Genre, number> = {
   racing: 0.52,
   platformer: 0.62,
   'top-down-shooter': 0.6,
+  survivor: 0.6,
+  'tower-defense': 0.6,
+  'endless-runner': 0.58,
 };
 
 const DUSK_EXPOSURE: Record<Genre, number> = {
@@ -184,6 +220,9 @@ const DUSK_EXPOSURE: Record<Genre, number> = {
   racing: 0.62,
   platformer: 0.7,
   'top-down-shooter': 0.72,
+  survivor: 0.72,
+  'tower-defense': 0.72,
+  'endless-runner': 0.68,
 };
 
 /**

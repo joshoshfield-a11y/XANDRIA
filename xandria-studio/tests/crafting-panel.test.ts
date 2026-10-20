@@ -185,9 +185,10 @@ describe('CraftingPanel recipe states', () => {
     h.panel.show('Ember Forge');
     for (const row of rows(h)) {
       expect(craftButton(row).disabled).toBe(true);
-      // check order is min-level BEFORE missing-ingredients (crafting.ts
-      // documents it); either reason is an honest block
-      expect(rowText(row)).toMatch(/Missing ingredients\.|Requires level \d+/);
+      // check order is min-level BEFORE missing-skill BEFORE
+      // missing-ingredients (crafting.ts documents it); any of the three
+      // is an honest block
+      expect(rowText(row)).toMatch(/Missing ingredients\.|Requires level \d+|Requires \w+ rank \d+/);
     }
     h.panel.dispose();
   });
@@ -204,8 +205,12 @@ describe('CraftingPanel recipe states', () => {
   });
 
   it('missing-station: station-gated recipe names its station when none are present', () => {
-    const h = makeHarness({ stationIds: () => new Set<string>() });
-    const target = h.pool.find((r) => r.stationId)!;
+    // skills wave + items-expansion: pass max skill ranks so neither
+    // the skill gate nor a tier-2 minLevel gate is what fires — this
+    // test exercises the missing-station row state only.
+    const maxSkills = () => ({ rankOf: (_id: string) => 3, skillName: (id: string) => id });
+    const h = makeHarness({ stationIds: () => new Set<string>(), skills: maxSkills });
+    const target = h.pool.find((r) => r.stationId && !r.minLevel)!;
     for (const ing of target.ingredients) h.inv.add(ing.itemId, ing.count);
     h.panel.show('Ember Forge');
     const row = rows(h).find((r) => rowText(r).includes(target.name))!;
@@ -215,10 +220,13 @@ describe('CraftingPanel recipe states', () => {
   });
   it('show(name, id) narrows the missing-station check to that station', () => {
     // the opts set has EVERY station, but the panel is open at the workbench:
-    // a forge-gated recipe must be blocked, a workbench one must be open
-    const h = makeHarness();
-    const forgeRecipe = h.pool.find((r) => r.stationId === 'station_forge')!;
-    const benchRecipe = h.pool.find((r) => r.stationId === 'station_workbench')!;
+    // a forge-gated recipe must be blocked, a workbench one must be open.
+    // (max skill ranks + no minLevel-gated recipes, so neither the skill
+    // gate nor the level gate is what fires — station narrowing only.)
+    const maxSkills = () => ({ rankOf: (_id: string) => 3, skillName: (id: string) => id });
+    const h = makeHarness({ skills: maxSkills });
+    const forgeRecipe = h.pool.find((r) => r.stationId === 'station_forge' && !r.minLevel)!;
+    const benchRecipe = h.pool.find((r) => r.stationId === 'station_workbench' && !r.minLevel)!;
     for (const r of [forgeRecipe, benchRecipe])
       for (const ing of r.ingredients) h.inv.add(ing.itemId, ing.count);
     h.panel.show("Tinker's Bench", 'station_workbench');
@@ -299,6 +307,48 @@ describe('CraftingPanel queue', () => {
     for (let i = 0; i < 6; i++) btn.click();
     expect(h.panel.queuedIds).toHaveLength(5);
     expect(h.toasts.some((t) => t.includes('Queue full'))).toBe(true);
+    h.panel.dispose();
+  });
+
+  it('onCrafted fires with the completed recipe (skill-XP hook)', () => {
+    const crafted: string[] = [];
+    const h = makeHarness({ queueSeconds: 1.0, onCrafted: (r) => crafted.push(r.id) });
+    const target = h.pool.find((r) => !r.stationId && !r.minLevel)!;
+    for (const ing of target.ingredients) h.inv.add(ing.itemId, ing.count + 2);
+    h.panel.show('Ember Forge');
+    const row = rows(h).find((r) => rowText(r).includes(target.name))!;
+    craftButton(row).click();
+    h.panel.update(0.5);
+    expect(crafted).toEqual([]); // not done yet
+    h.panel.update(0.6); // t = 1.1 >= 1.0
+    expect(crafted).toEqual([target.id]);
+    h.panel.dispose();
+  });
+
+  it('onCrafted does NOT fire when the queue completion fails re-validation', () => {
+    const crafted: string[] = [];
+    const h = makeHarness({ queueSeconds: 1.0, onCrafted: (r) => crafted.push(r.id) });
+    const target = h.pool.find((r) => !r.stationId && !r.minLevel)!;
+    for (const ing of target.ingredients) h.inv.add(ing.itemId, ing.count);
+    h.panel.show('Ember Forge');
+    const row = rows(h).find((r) => rowText(r).includes(target.name))!;
+    craftButton(row).click();
+    for (const ing of target.ingredients) h.inv.remove(ing.itemId, ing.count);
+    h.panel.update(1.5);
+    expect(crafted).toEqual([]);
+    h.panel.dispose();
+  });
+
+  it('craftTimeMult scales the queue duration at enqueue time', () => {
+    const h = makeHarness({ queueSeconds: 1.0, craftTimeMult: () => 0.5 });
+    const target = h.pool.find((r) => !r.stationId && !r.minLevel)!;
+    for (const ing of target.ingredients) h.inv.add(ing.itemId, ing.count + 2);
+    h.panel.show('Ember Forge');
+    const row = rows(h).find((r) => rowText(r).includes(target.name))!;
+    craftButton(row).click();
+    h.panel.update(0.5); // t = 0.5 >= 1.0 * 0.5 -> completes early
+    expect(h.panel.queuedIds).toEqual([]);
+    expect(h.inv.count(target.output.itemId)).toBe(target.output.count);
     h.panel.dispose();
   });
 

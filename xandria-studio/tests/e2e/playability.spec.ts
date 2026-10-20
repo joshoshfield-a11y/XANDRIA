@@ -11,6 +11,10 @@ const GENRES = [
   { name: 'racing', intent: 'desert racing grand prix', expect: 'racing' },
   { name: 'platformer', intent: 'dreamy platformer', expect: 'platformer' },
   { name: 'topdown', intent: 'top-down horde shooter', expect: 'top-down-shooter' },
+  // variety wave: every new genre boots and plays through the ?intent= path
+  { name: 'survivor', intent: 'vampire survivors bullet heaven swarm', expect: 'survivor' },
+  { name: 'tower-defense', intent: 'tower defense, defend the base', expect: 'tower-defense' },
+  { name: 'endless-runner', intent: 'endless runner temple run', expect: 'endless-runner' },
 ];
 
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url');
@@ -62,6 +66,25 @@ for (const g of GENRES) {
 
     const errs = await page.evaluate(() => (window as any).__XANDRIA_ERRORS);
     expect(errs).toEqual([]);
+  });
+}
+
+// variety wave: the new genres boot clean on a 360x780 phone viewport
+for (const g of GENRES.slice(5)) {
+  test(`genre ${g.name}: boots clean at 360x780`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    await page.setViewportSize({ width: 360, height: 780 });
+    await page.goto(`/player.html?test=1&intent=${encodeURIComponent(g.intent)}`, { waitUntil: 'load' });
+    await page.waitForFunction(() => (window as any).__XANDRIA__?.engine?.state === 'playing', null, { timeout: 30000 });
+    const genre = await page.evaluate(() => (window as any).__XANDRIA__.spec.meta.genre);
+    expect(genre).toBe(g.expect);
+    await page.waitForTimeout(3000); // let the sim tick on the small viewport
+    const errs = await page.evaluate(() => (window as any).__XANDRIA_ERRORS);
+    expect(errs).toEqual([]);
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: `tests/e2e/shots/${g.name}-mobile.png` });
   });
 }
 

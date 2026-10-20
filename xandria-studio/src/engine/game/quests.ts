@@ -1,0 +1,678 @@
+/**
+ * Quest wave: the main story/quest-line system.
+ *
+ * Data model:
+ *   QuestDef — { id, name, giver, brief, objectives[], rewards, requiresQuests? }
+ *   QuestObjectiveDef — { id, kind, desc, target, count }
+ *     kind 'kill'    — target = enemy kind (spec.enemies[].kind), fed by blueprint onDeath
+ *     kind 'gather'  — target = material id or 'any', fed by GatheringManager onHarvested
+ *     kind 'craft'   — target = recipe id, fed by CraftingPanel onCrafted
+ *     kind 'talk'    — target = npc role or 'any', fed by QuestTalkSession on dialogue open
+ *     kind 'explore' — target = 'portals', fed by QuestManager.update reading portal transitions
+ *   QuestRewardDef — { xp, items[] } (xp via Progression, items via Inventory when wired)
+ *
+ * Seeded pool: buildQuestPool(spec) is a pure function of the spec — 3-5
+ * main-story quests from the catalog via Rng(spec.meta.seed ^ QUEST_SALT),
+ * chained (quest N requires quest N-1 turned in). Same spec → identical pool.
+ *
+ * Player-scoped persistence (NOT map-local): the QuestManager is owned by
+ * the blueprint and NEVER registered in engine.portalEntities, so portal
+ * departure/arrival (which only despawns map-local systems) leaves quest
+ * progress untouched — the same standing as Progression and Inventory.
+ * portalSnapshot()/portalRestore() mirror Progression's API for rebuild
+ * scenarios and are wired into PortalState's capture/apply.
+ *
+ * Quest hooks are data-driven: objective kinds map to event methods on the
+ * manager (advance table below). The side-quests phase adds new kinds by
+ * extending QuestObjectiveKind + the table — no dispatch changes needed.
+ * requires/produces seam: questRequiresFor/questProducesFor build the
+ * Interactable.requires/produces strings the talk session stamps onto NPC
+ * interactables (quest:accept:<id>, quest:turnin:<id>,
+ * quest:turned-in:<id>).
+ *
+ * Determinism: seeded RNG only — never Math.random/Date.now for gameplay.
+ */
+import { Rng } from '../core/Rng';
+import { deriveMapBiome } from '../world/Biomes';
+import type { GameSpec, ItemDef } from '@spec';
+import type { Progression } from './Progression';
+import type { CraftingRecipe } from './crafting';
+import { buildRecipePool, MAT_ORE, MAT_FIBER, MAT_SCRAP } from './crafting';
+import { resolveCraftingEnabled } from './crafting';
+import { portalsEnabled } from '@spec';
+import type { QuestTracker, QuestTrackerQuest } from '../ui/QuestTracker';
+
+/** Salt for the quest-pool stream — distinct from every other wave's salt. */
+export const QUEST_SALT = 0x51455354; // 'QEST'
+
+export type QuestObjectiveKind = 'kill' | 'gather' | 'craft' | 'talk' | 'explore';
+
+export interface QuestObjectiveDef {
+  /** stable within the quest, e.g. 'obj-kill' */
+  id: string;
+  kind: QuestObjectiveKind;
+  /** human line without progress, e.g. 'Defeat 6 walkers' */
+  desc: string;
+  /**
+   * kind id: enemy kind | material id | 'any' (gather/talk/craft) | recipe id |
+   * npc role | 'portals' | 'maps' | 'biomes' (explore).
+   */
+  target: string;
+  count: number;
+}
+
+export interface QuestRewardItem {
+  id: string;
+  count: number;
+}
+
+export interface QuestRewardDef {
+  /** XP granted via Progression.addXp (no-op when progression disabled) */
+  xp: number;
+  /** item ids granted via Inventory.add — skipped when a def is missing */
+  items: QuestRewardItem[];
+}
+
+export interface QuestDef {
+  /** 'quest_story_1_first_blood' — stable per spec seed */
+  id: string;
+  name: string;
+  /** npc role that can offer / accept turn-in ('villager', or 'any') */
+  giver: string;
+  /** one-line story shown in the quest dialogue */
+  brief: string;
+  objectives: QuestObjectiveDef[];
+  rewards: QuestRewardDef;
+  /** quest ids that must be turned in before this unlocks (the quest line) */
+  requiresQuests?: string[];
+  /**
+   * side-quest marker (side-quests wave): independent quests that start
+   * 'available' and never chain. Story quests leave this unset and follow
+   * the locked → available line via requiresQuests.
+   */
+  side?: boolean;
+}
+
+export type QuestStatus = 'locked' | 'available' | 'active' | 'complete' | 'turned-in';
+
+interface QuestRuntime {
+  def: QuestDef;
+  status: QuestStatus;
+  progress: number[];
+}
+
+/** Validate a QuestDef the way the item-def validator does: loud on bad content. */
+export function validateQuestDef(def: QuestDef): string[] {
+  const errs: string[] = [];
+  if (!def || typeof def !== 'object') return ['quest def must be an object'];
+  if (!def.id || typeof def.id !== 'string') errs.push('quest id must be a non-empty string');
+  if (!def.name || typeof def.name !== 'string') errs.push('quest name must be a non-empty string');
+  if (!Array.isArray(def.objectives) || def.objectives.length === 0) {
+    errs.push(`quest ${def.id}: objectives must be a non-empty array`);
+  } else {
+    const kinds: QuestObjectiveKind[] = ['kill', 'gather', 'craft', 'talk', 'explore'];
+    for (const o of def.objectives) {
+      if (!kinds.includes(o.kind)) errs.push(`quest ${def.id}: unknown objective kind '${(o as { kind: unknown }).kind}'`);
+      if (!o.target || typeof o.target !== 'string') errs.push(`quest ${def.id}: objective target must be a string`);
+      if (!Number.isFinite(o.count) || o.count < 1) errs.push(`quest ${def.id}: objective count must be >= 1`);
+    }
+  }
+  if (!def.rewards || typeof def.rewards.xp !== 'number' || def.rewards.xp < 0) {
+    errs.push(`quest ${def.id}: rewards.xp must be a non-negative number`);
+  }
+  if (!Array.isArray(def.rewards?.items)) errs.push(`quest ${def.id}: rewards.items must be an array`);
+  return errs;
+}
+
+/** Master quest toggle (default true). Authorable via spec.custom.quests. */
+export function resolveQuestsEnabled(spec: GameSpec): boolean {
+  return spec.custom?.quests?.enabled ?? true;
+}
+
+// ---------------------------------------------------------------------------
+// Seeded quest pool
+// ---------------------------------------------------------------------------
+
+interface QuestBuildCtx {
+  rng: Rng;
+  spec: GameSpec;
+  recipePool: CraftingRecipe[];
+  enemyKinds: string[];
+  crafting: boolean;
+  portals: boolean;
+  includeTalk: boolean;
+}
+
+interface QuestTemplate {
+  slug: string;
+  name: string;
+  brief: string;
+  available: (ctx: QuestBuildCtx) => boolean;
+  build: (ctx: QuestBuildCtx, id: string) => QuestDef;
+}
+
+function rewardFor(rng: Rng, tier: number): QuestRewardDef {
+  const mats = [MAT_ORE, MAT_FIBER, MAT_SCRAP];
+  return {
+    xp: 50 + 25 * rng.int(0, 3) + tier * 25,
+    items: [{ id: rng.pick(mats), count: 2 + rng.int(0, 3) }],
+  };
+}
+
+const QUEST_CATALOG: QuestTemplate[] = [
+  {
+    slug: 'first_blood',
+    name: 'First Blood',
+    brief: 'The wilds press closer every night. Thin their numbers and the settlement will see you paid.',
+    available: (ctx) => ctx.enemyKinds.length > 0,
+    build: (ctx, id) => {
+      const kind = ctx.enemyKinds[0];
+      const count = 4 + ctx.rng.int(0, 3);
+      return {
+        id, name: 'First Blood', giver: 'villager',
+        brief: 'The wilds press closer every night. Thin their numbers and the settlement will see you paid.',
+        objectives: [{ id: 'obj-kill', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
+        rewards: rewardFor(ctx.rng, 0),
+      };
+    },
+  },
+  {
+    slug: 'big_game',
+    name: 'Big Game',
+    brief: 'Something big stalks the treeline. Bring it down and the hunters will remember your name.',
+    available: (ctx) => ctx.enemyKinds.includes('brute') || ctx.enemyKinds.length > 1,
+    build: (ctx, id) => {
+      const kind = ctx.enemyKinds.includes('brute') ? 'brute' : ctx.enemyKinds[ctx.enemyKinds.length - 1];
+      const count = 2 + ctx.rng.int(0, 2);
+      return {
+        id, name: 'Big Game', giver: 'villager',
+        brief: 'Something big stalks the treeline. Bring it down and the hunters will remember your name.',
+        objectives: [{ id: 'obj-kill', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
+        rewards: rewardFor(ctx.rng, 1),
+      };
+    },
+  },
+  {
+    slug: 'the_forager',
+    name: 'The Forager',
+    brief: 'We are running low on raw materials. The land provides — take what you need and bring it home.',
+    available: (ctx) => ctx.crafting,
+    build: (ctx, id) => {
+      const count = 4 + ctx.rng.int(0, 2);
+      return {
+        id, name: 'The Forager', giver: 'villager',
+        brief: 'We are running low on raw materials. The land provides — take what you need and bring it home.',
+        objectives: [{ id: 'obj-gather', kind: 'gather', desc: `Gather ${count} raw materials`, target: 'any', count }],
+        rewards: rewardFor(ctx.rng, 0),
+      };
+    },
+  },
+  {
+    slug: 'the_maker',
+    name: 'The Maker',
+    brief: 'A steady hand at the workbench is worth a squad of guards. Make something useful.',
+    available: (ctx) => {
+      if (!ctx.crafting || ctx.recipePool.length === 0) return false;
+      return ctx.recipePool.some((r) => r.minLevel === undefined);
+    },
+    build: (ctx, id) => {
+      const candidates = ctx.recipePool.filter((r) => r.minLevel === undefined);
+      // Prefer station-free recipes (craftable at any workbench); fall back
+      // to a stationed one and name the station in the objective.
+      const recipe = candidates.find((r) => !r.stationId) ?? candidates[0];
+      const where = recipe.stationId ? ` at a ${stationShortName(recipe.stationId)}` : '';
+      return {
+        id, name: 'The Maker', giver: 'villager',
+        brief: 'A steady hand at the workbench is worth a squad of guards. Make something useful.',
+        objectives: [{
+          id: 'obj-craft', kind: 'craft',
+          desc: `Craft ${recipe.name}${where}`,
+          target: recipe.id, count: 1,
+        }],
+        rewards: rewardFor(ctx.rng, 1),
+      };
+    },
+  },
+  {
+    slug: 'word_travels',
+    name: 'Word Travels',
+    brief: 'Word travels faster than feet. Speak with the others — hear what the settlement fears.',
+    available: (ctx) => ctx.includeTalk,
+    build: (ctx, id) => {
+      const count = 2 + ctx.rng.int(0, 2);
+      return {
+        id, name: 'Word Travels', giver: 'villager',
+        brief: 'Word travels faster than feet. Speak with the others — hear what the settlement fears.',
+        objectives: [{ id: 'obj-talk', kind: 'talk', desc: `Speak with ${count} villagers`, target: 'villager', count }],
+        rewards: rewardFor(ctx.rng, 0),
+      };
+    },
+  },
+  {
+    slug: 'wayfarer',
+    name: 'Wayfarer',
+    brief: 'There are doors between worlds out here. Walk through one and come back to tell the tale.',
+    available: (ctx) => ctx.portals,
+    build: (ctx, id) => {
+      const count = 1 + ctx.rng.int(0, 1);
+      return {
+        id, name: 'Wayfarer', giver: 'villager',
+        brief: 'There are doors between worlds out here. Walk through one and come back to tell the tale.',
+        objectives: [{
+          id: 'obj-explore', kind: 'explore',
+          desc: count === 1 ? 'Pass through a portal' : `Pass through ${count} portals`,
+          target: 'portals', count,
+        }],
+        rewards: rewardFor(ctx.rng, 2),
+      };
+    },
+  },
+];
+
+function stationShortName(stationId: string): string {
+  const m: Record<string, string> = {
+    station_workbench: 'Workbench',
+    station_anvil: 'Anvil',
+    station_forge: 'Forge',
+    station_alchemy: 'Alchemy Lab',
+  };
+  return m[stationId] ?? stationId;
+}
+
+export interface BuildQuestPoolOpts {
+  /**
+   * false in genres without villagers (fps/arena, platformer, topdown never
+   * construct the talk session) — the talk quest is filtered out of the pool.
+   */
+  includeTalk?: boolean;
+}
+
+/**
+ * Seeded main-story quest pool. Pure function of (spec, opts): same spec →
+ * identical quest ids, names, objectives, targets, counts, rewards, chain.
+ * 3-5 quests (seeded), chained — quest N requires quest N-1 turned in.
+ */
+export function buildQuestPool(spec: GameSpec, opts: BuildQuestPoolOpts = {}): QuestDef[] {
+  const rng = new Rng((spec.meta.seed ^ QUEST_SALT) >>> 0);
+  const includeTalk = opts.includeTalk ?? spec.meta.genre === 'third-person-action';
+  const ctx: QuestBuildCtx = {
+    rng,
+    spec,
+    recipePool: buildRecipePool(spec),
+    enemyKinds: (spec.enemies ?? []).map((e) => e.kind),
+    crafting: resolveCraftingEnabled(spec),
+    portals: portalsEnabled(spec),
+    includeTalk,
+  };
+  const eligible = QUEST_CATALOG.filter((t) => t.available(ctx));
+  // Studio-authored exact count wins; otherwise the seeded 3..5.
+  const authored = spec.custom?.quests?.questCount;
+  let count: number;
+  if (typeof authored === 'number' && Number.isFinite(authored)) {
+    count = Math.max(1, Math.min(8, Math.floor(authored)));
+  } else {
+    count = 3 + Math.floor(rng.next() * 3);
+  }
+  count = Math.min(count, eligible.length);
+  const picked = rng.shuffle([...eligible]).slice(0, count);
+  const defs = picked.map((t, i) => t.build(ctx, `quest_story_${i + 1}_${t.slug}`));
+  // the quest line: each quest unlocks when the previous is turned in
+  defs.forEach((d, i) => {
+    if (i > 0) d.requiresQuests = [defs[i - 1].id];
+  });
+  return defs;
+}
+
+// ---------------------------------------------------------------------------
+// requires/produces seam (Interaction.ts Interactable fields)
+// ---------------------------------------------------------------------------
+
+/** `quest:turned-in:<questId>` expressions for a def's prerequisites. */
+export function questRequiresFor(def: QuestDef): string[] {
+  return (def.requiresQuests ?? []).map((q) => `quest:turned-in:${q}`);
+}
+
+/** `quest:accept:<id>` / `quest:turnin:<id>` production tokens. */
+export function questProducesFor(action: 'accept' | 'turnin', def: QuestDef): string {
+  return `quest:${action}:${def.id}`;
+}
+
+// ---------------------------------------------------------------------------
+// QuestManager — player-scoped quest state
+// ---------------------------------------------------------------------------
+
+export interface QuestManagerOpts {
+  defs: QuestDef[];
+  /** live inventory sink (null = no inventory; item rewards are skipped honestly) */
+  inventory: () => { add(itemId: string, count: number): number } | null;
+  /** item def table — reward ids without a def are skipped, never granted blind */
+  defsTable: () => Record<string, ItemDef>;
+  progression: Progression | null;
+  tracker?: QuestTracker | null;
+  /**
+   * Called after any quest state change (accept/progress/turn-in/restore).
+   * Blueprints wire the talk session's dialogue refresh here so an open
+   * quest dialogue live-updates when its quest completes mid-conversation.
+   */
+  onQuestsChanged?: () => void;
+  /** toast surface */
+  toast: (msg: string) => void;
+  /** portal transition counter (explore objectives); default 0 = no portals */
+  getTransitions?: () => number;
+  /**
+   * Current map coordinate for explore objectives with target 'maps' /
+   * 'biomes' (side-quests wave). Null = unknown (no tracking that frame).
+   * Blueprints wire engine.portalManager?.coord.
+   */
+  getCurrentMap?: () => { mx: number; my: number } | null;
+  /**
+   * World seed for deriveMapBiome (side-quests wave 'biomes' objectives).
+   * Blueprints wire the portal manager's world seed (NOT spec.meta.seed,
+   * which is the current map's build seed).
+   */
+  worldSeed?: number;
+  /**
+   * Genres without villagers: the story line auto-accepts at construction
+   * and auto-turns-in on completion (no dialogue exists to do it).
+   */
+  autoAccept?: boolean;
+  /** called after an XP grant causes a level-up (blueprint wires the modal) */
+  onLevelUp?: () => void;
+}
+
+/** Portal-safe quest snapshot (mirrors Progression.portalSnapshot). */
+export interface QuestPortalSnapshot {
+  version: 1;
+  states: Record<string, { status: QuestStatus; progress: number[] }>;
+  /**
+   * Side-quests wave: distinct maps / biomes visited (explore 'maps' /
+   * 'biomes' objectives). Optional so story-wave snapshots restore cleanly.
+   */
+  visited?: { maps: string[]; biomes: string[] };
+}
+
+export interface NpcQuestActions {
+  accept: QuestDef[];
+  turnIn: QuestDef[];
+  locked: QuestDef[];
+}
+
+export class QuestManager {
+  private readonly quests: QuestRuntime[];
+  private readonly byId = new Map<string, QuestRuntime>();
+  private lastTransitions: number;
+  private readonly autoAccept: boolean;
+  /** side-quests wave: distinct maps/biomes visited (explore objectives) */
+  private readonly visitedMaps = new Set<string>();
+  private readonly visitedBiomes = new Set<string>();
+  private lastMx = Number.NaN;
+  private lastMy = Number.NaN;
+
+  constructor(private readonly opts: QuestManagerOpts) {
+    this.autoAccept = opts.autoAccept ?? false;
+    this.quests = opts.defs.map((def) => ({
+      def,
+      status: 'locked' as QuestStatus,
+      progress: def.objectives.map(() => 0),
+    }));
+    for (const q of this.quests) this.byId.set(q.def.id, q);
+    if (this.quests.length > 0) {
+      this.quests[0].status = 'available';
+    }
+    // side-quests wave: independent quests are available from the start.
+    for (const q of this.quests) {
+      if (q.def.side === true) q.status = 'available';
+    }
+    if (this.autoAccept) {
+      // No villagers in this genre: accept everything offerable now (no
+      // dialogue exists to do it); completion auto-turns-in as before.
+      for (const q of this.quests) {
+        if (q.status === 'available') this.accept(q.def.id);
+      }
+    }
+    this.lastTransitions = this.transitions();
+    this.refreshTracker();
+  }
+
+  /** All quest defs in line order. */
+  get defs(): QuestDef[] {
+    return this.quests.map((q) => q.def);
+  }
+
+  /** Status of a quest ('unknown' when the id is not in this pool). */
+  statusOf(id: string): QuestStatus | 'unknown' {
+    return this.byId.get(id)?.status ?? 'unknown';
+  }
+
+  /** Objective progress counts for a quest (empty array when unknown). */
+  progressOf(id: string): number[] {
+    return [...(this.byId.get(id)?.progress ?? [])];
+  }
+
+  private transitions(): number {
+    try {
+      return this.opts.getTransitions?.() ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Per-frame: explore objectives. 'portals' reads the transition counter;
+   * 'maps' / 'biomes' (side-quests wave) sample the current map coordinate
+   * and derive the biome — each distinct map/biome counts once. The home
+   * map is seeded on the first update (counts as the first visited map).
+   */
+  update(_dt: number): void {
+    const coord = this.opts.getCurrentMap?.() ?? null;
+    if (coord && (coord.mx !== this.lastMx || coord.my !== this.lastMy)) {
+      this.lastMx = coord.mx;
+      this.lastMy = coord.my;
+      const key = `${coord.mx},${coord.my}`;
+      if (!this.visitedMaps.has(key)) {
+        this.visitedMaps.add(key);
+        this.advance('explore', 'maps', 1);
+      }
+      const ws = this.opts.worldSeed;
+      if (typeof ws === 'number' && Number.isFinite(ws)) {
+        const biome = deriveMapBiome(ws, coord.mx, coord.my);
+        if (!this.visitedBiomes.has(biome)) {
+          this.visitedBiomes.add(biome);
+          this.advance('explore', 'biomes', 1);
+        }
+      }
+    }
+    const t = this.transitions();
+    if (t > this.lastTransitions) {
+      const d = t - this.lastTransitions;
+      this.lastTransitions = t;
+      this.advance('explore', 'portals', d);
+    } else {
+      this.lastTransitions = t;
+    }
+  }
+
+  /** Accept an available quest. Returns false when not acceptable. */
+  accept(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.status !== 'available') return false;
+    q.status = 'active';
+    this.opts.toast(`Quest accepted: ${q.def.name}`);
+    this.refreshTracker();
+    return true;
+  }
+
+  /**
+   * Turn in a completed quest: grants XP + items, marks turned-in, unlocks
+   * the next quest in the line. Returns false when not turn-in-able.
+   */
+  turnIn(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.status !== 'complete') return false;
+    // XP first (mirrors the kill-XP-before-progress ordering rule: rewards
+    // land before the quest leaves the tracker).
+    const prog = this.opts.progression;
+    if (prog && q.def.rewards.xp > 0) {
+      const leveled = prog.addXp(q.def.rewards.xp);
+      if (leveled) this.opts.onLevelUp?.();
+    }
+    // Items: only ids with a real def — never grant blind.
+    const table = this.opts.defsTable();
+    const inv = this.opts.inventory();
+    for (const item of q.def.rewards.items) {
+      if (!table[item.id]) continue;
+      inv?.add(item.id, item.count);
+    }
+    q.status = 'turned-in';
+    this.opts.toast(`Quest complete: ${q.def.name}`);
+    // unlock the next link in the line
+    for (const next of this.quests) {
+      if (next.status === 'locked' && this.requiresSatisfied(next.def)) {
+        next.status = 'available';
+        this.opts.toast(`New quest available: ${next.def.name}`);
+        if (this.autoAccept) this.accept(next.def.id);
+      }
+    }
+    this.refreshTracker();
+    return true;
+  }
+
+  /** True when every prerequisite quest is turned in. */
+  requiresSatisfied(def: QuestDef): boolean {
+    return (def.requiresQuests ?? []).every((qid) => this.byId.get(qid)?.status === 'turned-in');
+  }
+
+  /**
+   * Quest actions a villager of the given role can offer — drives both the
+   * dialogue buttons and the requires/produces stamping on interactables.
+   */
+  actionsForNpc(role: string): NpcQuestActions {
+    const giverMatch = (d: QuestDef) => d.giver === 'any' || d.giver === role;
+    return {
+      accept: this.quests.filter((q) => q.status === 'available' && giverMatch(q.def)).map((q) => q.def),
+      turnIn: this.quests.filter((q) => q.status === 'complete' && giverMatch(q.def)).map((q) => q.def),
+      locked: this.quests.filter((q) => q.status === 'locked' && giverMatch(q.def)).map((q) => q.def),
+    };
+  }
+
+  // -- quest events (the data-driven hook table: kind -> event method) --
+
+  /** Enemy killed (blueprint onDeath calls this with e.spec.kind). */
+  onKill(kind: string): void {
+    this.advance('kill', kind, 1);
+  }
+
+  /** Materials harvested (GatheringManager onHarvested). */
+  onHarvest(materialId: string, count: number): void {
+    this.advance('gather', materialId, count);
+    this.advance('gather', 'any', count);
+  }
+
+  /** Recipe crafted (CraftingPanel onCrafted). */
+  onCraft(recipeId: string): void {
+    this.advance('craft', recipeId, 1);
+  }
+
+  /** Dialogue opened with an NPC (QuestTalkSession). */
+  onTalk(role: string): void {
+    this.advance('talk', role, 1);
+    this.advance('talk', 'any', 1);
+  }
+
+  private advance(kind: QuestObjectiveKind, target: string, n: number): void {
+    if (n <= 0) return;
+    for (const q of this.quests) {
+      if (q.status !== 'active') continue;
+      let changed = false;
+      q.def.objectives.forEach((o, i) => {
+        if (o.kind !== kind) return;
+        if (o.target !== target && o.target !== 'any') return;
+        const before = q.progress[i];
+        q.progress[i] = Math.min(o.count, before + n);
+        if (q.progress[i] !== before) changed = true;
+      });
+      if (!changed) continue;
+      const done = q.def.objectives.every((o, i) => q.progress[i] >= o.count);
+      if (done) this.completeQuest(q);
+      else this.refreshTracker();
+    }
+  }
+
+  private completeQuest(q: QuestRuntime): void {
+    q.status = 'complete';
+    if (this.autoAccept) {
+      // No villagers in this genre: turn in immediately (rewards granted now).
+      this.refreshTracker();
+      this.turnIn(q.def.id);
+      return;
+    }
+    this.opts.toast(`Objective complete: ${q.def.name} — return to a villager`);
+    this.refreshTracker();
+  }
+
+  // -- portal persistence (player-scoped, mirrors Progression) --
+
+  /** Freeze quest state for a portal transition / rebuild. Pure data copy. */
+  portalSnapshot(): QuestPortalSnapshot {
+    const states: QuestPortalSnapshot['states'] = {};
+    for (const q of this.quests) {
+      states[q.def.id] = { status: q.status, progress: [...q.progress] };
+    }
+    return {
+      version: 1,
+      states,
+      visited: { maps: [...this.visitedMaps], biomes: [...this.visitedBiomes] },
+    };
+  }
+
+  /**
+   * Restore a portalSnapshot(). Defensive: unknown ids are dropped, corrupt
+   * statuses clamp to 'locked', progress clamps to [0, objective count],
+   * visited sets accept only string arrays (re-visits re-count honestly).
+   */
+  portalRestore(snap: QuestPortalSnapshot | null | undefined): void {
+    if (!snap || snap.version !== 1 || !snap.states || typeof snap.states !== 'object') return;
+    const valid: QuestStatus[] = ['locked', 'available', 'active', 'complete', 'turned-in'];
+    for (const q of this.quests) {
+      const s = snap.states[q.def.id];
+      if (!s) continue;
+      q.status = valid.includes(s.status) ? s.status : 'locked';
+      q.progress = q.def.objectives.map((o, i) => {
+        const v = s.progress?.[i];
+        return Number.isFinite(v) ? Math.max(0, Math.min(o.count, Math.floor(v as number))) : 0;
+      });
+    }
+    this.visitedMaps.clear();
+    this.visitedBiomes.clear();
+    const v = snap.visited;
+    if (v && typeof v === 'object') {
+      const maps = Array.isArray(v.maps) ? v.maps : [];
+      const biomes = Array.isArray(v.biomes) ? v.biomes : [];
+      for (const m of maps) if (typeof m === 'string') this.visitedMaps.add(m);
+      for (const b of biomes) if (typeof b === 'string') this.visitedBiomes.add(b);
+    }
+    this.refreshTracker();
+  }
+
+  // -- tracker --
+
+  private snapshot(): QuestTrackerQuest[] {
+    const out: QuestTrackerQuest[] = [];
+    for (const q of this.quests) {
+      if (q.status !== 'active' && q.status !== 'complete') continue;
+      const lines = q.def.objectives.map((o, i) => {
+        const p = Math.min(q.progress[i], o.count);
+        const mark = p >= o.count ? '✓' : '•';
+        return `${mark} ${o.desc} (${p}/${o.count})`;
+      });
+      if (q.status === 'complete') lines.push('✓ Complete — turn it in');
+      out.push({ name: q.def.name, status: q.status, lines });
+    }
+    return out;
+  }
+
+  private refreshTracker(): void {
+    this.opts.tracker?.render(this.snapshot());
+    this.opts.onQuestsChanged?.();
+  }
+}

@@ -82,6 +82,14 @@ const hudSpec = () =>
 const findChild = (el: any, cls: string): any =>
   el.children.find((c: any) => (c.className ?? '').split(' ').includes(cls));
 
+/**
+ * HUD-polish wave: blocking modals (level-up / branch choice) live in the
+ * dedicated .xhud-modals layer appended after the .xhud root — never inside
+ * .xhud itself (its z-10 stacking context trapped them under the dialogue).
+ */
+const modalLayerOf = (container: any): any =>
+  container.children.find((c: any) => (c.className ?? '') === 'xhud-modals');
+
 beforeEach(() => {
   installDom();
 });
@@ -187,7 +195,7 @@ describe('R2-N6 — no level-up modal over the victory/defeat screen', () => {
     hud.attachEngine(eng as Engine);
     hud.showLevelUp(choices);
     expect(eng.pause).toHaveBeenCalled();
-    const overlay = findChild(container.children[0], 'overlay');
+    const overlay = findChild(modalLayerOf(container), 'overlay');
     expect(overlay).toBeDefined();
   });
 
@@ -217,7 +225,10 @@ describe('R2-N6 — no level-up modal over the victory/defeat screen', () => {
         new URL(`../src/blueprints/${f}.ts`, import.meta.url),
         'utf8',
       );
-      const xpAt = text.indexOf('grantKillXp(prog, notifyLevelUp)');
+      // UPGRADE LOOP (enemy-scaling): the call now carries the killed
+      // enemy's band XP multiplier as an optional 3rd arg — match the
+      // call prefix so the ordering assertion keeps working.
+      const xpAt = text.indexOf('grantKillXp(prog, notifyLevelUp');
       const progAt = text.indexOf("objectives.addProgress(1, 'kill')");
       expect(xpAt, `${f}.ts has grantKillXp`).toBeGreaterThan(-1);
       expect(progAt, `${f}.ts has addProgress kill`).toBeGreaterThan(-1);
@@ -243,7 +254,7 @@ describe('R2-N5 — clearOverlays() tears down live modals', () => {
       (i) => { settled = `resolved:${i}`; },
       () => { settled = 'rejected'; },
     );
-    const overlay = findChild(container.children[0], 'overlay');
+    const overlay = findChild(modalLayerOf(container), 'overlay');
     expect(overlay).toBeDefined();
     const keyListenersBefore: Function[] = doc().__listeners['keydown'] ?? [];
     expect(keyListenersBefore.length).toBe(1);
@@ -267,7 +278,7 @@ describe('R2-N5 — clearOverlays() tears down live modals', () => {
     const eng: any = { state: 'playing', pause: vi.fn(), resume: vi.fn() };
     hud.attachEngine(eng as Engine);
     const p = hud.showLevelUp(choices);
-    const overlay = findChild(container.children[0], 'overlay');
+    const overlay = findChild(modalLayerOf(container), 'overlay');
     expect(overlay).toBeDefined();
 
     hud.clearOverlays();

@@ -8,6 +8,7 @@ import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { VehicleController } from '../engine/game/VehicleController';
 import { Structures } from '../engine/world/Structures';
+import { LandmarkSystem } from '../engine/world/LandmarkSystem';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
@@ -98,18 +99,14 @@ export function buildRacing(engine: Engine, spec: GameSpec) {
   const trackExclusion = track.waypoints.map((w) => ({ x: w.x, z: w.z, r: track.width * 1.2 }));
   // env-art pass: blocky landmarks + amber glow accents, sun-aligned water glint.
   // Landmarks come before scatter so hero specimen plants can ring them (wave 2B).
-  const landmarks = structures.landmarks(spec, terrain, scene, spec.meta.seed, {
-    exclusion: trackExclusion, quality: engine.effectiveQuality(),
-    maxRealLights: engine.tiers.flags.maxRealLights, // graphics wave 2 (E): tier real-light budget
-  });
-  // graphics wave 2 (workstream C): per-biome structure sets — hero cluster
-  // near spawn + chunk-deterministic satellite clusters, one shared
-  // instancer so draw calls stay flat (seeded per map via spec.meta.seed)
-  structures.structureSets(spec, terrain, scene, spec.meta.seed, {
-    exclusion: trackExclusion, quality: engine.effectiveQuality(),
-    densityMul: engine.tiers.flags.densityMul, // graphics wave 2 (E): tier structure density
-    structureShadows: engine.tiers.flags.structureShadows, // graphics wave 2 (E): s25 shadow diet
-  });
+  // Portal-backlog wave: landmarks (+ structure sets) are a map-local entity
+  // system (id 'landmarks') — despawned on portal departure, rebuilt from
+  // the derived map seed on arrival. (Racing never enables portals, so this
+  // fires exactly once at boot — same single code path as every genre.)
+  const landmarks = new LandmarkSystem(engine, { exclusion: trackExclusion });
+  engine.portalEntities.register(landmarks);
+  landmarks.spawnForMap(spec.meta.seed);
+  // (graphics wave 2 structure sets now inside LandmarkSystem — same code path)
 
   const scatter = new Scatter(spec, terrain, engine.mats, engine.physics, scene, {
     exclusion: trackExclusion, engine, quality: engine.effectiveQuality(),

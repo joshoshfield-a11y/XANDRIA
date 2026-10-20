@@ -15,10 +15,23 @@ export interface DialogueLine {
   greeting: string;
 }
 
+/**
+ * Quest wave: optional quest action buttons rendered under the dialogue
+ * line (Accept / Turn in). The panel stays presentation-only — the caller
+ * (QuestTalkSession) decides which actions exist and handles the clicks.
+ */
+export interface DialogueQuestAction {
+  /** opaque id handed back to onAction, e.g. 'accept:quest_story_1_first_blood' */
+  id: string;
+  /** button label, e.g. 'Accept: First Blood' */
+  label: string;
+}
+
 export class DialoguePanel {
   private root: HTMLDivElement;
   private nameEl: HTMLDivElement;
   private lineEl: HTMLDivElement;
+  private actionsEl: HTMLDivElement;
   private onKey: (e: KeyboardEvent) => void;
   private disposed = false;
   private open_ = false;
@@ -52,23 +65,33 @@ export class DialoguePanel {
     dismiss.style.cssText = [
       'margin-top:10px', 'background:transparent', 'color:#9aa4b8',
       'border:1px solid rgba(154,164,184,0.4)', 'border-radius:6px',
-      'padding:5px 12px', 'font-size:12px', 'cursor:pointer',
+      // HUD-polish wave: touch-target floor is 28px (skills-wave precedent).
+      'padding:7px 14px', 'font-size:12px', 'cursor:pointer',
       'font-family:inherit',
     ].join(';');
     dismiss.addEventListener('click', () => this.hide());
 
-    root.append(name, line, dismiss);
+    const actions = doc.createElement('div');
+    actions.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
+
+    root.append(name, line, actions, dismiss);
     container.appendChild(root);
     this.root = root as HTMLDivElement;
     this.nameEl = name as HTMLDivElement;
     this.lineEl = line as HTMLDivElement;
+    this.actionsEl = actions as HTMLDivElement;
 
     // Capture phase: the panel owns E/Escape while open, so the
     // blueprint key handlers (bubble phase) never see them.
+    // stopImmediatePropagation (not stopPropagation): the interaction
+    // prompts register their own window-capture KeyE handlers, and the
+    // quest prompt's is registered AFTER this one — with plain
+    // stopPropagation it would still run, see isModalOpen===false (we just
+    // hid), and synchronously reopen the dialogue on the same keypress.
     this.onKey = (e: KeyboardEvent) => {
       if (!this.open_) return;
       if (e.code === 'Escape' || e.code === 'KeyE') {
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         e.preventDefault();
         this.hide();
       }
@@ -83,10 +106,26 @@ export class DialoguePanel {
   }
 
   /** Show the stub for one NPC. Re-opening swaps the content in place. */
-  show(line: DialogueLine): void {
+  show(line: DialogueLine, actions?: DialogueQuestAction[], onAction?: (id: string) => void): void {
     if (this.disposed) return;
     this.nameEl.textContent = line.role ? `${line.name} — ${line.role}` : line.name;
     this.lineEl.textContent = `\u201c${line.greeting}\u201d`;
+    // quest actions (rebuilt every show — no stale buttons)
+    while (this.actionsEl.firstChild) this.actionsEl.firstChild.remove();
+    for (const a of actions ?? []) {
+      const btn = this.doc.createElement('button') as HTMLButtonElement;
+      btn.textContent = a.label;
+      btn.setAttribute('data-quest-action', a.id);
+      btn.style.cssText = [
+        'background:rgba(255,181,69,0.12)', 'color:#ffcf7a',
+        'border:1px solid rgba(255,181,69,0.55)', 'border-radius:6px',
+        'padding:7px 12px', 'font-size:13px', 'font-weight:600',
+        'cursor:pointer', 'font-family:inherit', 'text-align:left',
+      ].join(';');
+      const id = a.id;
+      btn.addEventListener('click', () => onAction?.(id));
+      this.actionsEl.append(btn);
+    }
     this.root.style.display = 'block';
     this.open_ = true;
   }

@@ -550,6 +550,31 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'Gathering node count = 18 × density. 0 = no nodes. Spawns are map-seeded: the first N of the roster are identical at any density.',
     ));
 
+    // Skills wave: master skills toggle + XP multiplier. The toggle is the
+    // schema's custom.skills.enabled (default true); off freezes the
+    // SkillSystem (no XP, ranks stay at 1). The multiplier scales all skill
+    // XP gains (schema custom.skills.xpMultiplier, default 1); read by
+    // resolveSkillsXpMultiplier (engine/game/skills).
+    host.appendChild(h(`<div class="xed-ns">SKILLS</div>`));
+    host.appendChild(field(
+      'SKILLS — ENABLED',
+      checkbox('Skill system', s.custom?.skills?.enabled ?? true, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.skills = sp.custom.skills ?? {};
+        sp.custom.skills.enabled = v;
+      }, true),
+      'Off = no skill XP, ranks frozen at 1, no skills panel. Applies on the next Play.',
+    ));
+    host.appendChild(field(
+      'SKILL XP MULTIPLIER',
+      slider(s.custom?.skills?.xpMultiplier ?? 1, 0, 4, 0.25, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.skills = sp.custom.skills ?? {};
+        sp.custom.skills.xpMultiplier = v;
+      }, (v) => `${v}×`),
+      'Scales all skill XP gains. 2× = twice as fast through the ranks; 0 = frozen ranks.',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;

@@ -4,6 +4,7 @@
  * barrier walls, checkpoint gates and a start/finish gantry.
  */
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import { GROUP, type Physics } from '../core/Physics';
@@ -16,6 +17,13 @@ import { placeStructureSets, type StructureSetOpts, type StructureSetResult } fr
 
 export class Structures {
   group = new THREE.Group();
+  /**
+   * Portal-backlog wave: physics bodies created for the MAP-LOCAL landmark
+   * pass (landmarks() + structureSets() only — city/track/arenaCover are
+   * permanent and never land here). A LandmarkSystem owns a dedicated
+   * Structures instance, so this array is exactly the departure-despawn set.
+   */
+  readonly landmarkBodies: CANNON.Body[] = [];
 
   constructor(private physics: Physics, private mats: MaterialLibrary) {}
 
@@ -114,6 +122,14 @@ export class Structures {
     kinds?: Partial<Record<LandmarkKind, number>>;
     quality?: 'retro' | 'standard' | 'high';
     maxRealLights?: number;
+    /**
+     * Portal-backlog wave: skip the terrain.addWearPoints() bake (aprons +
+     * paths). addWearPoints appends, so on an LRU cache-hit arrival — same
+     * Terrain instance, wear already baked — re-applying would double the
+     * wear strength. The placement is seed-deterministic, so skipping
+     * reproduces the identical paint.
+     */
+    skipWear?: boolean;
   } = {}): LandmarkResult {
     const rng = new Rng((seed ^ 0x1a4d) >>> 0);
     const pal = spec.theme.palette;
@@ -134,7 +150,9 @@ export class Structures {
       kinds: opts.kinds ?? biome.landmarks,
       waterLevel: t.water ? t.waterLevel : undefined,
       maxRealLights: opts.maxRealLights,
-      addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },
+      addCollider: (size, pos) => {
+        this.landmarkBodies.push(this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }));
+      },
     };
     const result = placeLandmarks(scene, rng, landmarkOpts);
     this.group.add(result.group);
@@ -154,7 +172,7 @@ export class Structures {
         paths.push({ ax: sx, az: sz, bx: p.pos.x, bz: p.pos.z, width: 4.5, strength: 0.4 });
       }
     }
-    terrain.addWearPoints(discs, paths);
+    if (!opts.skipWear) terrain.addWearPoints(discs, paths);
     return result;
   }
 
@@ -207,7 +225,9 @@ export class Structures {
       grid: scatterGrid(terrain),
       exclusion: opts.exclusion,
       waterLevel: t.water ? t.waterLevel : undefined,
-      addCollider: (size, pos) => { this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }); },
+      addCollider: (size, pos) => {
+        this.landmarkBodies.push(this.physics.box(size, pos, { mass: 0, group: GROUP.WORLD }));
+      },
     };
     const result = placeStructureSets(scene, rng, setOpts);
     this.group.add(result.group);

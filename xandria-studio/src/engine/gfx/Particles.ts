@@ -317,4 +317,8 @@ const WEATHER_MOOD: Record<Genre, Partial<Record<Weather, { density?: number; co
   platformer: { snow: { density: 1.1, color: '#eaf6ff', size: 1.5 } },
   'top-down-shooter': { ash: { density: 1.25 } },
   'third-person-action': {},
+  // variety wave: no weather overrides — the base environment mix stands
+  survivor: {},
+  'tower-defense': {},
+  'endless-runner': {},
 };

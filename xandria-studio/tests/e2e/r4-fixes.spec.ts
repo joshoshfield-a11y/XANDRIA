@@ -62,7 +62,7 @@ async function writePage(html: string, name: string): Promise<string> {
 }
 
 const overlayTitles = () =>
-  [...document.querySelectorAll('.xhud .overlay h1')].map((h) => h.textContent);
+  [...document.querySelectorAll('.xhud-modals .overlay h1')].map((h) => h.textContent);
 
 async function killOneEnemy(page: any): Promise<boolean> {
   return page.evaluate(() => {
@@ -100,7 +100,7 @@ test('R4-M1: level-up queues behind the branch-choice modal; quest never freezes
   // THE kill: 100 XP -> level-up (microtask) + stage completion (sync choice modal)
   expect(await killOneEnemy(page)).toBe(true);
   await page.waitForFunction(
-    () => [...document.querySelectorAll('.xhud .overlay h1')].some((h) => h.textContent === 'CHOOSE YOUR PATH'),
+    () => [...document.querySelectorAll('.xhud-modals .overlay h1')].some((h) => h.textContent === 'CHOOSE YOUR PATH'),
     null,
     { timeout: 5000 },
   );
@@ -109,15 +109,15 @@ test('R4-M1: level-up queues behind the branch-choice modal; quest never freezes
   expect(await page.evaluate(() => (window as any).__XANDRIA__.engine.state)).toBe('paused');
 
   // pick Path of Dawn
-  await page.click('.xhud .overlay .lvlopt >> nth=0');
+  await page.click('.xhud-modals .overlay .lvlopt >> nth=0');
   // the queued level-up now surfaces
   await page.waitForFunction(
-    () => [...document.querySelectorAll('.xhud .overlay h1')].some((h) => h.textContent === 'LEVEL UP'),
+    () => [...document.querySelectorAll('.xhud-modals .overlay h1')].some((h) => h.textContent === 'LEVEL UP'),
     null,
     { timeout: 5000 },
   );
   // pick an upgrade
-  await page.click('.xhud .overlay .lvlopt >> nth=0');
+  await page.click('.xhud-modals .overlay .lvlopt >> nth=0');
   await page.waitForFunction(() => (window as any).__XANDRIA__.engine.state === 'playing', null, {
     timeout: 5000,
   });

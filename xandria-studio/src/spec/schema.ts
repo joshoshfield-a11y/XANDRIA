@@ -7,7 +7,7 @@
  */
 
 // ---------------- unions ----------------
-export const GENRES = ['third-person-action', 'fps-arena', 'racing', 'platformer', 'top-down-shooter'] as const;
+export const GENRES = ['third-person-action', 'fps-arena', 'racing', 'platformer', 'top-down-shooter', 'survivor', 'tower-defense', 'endless-runner'] as const;
 export type Genre = (typeof GENRES)[number];
 
 export const ENVIRONMENTS = [
@@ -609,6 +609,50 @@ export interface CustomSpec {
    * slider write these fields (workstream C owns editorPanel.ts).
    */
   crafting?: CraftingCustom;
+  /**
+   * Quest wave: authoring controls for the main-story quest line. Master
+   * toggle + an exact quest-count override (1..8); absent = the seeded
+   * 3..5-quest pool from the spec seed. Config-only — never touches the
+   * seed. Read by resolveQuestsEnabled / buildQuestPool (engine/game/quests).
+   */
+  quests?: QuestsCustom;
+  /**
+   * Boss-fights wave: generator flag marking boss maps. When `enabled` is
+   * true (default: true whenever the spec has a boss objective stage), the
+   * boss-fight system activates on this map: a seeded boss arena is placed
+   * (Rng(mapSeed ^ BOSS_SALT)), the boss brute is tethered to it, and the
+   * data-driven boss def (`bossId`) drives telegraphed attacks. Set
+   * `enabled: false` to keep a boss objective's legacy melee-only behavior.
+   * Config-only — never touches the seed. Read by
+   * bossEnabled/resolveBossDef (engine/game/bosses).
+   */
+  boss?: BossCustom;
+  /**
+   * Skills wave: Studio-authored skill tuning. Master toggle + XP gain
+   * multiplier. Config-only — never touches the seed. Read by
+   * resolveSkillsEnabled / resolveSkillsXpMultiplier (engine/game/skills);
+   * the Studio SKILLS section writes these fields.
+   */
+  skills?: SkillsTuningCustom;
+}
+
+/**
+ * Boss-fights wave: the generator flag marking boss maps. All fields
+ * optional; absent = defaults (enabled when a boss stage exists,
+ * bossId 'the-warden', arenaRadius from the boss def).
+ */
+export interface BossCustom {
+  /**
+   * master boss-fight toggle. Default: true when the spec has any boss
+   * objective stage (legacy `type: 'boss'` or a staged boss), false
+   * otherwise. Explicit false disables the arena + telegraphed attacks
+   * even on boss stages (legacy brute behavior is preserved).
+   */
+  enabled?: boolean;
+  /** boss def id from BOSS_DEFS (default 'the-warden'); unknown ids fall back. */
+  bossId?: string;
+  /** arena radius override in meters (default = the boss def's arenaRadius). */
+  arenaRadius?: number;
 }
 
 /**
@@ -689,6 +733,45 @@ export interface CraftingPoolCustom {
    * spec seed, never by hand-picking.
    */
   poolSize?: number;
+}
+
+/**
+ * Quest wave: Studio-authored quest-line controls. All fields optional;
+ * absent = defaults (enabled, seeded 3..5 quests).
+ */
+export interface QuestsCustom {
+  /**
+   * master quest toggle (default true). When false, the quest system is
+   * disabled: blueprints skip the QuestManager, the quest tracker and the
+   * talk session. Read by resolveQuestsEnabled (engine/game/quests).
+   */
+  enabled?: boolean;
+  /**
+   * exact quest count 1..8 (default: seeded 3..5 from spec.meta.seed).
+   * Only the count is authored — which quests appear is seeded.
+   */
+  questCount?: number;
+  /**
+   * Side-quests wave: exact side-quest count 1..12 (default: seeded 6..9
+   * from spec.meta.seed ^ SIDE_QUEST_SALT). Only the count is authored —
+   * which side quests appear is seeded.
+   */
+  sideQuestCount?: number;
+}
+
+/** Skills wave: Studio-authored skill tuning. */
+export interface SkillsTuningCustom {
+  /**
+   * master skills toggle (default true). When false, the SkillSystem
+   * no-ops: no XP is granted, ranks stay at 1, and skill-gated recipes
+   * keep their gates (rank 1 still passes rank-1 gates).
+   */
+  enabled?: boolean;
+  /**
+   * scales all skill XP gains (default 1, clamped 0..10). 2 = twice as
+   * fast through the ranks; 0 = frozen ranks.
+   */
+  xpMultiplier?: number;
 }
 
 export interface GameSpec {
@@ -873,7 +956,7 @@ function validateStageGraph(
 
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult', 'armor'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult', 'armor', 'runner', 'towerDefense', 'survivor'];
 
 /** Options for validateSpec. */
 export interface ValidateSpecOptions {
@@ -1424,6 +1507,14 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
       err('player.camera', 'platformer requires side camera');
     if (spec.meta.genre === 'top-down-shooter' && spec.player.camera !== 'top-down')
       err('player.camera', 'top-down-shooter requires top-down camera');
+    if (spec.meta.genre === 'survivor' && spec.player.camera !== 'top-down')
+      err('player.camera', 'survivor requires top-down camera');
+    if (spec.meta.genre === 'tower-defense' && spec.player.camera !== 'top-down')
+      err('player.camera', 'tower-defense requires top-down camera');
+    if (spec.meta.genre === 'endless-runner' && spec.player.camera !== 'chase')
+      err('player.camera', 'endless-runner requires chase camera');
+    if (spec.meta.genre === 'endless-runner' && spec.player.type !== 'humanoid')
+      err('player.type', 'endless-runner requires player.type = humanoid');
   }
 
   // unknown keys are ignored, never errors — but reported so typos don't vanish silently

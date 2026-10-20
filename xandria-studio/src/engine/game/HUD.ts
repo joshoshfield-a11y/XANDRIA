@@ -43,6 +43,9 @@ const CSS = `
 .xhud .vignette { position:absolute; inset:0; background:radial-gradient(ellipse at center, transparent 55%, rgba(255,30,40,.55) 100%); opacity:0; transition:opacity .1s; }
 .xhud .toast { position:absolute; left:50%; top:18%; transform:translateX(-50%); font-size:20px; font-weight:700; letter-spacing:.1em; text-shadow:0 2px 12px rgba(0,0,0,.7); opacity:0; transition:opacity .3s; }
 .xhud .hint { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); font-size:11.5px; opacity:.65; background:rgba(10,14,20,.5); padding:6px 12px; border-radius:8px; }
+/* HUD-polish: an empty hint is a visible padding-only pill — hide it so it
+   can't collide with the bars on touch layouts. */
+.xhud .hint:empty { display:none; }
 .xhud .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(6,8,14,.72); backdrop-filter:blur(6px); pointer-events:auto; }
 .xhud .overlay h1 { font-size:44px; letter-spacing:.14em; margin:0 0 8px; }
 .xhud .overlay .sub { font-size:15px; opacity:.85; margin-bottom:6px; }
@@ -92,7 +95,9 @@ const CSS = `
 @keyframes cardin { from { opacity:0; transform:translate(-50%,-10px); } }
 /* touch mode: keep HUD clear of the joystick (bottom-left) and buttons (bottom-right) */
 .xhud.touch .bars { left:12px; bottom:200px; width:190px; }
-.xhud.touch .hint { bottom:210px; }
+/* HUD-polish: the old bottom:210px landed the hint on the bars (bottom:200px,
+   ~61px tall on small screens) — 270px clears them with margin. */
+.xhud.touch .hint { bottom:270px; }
 .xhud.touch .objective { top:max(12px, env(safe-area-inset-top)); left:max(12px, env(safe-area-inset-left)); }
 .xhud.touch .score { top:max(12px, env(safe-area-inset-top)); right:max(12px, env(safe-area-inset-right)); }
 /* small screens: compact panels */
@@ -105,6 +110,43 @@ const CSS = `
   .xhud .overlay h1 { font-size:32px; }
   .xhud .toast { font-size:16px; top:14%; }
   .xhud .card { top:10%; }
+}
+/* HUD-polish: while a boss bar is up on narrow screens, the centered bar
+   (top:48px, up to 70vw wide) paints over the objective and score panels.
+   Shift the top cluster down 36px for the fight's duration (setBoss toggles
+   .xboss on the engine container; the tracker shift lives in QuestTracker's
+   own stylesheet; the touch pause button re-measures via
+   repositionPauseButton). Desktop is untouched — no collision there. */
+@media (max-width:760px) {
+  .xboss .xhud .objective { top:max(48px, calc(env(safe-area-inset-top) + 36px)); }
+  .xboss .xhud .score { top:max(48px, calc(env(safe-area-inset-top) + 36px)); }
+  .xboss .xhud .boss { top:8px; }
+}
+`;
+
+/**
+ * HUD-polish wave: the blocking-modal layer. Level-up / branch-choice modals
+ * used to be appended to .xhud (z-index 10), whose stacking context trapped
+ * them UNDER the quest dialogue panel (z-index 9500) — on mobile the dialogue
+ * covered the modal and its upgrade buttons were unclickable. The modals now
+ * live in this dedicated layer, a direct child of the engine container, above
+ * the dialogue (9500) and the crafting panel (9600), below the engine debug
+ * overlay / splash (99998+). Only the two blocking modals (N5) move here;
+ * title / pause / end screens and story cards stay in .xhud untouched.
+ * The overlay rules below mirror .xhud .overlay so the modals look identical.
+ */
+const MODAL_CSS = `
+.xhud-modals { position:absolute; inset:0; z-index:9650; pointer-events:none; }
+.xhud-modals .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(6,8,14,.72); backdrop-filter:blur(6px); pointer-events:auto; }
+.xhud-modals .overlay h1 { font-size:44px; letter-spacing:.14em; margin:0 0 8px; }
+.xhud-modals .overlay .sub { font-size:15px; opacity:.85; margin-bottom:6px; }
+.xhud-modals .lvlopts { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; justify-content:center; }
+.xhud-modals .lvlopt { flex:1 1 150px; max-width:210px; padding:14px 12px; border-radius:10px; border:1px solid rgba(140,180,220,.35); background:linear-gradient(180deg,#223048,#141c2c); color:#e8ecf1; cursor:pointer; text-align:center; font-family:inherit; }
+.xhud-modals .lvlopt:hover { border-color:#ffd23f; background:linear-gradient(180deg,#2e4258,#1a2438); }
+.xhud-modals .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:#ffd23f; margin-bottom:6px; }
+.xhud-modals .lvlopt .ds { font-size:12px; opacity:.8; line-height:1.45; }
+@media (max-width:760px) {
+  .xhud-modals .overlay h1 { font-size:32px; }
 }
 `;
 
@@ -159,6 +201,12 @@ export class HUD {
    * the queue is dropped on clearOverlays (teardown/restart).
    */
   private modalQueue: Array<() => void> = [];
+  /**
+   * HUD-polish wave: dedicated layer for the blocking modals (level-up /
+   * branch choice), appended to the engine container (NOT .xhud) at
+   * z-index 9650 — above the dialogue (9500) and crafting panel (9600).
+   */
+  private modalLayer: HTMLDivElement;
   private boostBar: HTMLDivElement;
   private vignetteT = 0;
   private toastT = 0;
@@ -170,7 +218,7 @@ export class HUD {
 
   constructor(private container: HTMLElement, private spec: GameSpec) {
     const style = document.createElement('style');
-    style.textContent = CSS;
+    style.textContent = CSS + MODAL_CSS;
     document.head.appendChild(style);
 
     this.root = document.createElement('div');
@@ -199,6 +247,12 @@ export class HUD {
       <div class="boss" style="display:none"><div class="name"></div><div class="bar"><div style="width:100%"></div></div></div>`;
     container.style.position = 'relative';
     container.appendChild(this.root);
+    // HUD-polish wave: the blocking-modal layer (z 9650) sits in the engine
+    // container, outside .xhud's z-10 stacking context, so modals paint
+    // above the dialogue panel (9500) and crafting panel (9600).
+    this.modalLayer = document.createElement('div');
+    this.modalLayer.className = 'xhud-modals';
+    container.appendChild(this.modalLayer);
 
     this.hpFill = this.root.querySelector('.hp > div')!;
     this.boostBar = this.root.querySelector('.boost')!;
@@ -245,10 +299,25 @@ export class HUD {
   setHint(text: string) { this.hintEl.textContent = text; }
   /** Boss health bar. Pass null to hide. */
   setBoss(name: string | null, frac: number) {
-    if (name === null) { this.bossEl.style.display = 'none'; return; }
+    if (name === null) {
+      this.bossEl.style.display = 'none';
+      // HUD-polish: boss-fight layout shift over (see CSS .xboss rules).
+      // Defensive ?. — minimal DOM stubs may not implement classList.
+      this.container.classList?.remove('xboss');
+      this.eng?.touch?.repositionPauseButton();
+      return;
+    }
     this.bossEl.style.display = '';
     this.bossName.textContent = name;
     this.bossFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
+    // HUD-polish: on narrow screens the centered boss bar collides with the
+    // objective/score panels — .xboss shifts the top cluster down for the
+    // fight's duration (mobile-only rules; desktop untouched). The shift
+    // moves the score/tracker the touch pause button clears, so re-run its
+    // layout (no-op when touch is inactive or eng is a test stub).
+    // Defensive ?. — minimal DOM stubs may not implement classList.
+    this.container.classList?.add('xboss');
+    this.eng?.touch?.repositionPauseButton();
   }
 
   /** Engine reference for modal flows (level-up pause). Set by Engine. */
@@ -418,7 +487,10 @@ export class HUD {
         opts.appendChild(b);
       }
       el.append(h, sub, opts);
-      this.root.appendChild(el);
+      // HUD-polish wave: blocking modals go to the dedicated modal layer
+      // (z 9650, above the dialogue) — never to .xhud (z 10), whose stacking
+      // context trapped them under the dialogue panel.
+      this.modalLayer.appendChild(el);
       // N5: track the modal so clearOverlays() can dismiss + settle it on
       // teardown/restart. Settling with '' abandons the pending upgrade —
       // applyUpgrade('') is a harmless no-op, so no stale click can mutate
@@ -485,7 +557,9 @@ export class HUD {
         opts.appendChild(b);
       });
       el.append(h, sub, hint, opts);
-      this.root.appendChild(el);
+      // HUD-polish wave: blocking modals go to the dedicated modal layer
+      // (z 9650, above the dialogue) — never to .xhud (z 10).
+      this.modalLayer.appendChild(el);
       document.addEventListener('keydown', onKey);
       // N5: track the element + keydown listener so clearOverlays() removes
       // them on teardown/restart. R4-M1: the settle resolves with

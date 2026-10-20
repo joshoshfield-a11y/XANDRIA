@@ -39,6 +39,7 @@ import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
 import { TouchControls, isTouchDevice } from './game/TouchControls';
+import type { QuestManager } from './game/quests';
 import { showIntroCard } from '../blueprints/campaign';
 import type { PlayerAvatar } from '../blueprints/common';
 import {
@@ -146,10 +147,19 @@ export class Engine {
    * ({ type: 'npc', prompt: 'Talk to <name>' }). NPC interactables live
    * here — NOT in ItemWorld.interactions (chests) — so the chest activation
    * path never sees NPC ids. Registered on spawn, unregistered on despawn
-   * (see engine/game/npcInteraction.ts); `requires`/`produces` stay
-   * undefined until the quest wave.
+   * (see engine/game/npcInteraction.ts); the quest wave stamps
+   * `requires`/`produces` onto villager interactables (see
+   * engine/game/questTalk.ts).
    */
   readonly npcInteractions = new InteractionRegistry();
+  /**
+   * Quest wave: the player-scoped quest manager. Set by the blueprint when
+   * quests are enabled; null otherwise. Deliberately NOT part of
+   * portalEntities — quest progress is player-scoped, not map-local, so it
+   * survives portal travel by construction (see engine/game/quests.ts).
+   * Read by PortalManager.portalParts for snapshot/restore.
+   */
+  questManager: QuestManager | null = null;
   /**
    * PORTALS-D: visited-map LRU (world/MapCache.ts). Wired by the portal
    * transition flow (workstream B/C). Null = portals disabled; transitions
