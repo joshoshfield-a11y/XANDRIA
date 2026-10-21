@@ -10,8 +10,9 @@ import {
 } from '@spec';
 import { hashString } from '../engine/core/Rng';
 import { applyOperators } from './operators';
+import { extractIntent } from './intent';
 
-const has = (s: string, ...words: string[]) => words.some((w) => new RegExp(`\\b${w}\\b`, 'i').test(s));
+
 
 /* ---------- palette visibility floor ---------- */
 /** hex -> [h, s, l] with h in [0,360), s/l in [0,1] */
@@ -62,54 +63,11 @@ export function floorPalette(p: Palette): Palette {
   };
 }
 
-const GENRE_KEYS: [Genre, string[]][] = [
-  ['racing', ['race', 'racing', 'car', 'cars', 'drive', 'driving', 'drift', 'kart', 'grand prix', 'rally', 'f1']],
-  ['fps-arena', ['fps', 'first person', 'first-person', 'deathmatch', 'arena shooter', 'quake', 'doom']],
-  ['platformer', ['platformer', 'platform', 'jumping', 'mario', 'side scroll', 'side-scroll', 'sidescroll']],
-  ['top-down-shooter', ['top-down', 'topdown', 'top down', 'twin stick', 'twin-stick', 'twinstick', 'asteroids', 'overhead', 'horde']],
-  ['third-person-action', ['adventure', 'quest', 'rpg', 'sword', 'knight', 'explore', 'third person', 'third-person', 'action', 'samurai', 'ninja']],
-  // variety wave: new genres live after the originals so they only win on a
-  // strictly better keyword score — legacy intents keep their old mapping.
-  ['survivor', ['survivor', 'survivors', 'bullet heaven', 'bullet-hell', 'vampire survivors', 'auto-shooter', 'auto shooter', 'swarm survivor', 'swarm']],
-  ['tower-defense', ['tower defense', 'tower-defense', 'turret defense', 'defend the base', 'base defense', 'defense']],
-  ['endless-runner', ['endless runner', 'endless-runner', 'runner', 'temple run', 'subway surfers', 'auto-run', 'auto run', 'lane runner']],
-];
-
-/**
- * Variety wave: pick the key with the most keyword hits instead of the first
- * key with any hit (ties keep list order, so legacy genres win ties). This
- * makes multi-aspect prompts ("snowy volcanic racing") resolve to the
- * best-supported interpretation rather than list order.
- */
-function matchScore(s: string, words: string[]): number {
-  let n = 0;
-  for (const w of words) if (has(s, w)) n++;
-  return n;
-}
-function bestMatch<T>(s: string, keys: [T, string[]][]): T | undefined {
-  let best: T | undefined;
-  let bestN = 0;
-  for (const [k, words] of keys) {
-    const n = matchScore(s, words);
-    if (n > bestN) { bestN = n; best = k; }
-  }
-  return best;
-}
-
-const ENV_KEYS: [Environment, string[]][] = [
-  ['neon-city', ['neon', 'cyberpunk', 'cyber', 'synthwave', 'cyber city', 'tokyo']],
-  ['space-station', ['space station', 'space-station', 'spaceship', 'spacecraft', 'station', 'orbital', 'derelict ship']],
-  ['volcanic', ['volcano', 'volcanic', 'lava', 'magma', 'inferno', 'hell', 'molten', 'ashen']],
-  ['arctic', ['arctic', 'snow', 'snowy', 'ice', 'frozen', 'winter', 'glacier', 'tundra', 'polar', 'blizzard']],
-  ['desert', ['desert', 'sand', 'dune', 'dunes', 'sahara', 'oasis', 'badlands', 'dust']],
-  ['wasteland', ['wasteland', 'apocalypse', 'apocalyptic', 'post-apocalyptic', 'fallout', 'ruined world', 'barren', 'desolate']],
-  ['city', ['city', 'urban', 'downtown', 'street', 'streets', 'alley', 'metropolis', 'skyscraper']],
-  ['ruins', ['ruins', 'ancient', 'temple', 'aztec', 'mayan', 'lost city', 'archaeology', 'castle', 'fortress', 'catacombs', 'graveyard']],
-  ['dreamscape', ['dream', 'dreamscape', 'surreal', 'dreamy', 'liminal', 'void', 'ethereal', 'otherworldly']],
-  ['islands', ['island', 'islands', 'tropical', 'archipelago', 'beach', 'ocean', 'lagoon', 'atoll', 'shore', 'coast']],
-  ['jungle', ['jungle', 'rainforest', 'amazon', 'swamp', 'mangrove', 'bayou']],
-  ['forest', ['forest', 'woods', 'woodland', 'grove', 'meadow', 'pine', 'redwood']],
-];
+// Cue tables (GENRE_KEYS, ENV_KEYS, MOOD_KEYS) now live in ./intent.ts — the
+// single source of truth for the prompt->spec vocabulary. generateSpec
+// consumes them through extractIntent; the best-match / first-match semantics
+// (ties keep table order, so legacy genres keep their old mapping) are
+// preserved verbatim there.
 
 const ENV_TERRAIN: Record<Environment, TerrainType> = {
   forest: 'hills', jungle: 'hills', desert: 'hills', wasteland: 'flat', arctic: 'hills',
@@ -133,16 +91,7 @@ const ENV_PALETTE: Record<Environment, Palette> = {
   arena: { primary: '#8d949e', secondary: '#5d646e', accent: '#ffd23f', sky: '#8aa8c8', horizon: '#c8d8e8', ground: '#7d838c', groundAlt: '#8a909a', rock: '#9aa0a8', fog: '#b8c8d8', water: '#3a7ab0' },
 };
 
-const MOOD_KEYS: [Mood, string[]][] = [
-  ['aggressive', ['brutal', 'intense', 'aggressive', 'hardcore', 'rage', 'savage', 'feral', 'bloodthirsty']],
-  ['dark', ['dark', 'horror', 'scary', 'grim', 'gothic', 'evil', 'demon', 'haunted', 'creepy', 'sinister', 'macabre']],
-  ['tense', ['tense', 'suspense', 'thriller', 'stealth', 'stealthy', 'danger']],
-  ['mysterious', ['mysterious', 'mystery', 'enigma', 'strange', 'eerie', 'liminal', 'uncanny']],
-  ['chill', ['chill', 'relaxing', 'calm', 'peaceful', 'cozy', 'gentle', 'serene', 'tranquil']],
-  ['retro', ['retro', 'arcade', 'synthwave', '8-bit', 'pixel', 'vaporwave']],
-  ['heroic', ['heroic', 'hero', 'legend', 'champion', 'save', 'valiant']],
-  ['epic', ['epic', 'grand', 'vast', 'massive', 'colossal', 'mythic', 'legendary']],
-];
+
 
 const NAME_ADJ = ['Crimson', 'Hollow', 'Silent', 'Burning', 'Frozen', 'Neon', 'Ancient', 'Forgotten', 'Iron', 'Shadow', 'Golden', 'Broken', 'Emerald', 'Storm', 'Obsidian', 'Radiant'];
 const NAME_NOUN = ['Frontier', 'Expanse', 'Citadel', 'Wastes', 'Reach', 'Valley', 'Bastion', 'Realm', 'Gauntlet', 'Sanctum', 'Outskirts', 'Crucible', 'Drift', 'Verge', 'Ascent', 'Hollow'];
@@ -260,37 +209,36 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const seed = opts.seed ?? hashString(text || 'xandria');
   const rng = (() => { let s = seed >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
 
+  // --- structured intent extraction (prompt-fidelity wave): every cue the
+  // compiler honors comes from this one record, so reporting can never
+  // disagree with the mapping about what a prompt asked for.
+  const cue = extractIntent(text);
+
   // --- genre (variety wave: score-based, best-supported interpretation wins)
   let genre: Genre | undefined = opts.genre;
-  if (!genre) genre = bestMatch(text, GENRE_KEYS);
+  if (!genre) genre = cue.genre;
   genre ??= 'third-person-action';
 
   // --- environment (variety wave: score-based)
   let environment: Environment | undefined = opts.environment;
-  if (!environment) environment = bestMatch(text, ENV_KEYS);
+  if (!environment) environment = cue.environment;
   environment ??= genre === 'fps-arena' || genre === 'top-down-shooter' || genre === 'survivor' || genre === 'tower-defense'
     ? 'arena' : genre === 'racing' ? 'wasteland' : 'forest';
 
   // --- mood / time / weather
-  let mood: Mood = 'epic';
-  for (const [m, words] of MOOD_KEYS) if (has(text, ...words)) { mood = m; break; }
+  let mood: Mood = cue.moodCue ?? 'epic';
   if (environment === 'neon-city') mood = 'retro';
   if (environment === 'dreamscape') mood = 'mysterious';
   if (environment === 'volcanic') mood = 'aggressive';
 
-  const timeOfDay: TimeOfDay = has(text, 'night', 'midnight', 'moonlit', 'moonlight', 'starlit', 'darkness') ? 'night'
-    : has(text, 'sunset', 'dusk', 'evening', 'twilight', 'golden hour') ? 'dusk'
-    : has(text, 'dawn', 'sunrise', 'morning', 'daybreak') ? 'dawn'
-    : environment === 'neon-city' || environment === 'space-station' ? 'night' : 'day';
+  const timeOfDay: TimeOfDay = cue.timeOfDayCue
+    ?? (environment === 'neon-city' || environment === 'space-station' ? 'night' : 'day');
 
-  const weather: Weather = has(text, 'storm', 'thunder', 'lightning', 'tempest', 'sandstorm', 'hail') ? 'storm'
-    : has(text, 'rain', 'rainy', 'drizzle', 'downpour', 'monsoon') ? 'rain'
-    : has(text, 'fog', 'foggy', 'mist', 'misty', 'haze') ? 'fog'
-    : has(text, 'blizzard', 'sleet') ? 'snow'
-    : environment === 'arctic' ? 'snow'
-    : environment === 'volcanic' ? 'ash' : 'clear';
+  const weather: Weather = cue.weatherCue
+    ?? (environment === 'arctic' ? 'snow'
+    : environment === 'volcanic' ? 'ash' : 'clear');
 
-  const difficulty = opts.difficulty ?? (has(text, 'nightmare', 'insane', 'brutal', 'very hard', 'extreme', 'hardest', 'merciless') ? 'hard' : has(text, 'easy', 'casual', 'relaxing', 'beginner', 'peaceful') ? 'easy' : 'normal');
+  const difficulty = opts.difficulty ?? cue.difficulty;
   const diffK = difficulty === 'easy' ? 0.7 : difficulty === 'hard' ? 1.5 : 1;
 
   // --- name
@@ -299,31 +247,26 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const name = `${adj} ${noun}`;
 
   // --- weapon (variety wave: wider synonym net; new genres get their own defaults)
-  const weapon: Weapon = has(text, 'sword', 'katana', 'blade', 'melee', 'knife', 'axe', 'bow', 'crossbow') ? 'sword'
-    : has(text, 'shotgun', 'grenade', 'rocket', 'bazooka') ? 'shotgun'
-    : has(text, 'rifle', 'machine gun', 'smg', 'pistol', 'gun', 'revolver', 'handgun') ? 'rifle'
-    : has(text, 'laser', 'plasma') ? 'blaster'
-    : has(text, 'fists', 'unarmed', 'parkour') ? 'none'
-    : genre === 'fps-arena' ? 'rifle'
+  const weapon: Weapon = cue.weaponCue
+    ?? (genre === 'fps-arena' ? 'rifle'
     : genre === 'top-down-shooter' ? 'blaster'
     : genre === 'survivor' ? 'blaster'
     : genre === 'tower-defense' ? 'blaster'
     : genre === 'platformer' ? 'none'
     : genre === 'endless-runner' ? 'none'
-    : genre === 'racing' ? 'none' : 'sword';
+    : genre === 'racing' ? 'none' : 'sword');
 
   // --- enemies
   // tower-defense wave count: "N waves" in the prompt wins, else 4 (5 on hard)
   const RUN_TARGET = 200; // endless-runner: gauntlet length in meters
-  const tdWaveMatch = /(\d+)\s+waves?/i.exec(text);
   const tdWaves = genre === 'tower-defense'
-    ? Math.max(2, Math.min(8, tdWaveMatch ? parseInt(tdWaveMatch[1], 10) : difficulty === 'hard' ? 5 : 4))
+    ? Math.max(2, Math.min(8, cue.towerWavesAsk ?? (difficulty === 'hard' ? 5 : 4)))
     : 0;
 
   const enemySpecs: { kind: EnemyKind; count: number; health: number; speed: number; damage: number; weapon: Weapon | 'melee' | 'none' }[] = [];
-  const wantsDrones = has(text, 'drone', 'drones', 'robot', 'robots', 'mech');
-  const wantsTurrets = has(text, 'turret', 'turrets', 'defense');
-  const wantsBoss = has(text, 'boss', 'giant', 'colossus');
+  const wantsDrones = cue.wantsDrones;
+  const wantsTurrets = cue.wantsTurrets;
+  const wantsBoss = cue.wantsBoss;
   if (genre === 'endless-runner') {
     // the gauntlet is obstacles, not enemies — the roster stays empty
   } else if (genre === 'survivor') {
@@ -370,7 +313,7 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   let objectiveDesc = '';
   if (genre === 'racing') {
     objectiveType = 'race';
-    objectiveCount = has(text, 'long') ? 5 : 3;
+    objectiveCount = cue.longCue ? 5 : 3;
     objectiveDesc = `Complete ${objectiveCount} laps`;
   } else if (genre === 'survivor') {
     objectiveType = 'survive';
@@ -385,19 +328,19 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
     objectiveType = 'reach';
     objectiveCount = 0;
     objectiveDesc = `Run ${RUN_TARGET}m and reach the far gate`;
-  } else if (has(text, 'boss')) {
+  } else if (cue.objectiveCue === 'boss') {
     objectiveType = 'boss';
     objectiveCount = enemySpecs.reduce((n, e) => n + e.count, 0);
     objectiveDesc = 'Defeat the champion and its guard';
-  } else if (has(text, 'collect', 'gather', 'treasure', 'coins')) {
+  } else if (cue.objectiveCue === 'collect') {
     objectiveType = 'collect';
     objectiveCount = Math.round(14 * diffK) + 6;
     objectiveDesc = `Collect ${objectiveCount} shards`;
-  } else if (has(text, 'survive', 'horde', 'waves', 'endless')) {
+  } else if (cue.objectiveCue === 'survive') {
     objectiveType = 'survive';
     objectiveCount = 0;
     objectiveDesc = 'Survive the onslaught';
-  } else if (has(text, 'reach', 'escape', 'get to', 'beacon', 'flag') || genre === 'platformer') {
+  } else if (cue.objectiveCue === 'reach' || genre === 'platformer') {
     objectiveType = 'reach';
     objectiveDesc = genre === 'platformer' ? 'Reach the flag' : 'Reach the beacon';
   } else {
@@ -407,8 +350,8 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   }
 
   const timeLimit = objectiveType === 'survive'
-    ? Math.round(has(text, 'long') ? 300 : 150)
-    : has(text, 'timed', 'time limit', 'speedrun') ? 240 : 0;
+    ? Math.round(cue.longCue ? 300 : 150)
+    : cue.timedCue ? 240 : 0;
 
   // --- quest stages: 2–3 chapter chains per genre (all winnable by construction)
   const foeCount = (kinds: string[]) =>
@@ -554,11 +497,8 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   const narrative = buildNarrative(genre, mood, name, environment, enemySpecs, objectiveCount, RUN_TARGET);
 
   // --- world
-  const terrain: TerrainType = has(text, 'mountain', 'mountains', 'alpine') ? 'mountains'
-    : has(text, 'canyon', 'gorge') ? 'canyon'
-    : has(text, 'flat', 'plains') ? 'flat'
-    : ENV_TERRAIN[environment];
-  const wantsWater = environment === 'islands' || has(text, 'lake', 'ocean', 'sea', 'water', 'river', 'flood');
+  const terrain: TerrainType = cue.terrainWord ?? ENV_TERRAIN[environment];
+  const wantsWater = environment === 'islands' || cue.wantsWater;
 
   // Open-world stage 1b: prompts asking for a big world map to big sizes.
   // 'giant' is deliberately NOT a size word ('giant robot boss' is a boss fight).
@@ -567,11 +507,8 @@ export function generateSpec(intent: string, opts: GenerateOptions = {}): GameSp
   // Open-world-scale = the third-person-action exploration genre, plus any
   // explicit big-world prompt. Arena genres (fps-arena, top-down-shooter) and
   // racing keep their legacy sizes and walls — portals stay off there.
-  const wantsBigWorld = has(text, 'open world', 'open-world', 'vast', 'expansive',
-    'sprawling', 'huge world', 'massive world', 'enormous world', 'huge map',
-    'massive map', 'big map', 'large map', 'enormous map', 'continent', 'world map');
-  const wantsRally = genre === 'racing' && has(text, 'rally', 'desert rally', 'open desert',
-    'off-road', 'offroad', 'cross-country', 'cross country', 'dakar');
+  const wantsBigWorld = cue.bigWorldCue;
+  const wantsRally = genre === 'racing' && cue.rallyCue;
   const isOpenWorldGame = genre === 'third-person-action' || wantsBigWorld;
   const portalsOn = isOpenWorldGame
     && genre !== 'racing' && genre !== 'fps-arena' && genre !== 'top-down-shooter'

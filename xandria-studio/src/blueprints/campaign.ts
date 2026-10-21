@@ -10,6 +10,7 @@ import type { GameSpec, ObjectiveStage, ObjectiveType } from '@spec';
 import * as THREE from 'three';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression, type UpgradeDef, type UpgradeId } from '../engine/game/Progression';
+import { levelRow, type LevelGain } from '../engine/game/progressionCurve';
 import { AssetRegistry, rigsOfKind } from '../engine/game/Assets';
 import type { EnemyManager } from '../engine/game/EnemyAI';
 import type { Pickups, Pickup } from '../engine/game/Pickups';
@@ -65,26 +66,42 @@ export function makeCampaignObjectives(
 
 /**
  * Level-up flow for humanoid blueprints (PlayerAvatar present).
- * Returns a `notifyLevelUp()` function: call it whenever Progression.onKill()
- * or onPickup() returns true. Modals are queued so rapid multi-level-ups
- * each get their own choice screen. 'dash' is filtered out (no mutable hook
+ * Returns a `notifyLevelUp()` function: call it whenever Progression.addXp*
+ * reports a level-up, passing the LevelGain so per-level stat growth applies
+ * incrementally. Modals are queued so rapid multi-level-ups each get their
+ * own choice screen. 'dash' is filtered out (no mutable hook
  * on CharacterController); speed upgrades scale spec.player.speed, which the
  * controller reads per-frame.
+ *
+ * PROGRESSION-CURVE: on creation, (re)applies the table's per-level stat
+ * growth to the avatar — portal transitions rebuild the avatar, so this
+ * restores growth up to the persisted level (idempotent per avatar/spec).
+ * Per-level growth is automatic; the modal's upgrade choice stays the
+ * player's decision on top of it.
  */
 export function makeLevelUpFlow(
   engine: Engine,
   spec: GameSpec,
   prog: Progression,
   avatar: PlayerAvatar,
-): () => void {
+): (gain?: LevelGain) => void {
+  prog.applyLevelStatGrowth(avatar, spec);
   let chain: Promise<void> = Promise.resolve();
-  return () => {
+  return (gain) => {
     chain = chain.then(async () => {
+      if (gain) {
+        prog.applyLevelStatGrowth(avatar, spec);
+        const row = levelRow(gain.to);
+        const hpGain = Math.round(avatar.maxHealth * (1 - levelRow(gain.from).hpMult / row.hpMult));
+        engine.hud.toast(
+          `LEVEL ${gain.to} — +${hpGain} max HP, +${Math.round((row.dmgMult / levelRow(gain.from).dmgMult - 1) * 100)}% damage`,
+        );
+      }
       const all = prog.getUpgradeChoices();
       const usable = all.filter((c: UpgradeDef) => c.id !== 'dash');
       const id = (await engine.hud.showLevelUp(usable.length ? usable : all)) as UpgradeId;
       prog.applyUpgrade(id, avatar);
-      if (id === 'speed') spec.player.speed *= 1.12; // == speedMult() for one stack, compounds
+      if (id === 'speed') prog.applyLevelStatGrowth(avatar, spec); // recompute: base x level x 1.12^stacks
     });
   };
 }
@@ -92,13 +109,25 @@ export function makeLevelUpFlow(
 /** XP for a kill; triggers the level-up queue when a level is gained.
  * UPGRADE LOOP (enemy-scaling): xpMult is the killed enemy's band XP
  * multiplier (defaults to 1 — unscaled); blueprints pass e.xpMult. */
-export function grantKillXp(prog: Progression, notifyLevelUp: () => void, xpMult = 1): void {
-  if (prog.onKill(xpMult)) notifyLevelUp();
+export function grantKillXp(prog: Progression, notifyLevelUp: (gain?: LevelGain) => void, xpMult = 1): void {
+  const r = prog.addXpEx(prog.xpPerKill() * xpMult);
+  if (r.leveled) notifyLevelUp(r.gain ?? undefined);
 }
 
 /** XP for a pickup; triggers the level-up queue when a level is gained. */
-export function grantPickupXp(prog: Progression, notifyLevelUp: () => void): void {
-  if (prog.onPickup()) notifyLevelUp();
+export function grantPickupXp(prog: Progression, notifyLevelUp: (gain?: LevelGain) => void): void {
+  const r = prog.addXpEx(prog.xpPerPickup());
+  if (r.leveled) notifyLevelUp(r.gain ?? undefined);
+}
+
+/**
+ * XP for a completed craft; triggers the level-up queue when a level is
+ * gained. PROGRESSION-CURVE: crafting joins kills / pickups / quest
+ * turn-ins on the one additive XP path (Progression.addXpEx).
+ */
+export function grantCraftXp(prog: Progression, notifyLevelUp: (gain?: LevelGain) => void): void {
+  const r = prog.addXpEx(prog.xpPerCraft());
+  if (r.leveled) notifyLevelUp(r.gain ?? undefined);
 }
 
 /** Boss-phase banner shared by all combat blueprints. */

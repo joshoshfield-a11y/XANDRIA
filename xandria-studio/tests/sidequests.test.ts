@@ -49,7 +49,7 @@ function makeManager(defs: QuestDef[], opts: Record<string, any> = {}) {
       add: (id: string, n = 1) => { inv.set(id, (inv.get(id) ?? 0) + n); return 0; },
     }),
     defsTable: () => ({ [MAT_ORE]: { id: MAT_ORE } as any, [MAT_FIBER]: { id: MAT_FIBER } as any, [MAT_SCRAP]: { id: MAT_SCRAP } as any }),
-    progression: { addXp: (_n: number) => false } as any,
+    progression: { addXp: (_n: number) => false, addXpEx: (_n: number) => ({ leveled: false, gain: null }) } as any,
     toast: (m: string) => toasts.push(m),
     ...opts,
   });

@@ -566,10 +566,22 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       saveStrArr(HIST_KEY, history);
       renderHistory();
     }
+    // prompt-fidelity wave: show what the prompt asked for that the spec did
+    // NOT include (the validator already scored it against meta.description).
+    let fidelityLine = '';
+    const f = v.fulfillment;
+    if (f && f.total === 0) {
+      fidelityLine = `<br/><i>no recognizable cues in that prompt — built the default adventure</i>`;
+    } else if (f && f.unmapped.length > 0) {
+      const items = f.unmapped
+        .map((u) => `${escapeHtml(u.ask)}${u.supported ? '' : ' (not supported yet)'}`)
+        .join(', ');
+      fidelityLine = `<br/><i>prompt fidelity ${f.score}/100 — not in this build: ${items}</i>`;
+    }
     meta.innerHTML =
       `<span class="badge">${GENRE_LABELS[spec.meta.genre]}</span><span class="badge">${spec.theme.environment}</span>` +
       `<span class="badge">${spec.theme.timeOfDay}</span><span class="badge">${spec.rules.difficulty}</span>` +
-      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b>${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}`;
+      `<span class="badge">seed ${spec.meta.seed}</span>${llmNote}<span class="badge">${spec.custom?.quality ?? 'retro'}</span><br/><br/><b>${escapeHtml(spec.meta.name)}</b> — ${escapeHtml(spec.objective.description)}${fidelityLine}`;
     // Record the COMPLETED generation against the monthly quota. This line is
     // only reached on success — failed builds don't count.
     if (billing.enabled) {

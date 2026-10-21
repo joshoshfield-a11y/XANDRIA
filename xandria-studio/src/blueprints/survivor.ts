@@ -16,6 +16,7 @@ import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Progression } from '../engine/game/Progression';
+import type { LevelGain } from '../engine/game/progressionCurve';
 import {
   makeCampaignObjectives,
   makeLevelUpFlow,
@@ -48,7 +49,7 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   engine.assetBridge.dispose();
 
   const prog = new Progression(engine);
-  let notifyLevelUp: () => void = () => {};
+  let notifyLevelUp: (gain?: LevelGain) => void = () => {};
   const dresser = new ChapterDresser(engine);
 
   const assets = new AssetRegistry();
@@ -248,5 +249,5 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets };
+  return { avatar, enemies, pickups, objectives, assets, prog };
 }

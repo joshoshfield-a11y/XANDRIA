@@ -8,7 +8,13 @@
  */
 import type { Engine } from '../Engine';
 import type { PlayerAvatar } from '../../blueprints/common';
-import type { ProgressionSpec } from '@spec';
+import type { ProgressionSpec, GameSpec } from '@spec';
+import {
+  LEVEL_CAP,
+  levelRow,
+  xpForNextLevel,
+  type LevelGain,
+} from './progressionCurve';
 
 export type UpgradeId =
   | 'damage'
@@ -32,6 +38,7 @@ const DEFAULT_OPTS: ProgressionOpts = {
   enabled: false,
   xpPerKill: 20,
   xpPerPickup: 5,
+  xpPerCraft: 15,
 };
 
 const UPGRADE_POOL: UpgradeDef[] = [
@@ -43,8 +50,20 @@ const UPGRADE_POOL: UpgradeDef[] = [
   { id: 'dash', name: 'Ion Thrusters', desc: '-25% dash cooldown' },
 ];
 
-export class Progression {
-  level = 1;
+/**
+ * Module-level speed anchors (progression-curve): keyed by the GameSpec
+ * object, which persists across portal transitions while Progression
+ * instances are rebuilt. applyLevelStatGrowth anchors the speed on first
+ * sight; applyLoadout invalidates the anchor after rewriting spec.player.speed
+ * so title-shop modifiers (swift) survive as the new anchor.
+ */
+const speedBaseAnchors = new WeakMap<object, number>();
+
+export function invalidateProgressionSpeedAnchor(spec: GameSpec): void {
+  speedBaseAnchors.delete(spec);
+}
+
+export class Progression {  level = 1;
   xp = 0;
   private counts = new Map<string, number>();
   private readonly opts: ProgressionOpts;
@@ -62,6 +81,8 @@ export class Progression {
       xpPerKill: opts?.xpPerKill ?? fromSpec?.xpPerKill ?? DEFAULT_OPTS.xpPerKill,
       xpPerPickup:
         opts?.xpPerPickup ?? fromSpec?.xpPerPickup ?? DEFAULT_OPTS.xpPerPickup,
+      xpPerCraft:
+        opts?.xpPerCraft ?? fromSpec?.xpPerCraft ?? DEFAULT_OPTS.xpPerCraft,
     };
   }
 
@@ -70,22 +91,32 @@ export class Progression {
   }
 
   xpForNext(level: number): number {
-    return Math.round(100 * Math.pow(level, 1.5));
+    return xpForNextLevel(level);
+  }
+
+  /**
+   * Add XP; returns the level span gained. THE one XP path — kills, pickups,
+   * crafts and quest turn-ins all funnel through here, additive only (XP is
+   * never subtracted or reset). Returns {leveled:false, gain:null} when
+   * nothing leveled, disabled, or the amount is non-positive.
+   */
+  addXpEx(n: number): { leveled: boolean; gain: LevelGain | null } {
+    if (!this.opts.enabled || !(n > 0)) return { leveled: false, gain: null };
+    const from = this.level;
+    this.xp += n;
+    while (this.level < LEVEL_CAP && this.xp >= this.xpForNext(this.level)) {
+      this.xp -= this.xpForNext(this.level);
+      this.level++;
+    }
+    const leveled = this.level > from;
+    if (leveled) this.engine.audio?.play('levelup');
+    if (leveled) this.engine.hooks.emit('onLevelUp', { level: this.level, progression: this });
+    return { leveled, gain: leveled ? { from, to: this.level } : null };
   }
 
   /** Add XP; returns true if this caused at least one level-up. */
   addXp(n: number): boolean {
-    if (!this.opts.enabled || n <= 0) return false;
-    this.xp += n;
-    let leveled = false;
-    while (this.xp >= this.xpForNext(this.level)) {
-      this.xp -= this.xpForNext(this.level);
-      this.level++;
-      leveled = true;
-    }
-    if (leveled) this.engine.audio?.play('levelup');
-    if (leveled) this.engine.hooks.emit('onLevelUp', { level: this.level, progression: this });
-    return leveled;
+    return this.addXpEx(n).leveled;
   }
 
   /**
@@ -100,6 +131,59 @@ export class Progression {
   /** Convenience: XP for a pickup. Returns true on level-up. */
   onPickup(): boolean {
     return this.addXp(this.opts.xpPerPickup);
+  }
+
+  /** Player-level XP granted per completed craft (spec-driven, additive). */
+  xpPerCraft(): number {
+    return this.opts.xpPerCraft ?? DEFAULT_OPTS.xpPerCraft!;
+  }
+
+  /** XP per kill before the band multiplier (spec-driven). */
+  xpPerKill(): number {
+    return this.opts.xpPerKill;
+  }
+
+  /** XP per pickup (spec-driven). */
+  xpPerPickup(): number {
+    return this.opts.xpPerPickup;
+  }
+
+  /**
+   * Per-level stat growth (progression-curve): applied to the live avatar on
+   * every level-up AND once on map boot (portal transitions rebuild the
+   * avatar, so boot re-applies growth up to the persisted level).
+   * Idempotent per avatar/spec: repeated calls never double-apply.
+   *
+   * - maxHealth scales by the table's hpMult ratio (symmetric with the
+   *   enemy-scaling dmgMult ladder); only the GAINED max HP is healed, so
+   *   leveling never acts as a free full heal (that's the 'maxhp' upgrade).
+   * - spec.player.speed is RECOMPUTED (not multiplied) from an anchored base
+   *   speed: level table growth x 'speed'-upgrade stacks. Recompute instead
+   *   of multiply keeps portal arrivals idempotent — the spec object
+   *   persists across maps. The anchor is the speed on first sight (authored
+   *   or loadout-final); applyLoadout invalidates it via
+   *   invalidateProgressionSpeedAnchor so title-shop modifiers survive.
+   */
+  private readonly growthAppliedLevel = new WeakMap<object, number>();
+  applyLevelStatGrowth(avatar: PlayerAvatar, spec: GameSpec): void {
+    const from = this.growthAppliedLevel.get(avatar) ?? 1;
+    const to = Math.min(Math.max(1, Math.floor(this.level)), LEVEL_CAP);
+    if (to > from) {
+      const ratio = levelRow(to).hpMult / levelRow(from).hpMult;
+      if (ratio !== 1) {
+        const before = avatar.maxHealth;
+        avatar.maxHealth = Math.round(avatar.maxHealth * ratio);
+        avatar.heal(avatar.maxHealth - before); // heal the gain only
+      }
+      this.growthAppliedLevel.set(avatar, to);
+    }
+    let base = speedBaseAnchors.get(spec);
+    if (base === undefined) {
+      base = spec.player.speed;
+      speedBaseAnchors.set(spec, base);
+    }
+    spec.player.speed =
+      base * levelRow(to).speedMult * Math.pow(1.12, this.upgradeCount('speed'));
   }
 
   /**
@@ -171,7 +255,9 @@ export class Progression {
    * to sane floors rather than throwing mid-transition.
    */
   portalRestore(s: { level: number; xp: number; counts: Record<string, number> }): void {
-    this.level = Number.isFinite(s?.level) ? Math.max(1, Math.floor(s.level)) : 1;
+    this.level = Number.isFinite(s?.level)
+      ? Math.max(1, Math.min(LEVEL_CAP, Math.floor(s.level)))
+      : 1;
     this.xp = Number.isFinite(s?.xp) ? Math.max(0, s.xp) : 0;
     const counts = s?.counts && typeof s.counts === 'object' ? s.counts : {};
     this.counts = new Map(
@@ -179,10 +265,30 @@ export class Progression {
     );
   }
 
-  /** Multiplicative damage bonus from 'damage' upgrades and the profile loadout. */
+  /**
+   * Multiplicative damage bonus from 'damage' upgrades, the profile loadout,
+   * AND the level table (symmetric with enemy hp growth — folds in so every
+   * existing damageMult() call site gets level growth automatically).
+   */
   damageMult(): number {
     const profile = this.engine.spec.custom?.profileDamageMult ?? 1;
-    return Math.pow(1.25, this.upgradeCount('damage')) * profile;
+    return (
+      Math.pow(1.25, this.upgradeCount('damage')) *
+      profile *
+      levelRow(this.level).dmgMult
+    );
+  }
+  /** Cumulative level-table damage multiplier (1.0 at level 1). */
+  levelDamageMult(): number {
+    return levelRow(this.level).dmgMult;
+  }
+  /** Cumulative level-table max-HP multiplier (1.0 at level 1). */
+  levelHpMult(): number {
+    return levelRow(this.level).hpMult;
+  }
+  /** Cumulative level-table move-speed multiplier (1.0 at level 1). */
+  levelSpeedMult(): number {
+    return levelRow(this.level).speedMult;
   }
   /** Multiplicative move-speed bonus from 'speed' upgrades. */
   speedMult(): number {

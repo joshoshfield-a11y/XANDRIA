@@ -41,6 +41,10 @@ import {
   craft,
   type CraftOptions,
 } from '../src/engine/game/crafting';
+import {
+  lootMaterialDefs,
+  lootItemDefs,
+} from '../src/engine/game/loot';
 
 function fakeEngine(customSkills?: Record<string, unknown>): Engine {
   return {
@@ -56,7 +60,9 @@ function specWith(seed: number): GameSpec {
 }
 
 function allDefs() {
-  return { ...materialItemDefs(), ...craftedItemDefs() };
+  // Master-crafting wave: master recipes (always in the pool) consume
+  // loot materials, so the loot defs are legitimate test fixtures here.
+  return { ...materialItemDefs(), ...craftedItemDefs(), ...lootMaterialDefs(), ...lootItemDefs() };
 }
 
 function gatedRecipe(skillId: string, minSkillRank?: number) {

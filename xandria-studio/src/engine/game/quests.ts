@@ -9,7 +9,8 @@
  *     kind 'craft'   — target = recipe id, fed by CraftingPanel onCrafted
  *     kind 'talk'    — target = npc role or 'any', fed by QuestTalkSession on dialogue open
  *     kind 'explore' — target = 'portals', fed by QuestManager.update reading portal transitions
- *   QuestRewardDef — { xp, items[] } (xp via Progression, items via Inventory when wired)
+ *   QuestRewardDef — { xp, items[], bonus? } (xp via Progression, items + the
+ *   small seeded bonus-material line via Inventory when wired)
  *
  * Seeded pool: buildQuestPool(spec) is a pure function of the spec — 3-5
  * main-story quests from the catalog via Rng(spec.meta.seed ^ QUEST_SALT),
@@ -36,10 +37,12 @@ import { Rng } from '../core/Rng';
 import { deriveMapBiome } from '../world/Biomes';
 import type { GameSpec, ItemDef } from '@spec';
 import type { Progression } from './Progression';
+import type { LevelGain } from './progressionCurve';
 import type { CraftingRecipe } from './crafting';
-import { buildRecipePool, MAT_ORE, MAT_FIBER, MAT_SCRAP } from './crafting';
+import { buildRecipePool } from './crafting';
 import { resolveCraftingEnabled } from './crafting';
 import { portalsEnabled } from '@spec';
+import { curatedQuestReward, questBonusItem } from './questRewards';
 import type { QuestTracker, QuestTrackerQuest } from '../ui/QuestTracker';
 
 /** Salt for the quest-pool stream — distinct from every other wave's salt. */
@@ -71,6 +74,13 @@ export interface QuestRewardDef {
   xp: number;
   /** item ids granted via Inventory.add — skipped when a def is missing */
   items: QuestRewardItem[];
+  /**
+   * Seeded bonus-material line (curated-quest-rewards wave): one small
+   * material grant kept on an independent seeded stream so the curated
+   * tables stay the reward's theme. Granted after items at turn-in, with
+   * the same skip-when-missing-def honesty.
+   */
+  bonus?: QuestRewardItem[];
 }
 
 export interface QuestDef {
@@ -121,6 +131,15 @@ export function validateQuestDef(def: QuestDef): string[] {
     errs.push(`quest ${def.id}: rewards.xp must be a non-negative number`);
   }
   if (!Array.isArray(def.rewards?.items)) errs.push(`quest ${def.id}: rewards.items must be an array`);
+  if (def.rewards?.bonus !== undefined) {
+    if (!Array.isArray(def.rewards.bonus)) errs.push(`quest ${def.id}: rewards.bonus must be an array`);
+    else for (let i = 0; i < def.rewards.bonus.length; i++) {
+      const b = def.rewards.bonus[i] as { id?: unknown; count?: unknown };
+      if (typeof b?.id !== 'string' || !b.id) errs.push(`quest ${def.id}: rewards.bonus[${i}].id must be a non-empty string`);
+      if (!Number.isInteger(b?.count) || (b.count as number) < 1)
+        errs.push(`quest ${def.id}: rewards.bonus[${i}].count must be an integer >= 1`);
+    }
+  }
   return errs;
 }
 
@@ -151,11 +170,20 @@ interface QuestTemplate {
   build: (ctx: QuestBuildCtx, id: string) => QuestDef;
 }
 
-function rewardFor(rng: Rng, tier: number): QuestRewardDef {
-  const mats = [MAT_ORE, MAT_FIBER, MAT_SCRAP];
+/**
+ * Curated story rewards (curated-quest-rewards wave): the theme-matched
+ * reward table for this template slug, merged with the Studio-authored
+ * override (custom.quests.rewardOverrides), plus the one small seeded
+ * bonus-material line from an INDEPENDENT stream (pure function of
+ * (pool seed, slug) — replicable without replaying the pool).
+ */
+function storyRewardsFor(spec: GameSpec, slug: string): QuestRewardDef {
+  const curated = curatedQuestReward(spec, slug);
+  if (!curated) throw new Error(`[quests] no curated reward table for story slug "${slug}"`);
   return {
-    xp: 50 + 25 * rng.int(0, 3) + tier * 25,
-    items: [{ id: rng.pick(mats), count: 2 + rng.int(0, 3) }],
+    xp: curated.xp,
+    items: curated.items,
+    bonus: [questBonusItem(spec.meta.seed, slug)],
   };
 }
 
@@ -172,7 +200,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
         id, name: 'First Blood', giver: 'villager',
         brief: 'The wilds press closer every night. Thin their numbers and the settlement will see you paid.',
         objectives: [{ id: 'obj-kill', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
-        rewards: rewardFor(ctx.rng, 0),
+        rewards: storyRewardsFor(ctx.spec, 'first_blood'),
       };
     },
   },
@@ -188,7 +216,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
         id, name: 'Big Game', giver: 'villager',
         brief: 'Something big stalks the treeline. Bring it down and the hunters will remember your name.',
         objectives: [{ id: 'obj-kill', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
-        rewards: rewardFor(ctx.rng, 1),
+        rewards: storyRewardsFor(ctx.spec, 'big_game'),
       };
     },
   },
@@ -203,7 +231,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
         id, name: 'The Forager', giver: 'villager',
         brief: 'We are running low on raw materials. The land provides — take what you need and bring it home.',
         objectives: [{ id: 'obj-gather', kind: 'gather', desc: `Gather ${count} raw materials`, target: 'any', count }],
-        rewards: rewardFor(ctx.rng, 0),
+        rewards: storyRewardsFor(ctx.spec, 'the_forager'),
       };
     },
   },
@@ -229,7 +257,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
           desc: `Craft ${recipe.name}${where}`,
           target: recipe.id, count: 1,
         }],
-        rewards: rewardFor(ctx.rng, 1),
+        rewards: storyRewardsFor(ctx.spec, 'the_maker'),
       };
     },
   },
@@ -244,7 +272,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
         id, name: 'Word Travels', giver: 'villager',
         brief: 'Word travels faster than feet. Speak with the others — hear what the settlement fears.',
         objectives: [{ id: 'obj-talk', kind: 'talk', desc: `Speak with ${count} villagers`, target: 'villager', count }],
-        rewards: rewardFor(ctx.rng, 0),
+        rewards: storyRewardsFor(ctx.spec, 'word_travels'),
       };
     },
   },
@@ -263,7 +291,7 @@ const QUEST_CATALOG: QuestTemplate[] = [
           desc: count === 1 ? 'Pass through a portal' : `Pass through ${count} portals`,
           target: 'portals', count,
         }],
-        rewards: rewardFor(ctx.rng, 2),
+        rewards: storyRewardsFor(ctx.spec, 'wayfarer'),
       };
     },
   },
@@ -376,8 +404,9 @@ export interface QuestManagerOpts {
    * and auto-turns-in on completion (no dialogue exists to do it).
    */
   autoAccept?: boolean;
-  /** called after an XP grant causes a level-up (blueprint wires the modal) */
-  onLevelUp?: () => void;
+  /** called after an XP grant causes a level-up (blueprint wires the modal);
+   * progression-curve: carries the LevelGain so stat growth applies. */
+  onLevelUp?: (gain?: LevelGain) => void;
 }
 
 /** Portal-safe quest snapshot (mirrors Progression.portalSnapshot). */
@@ -513,13 +542,21 @@ export class QuestManager {
     // land before the quest leaves the tracker).
     const prog = this.opts.progression;
     if (prog && q.def.rewards.xp > 0) {
-      const leveled = prog.addXp(q.def.rewards.xp);
-      if (leveled) this.opts.onLevelUp?.();
+      // progression-curve: quest turn-ins ride the one additive XP path;
+      // the gain flows to the blueprint's level-up modal + stat growth.
+      const r = prog.addXpEx(q.def.rewards.xp);
+      if (r.leveled) this.opts.onLevelUp?.(r.gain ?? undefined);
     }
-    // Items: only ids with a real def — never grant blind.
+    // Items: only ids with a real def — never grant blind. The curated
+    // items land first, then the small seeded bonus-material line (same
+    // skip-when-missing-def honesty).
     const table = this.opts.defsTable();
     const inv = this.opts.inventory();
     for (const item of q.def.rewards.items) {
+      if (!table[item.id]) continue;
+      inv?.add(item.id, item.count);
+    }
+    for (const item of q.def.rewards.bonus ?? []) {
       if (!table[item.id]) continue;
       inv?.add(item.id, item.count);
     }

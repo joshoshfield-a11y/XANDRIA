@@ -23,12 +23,14 @@ import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
+import type { LevelGain } from '../engine/game/progressionCurve';
 import { AssetRegistry } from '../engine/game/Assets';
 import {
   makeCampaignObjectives,
   makeLevelUpFlow,
   grantKillXp,
   grantPickupXp,
+  grantCraftXp,
   bossPhaseBanner,
   bossQuotaDeficit,
   registerWorldAssets,
@@ -83,7 +85,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       engine.hud.toast(`${def.name} rank ${rank}!`);
     },
   });
-  let notifyLevelUp: () => void = () => {};
+  let notifyLevelUp: (gain?: LevelGain) => void = () => {};
   // content depth: enemy variants, timed pickup effects, chapter dressing
   const fx = new EffectState();
   const fxHud = new EffectHud();
@@ -243,7 +245,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
         getCurrentMap: () => engine.portalManager?.coord ?? null,
         worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
         autoAccept: true,
-        onLevelUp: () => notifyLevelUp(),
+        onLevelUp: (gain) => notifyLevelUp(gain),
       })
     : null;
   engine.questManager = quests;
@@ -304,6 +306,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
         craftTimeMult: (stationId) => skills.craftTimeMult(stationId ?? undefined),
         onCrafted: (recipe) => {
           skills.onCraft(recipe.stationId);
+          // progression-curve: crafts grant player-level XP on the one additive path
+          grantCraftXp(prog, notifyLevelUp);
           // quest wave: crafts feed craft objectives
           quests?.onCraft(recipe.id);
         },
@@ -540,5 +544,5 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (spec.objective.type === 'survive') hud.setProgress(`${enemies.aliveCount()} hostiles`);
   });
 
-  return { avatar, enemies, skills, skillsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar };
+  return { avatar, enemies, skills, skillsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
 }

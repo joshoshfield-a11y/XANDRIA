@@ -67,7 +67,7 @@ export const SKILL_DEFS: readonly SkillDef[] = [
     effects: [
       'Rank 1 — standard harvests.',
       'Rank 2 — +1 material on every harvest.',
-      'Rank 3 — +2 materials on every harvest.',
+      'Rank 3 — +2 materials on every harvest; wildcrafts the Wildheart Regalia.',
     ],
   },
   {
@@ -80,7 +80,7 @@ export const SKILL_DEFS: readonly SkillDef[] = [
     effects: [
       'Rank 1 — basic metalwork recipes.',
       'Rank 2 — advanced recipes (Iron Edge); crafting 10% faster.',
-      'Rank 3 — master recipes (Alloy Greaves); crafting 25% faster.',
+      'Rank 3 — master recipes (Starfall Warbrand, Dragonscale Aegis, Alloy Greaves); crafting 25% faster.',
     ],
   },
   {
@@ -93,7 +93,7 @@ export const SKILL_DEFS: readonly SkillDef[] = [
     effects: [
       'Rank 1 — basic brews.',
       'Rank 2 — advanced brews (Ember Tonic); brewing 10% faster.',
-      'Rank 3 — master brews; brewing 25% faster.',
+      'Rank 3 — master brews (Primordial Draught); brewing 25% faster.',
     ],
   },
 ];

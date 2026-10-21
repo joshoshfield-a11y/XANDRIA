@@ -89,18 +89,36 @@ describe('recipe pool determinism', () => {
     expect(a).not.toBe(b);
   });
 
-  it('poolSize config is honored; defaults to 8; clamps to catalog', () => {
-    expect(buildRecipePool(specWith(7))).toHaveLength(DEFAULT_RECIPE_POOL_SIZE);
-    expect(buildRecipePool(specWithCrafting(7, { recipes: { poolSize: 3 } }))).toHaveLength(3);
+  it('poolSize config is honored for the seeded subset; master recipes (minSkillRank 3) always join', () => {
+    // 5 rank-3 masters (4 new + Alloy Greaves) ride along with every
+    // seeded subset, deduped — so exact pool length is seed-dependent.
+    const MASTERS = [
+      'recipe_alloy_greaves',
+      'recipe_starfall_warbrand',
+      'recipe_dragonscale_aegis',
+      'recipe_primordial_draught',
+      'recipe_wildheart_regalia',
+    ];
+    const expectPool = (rawSize: number, seededLen: number) => {
+      const pool = buildRecipePool(specWithCrafting(7, { recipes: { poolSize: rawSize } }));
+      const ids = pool.map((r) => r.id);
+      const inSeed = MASTERS.filter((m) => ids.slice(0, seededLen).includes(m)).length;
+      expect(pool, `poolSize ${rawSize}`).toHaveLength(seededLen + (MASTERS.length - inSeed));
+      for (const m of MASTERS) expect(ids, m).toContain(m);
+      expect(new Set(ids).size, 'deduped').toBe(ids.length);
+    };
+    expectPool(3, 3);
+    expectPool(0, 1); // clamps to 1 seeded
+    expectPool(NaN, DEFAULT_RECIPE_POOL_SIZE);
     expect(buildRecipePool(specWithCrafting(7, { recipes: { poolSize: 999 } }))).toHaveLength(RECIPE_CATALOG_SIZE);
-    expect(buildRecipePool(specWithCrafting(7, { recipes: { poolSize: 0 } }))).toHaveLength(1);
-    expect(buildRecipePool(specWithCrafting(7, { recipes: { poolSize: NaN } }))).toHaveLength(DEFAULT_RECIPE_POOL_SIZE);
   });
 
   it('pool is a prefix of the same seeded shuffle (smaller pool = first N of larger)', () => {
     const small = buildRecipePool(specWithCrafting(99, { recipes: { poolSize: 3 } }));
     const big = buildRecipePool(specWithCrafting(99, { recipes: { poolSize: 6 } }));
-    expect(big.slice(0, 3)).toEqual(small);
+    // master-crafting wave: rank-3 masters ride along with every pool,
+    // so the seeded portions (first N) are the exact prefixes
+    expect(big.slice(0, 3).map((r) => r.id)).toEqual(small.slice(0, 3).map((r) => r.id));
   });
 
   it('returned recipes are deep copies — mutation never leaks into later builds', () => {

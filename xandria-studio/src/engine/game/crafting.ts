@@ -32,6 +32,7 @@ import type { GameSpec, ItemDef } from '@spec';
 import { Rng } from '../core/Rng';
 import { ItemBuilder } from './items/ItemBuilder';
 import { LOOT_CATALOG_RECIPES, lootTier2OutputDefs } from './loot';
+import { MASTER_CATALOG_RECIPES, masterTier3OutputDefs } from './mastercraft';
 import type { SkillsLike } from './skills';
 
 // ---------------------------------------------------------------- salts
@@ -220,10 +221,16 @@ const BASE_RECIPE_CATALOG: readonly CraftingRecipe[] = [
  * outputs + enemy-drop materials) ride the same seeded pool. Appended
  * after the base catalog so smaller pools stay exact prefixes of larger
  * ones for the same seed (the prefix property the tests pin).
+ *
+ * Master-crafting wave: tier-3 recipes (minSkillRank 3) are appended
+ * after the tier-2 entries. They also ride buildRecipePool's
+ * master always-include rule (below), so earning rank 3 always unlocks
+ * them regardless of the seeded subset.
  */
 const RECIPE_CATALOG: readonly CraftingRecipe[] = [
   ...BASE_RECIPE_CATALOG,
   ...LOOT_CATALOG_RECIPES,
+  ...MASTER_CATALOG_RECIPES,
 ];
 
 /** Catalog length — poolSize clamps to 1..this. */
@@ -236,6 +243,12 @@ export const RECIPE_CATALOG_SIZE = RECIPE_CATALOG.length;
  * Same GameSpec -> identical pool (ids, order, contents). Returned
  * recipes are deep copies — mutating them never affects the catalog or
  * a later build.
+ *
+ * Master-crafting wave: recipes with minSkillRank 3 (the master tier,
+ * incl. Alloy Greaves) are appended after the seeded subset, deduped —
+ * earning rank 3 always puts them in the pool no matter which seeded
+ * subset a spec drew. The seeded prefix property is preserved (smaller
+ * pools are still exact prefixes of larger ones for the same seed).
  */
 export function buildRecipePool(spec: GameSpec): CraftingRecipe[] {
   const rawSize = spec.custom?.crafting?.recipes?.poolSize;
@@ -246,7 +259,7 @@ export function buildRecipePool(spec: GameSpec): CraftingRecipe[] {
   const rng = new Rng(spec.meta.seed).fork(CRAFT_SALT);
   const order = rng.shuffle(RECIPE_CATALOG.map((r) => r.id));
   const byId = new Map(RECIPE_CATALOG.map((r) => [r.id, r]));
-  return order.slice(0, poolSize).map((id) => {
+  const pool = order.slice(0, poolSize).map((id) => {
     const r = byId.get(id) as CraftingRecipe;
     return {
       ...r,
@@ -254,6 +267,20 @@ export function buildRecipePool(spec: GameSpec): CraftingRecipe[] {
       output: { ...r.output },
     };
   });
+  // Master always-include: rank-3-gated recipes are never locked out by
+  // the seeded subset (dedup by id; deep copies like the rest).
+  const seen = new Set(pool.map((r) => r.id));
+  for (const r of RECIPE_CATALOG) {
+    if ((r.minSkillRank ?? 0) >= 3 && !seen.has(r.id)) {
+      seen.add(r.id);
+      pool.push({
+        ...r,
+        ingredients: r.ingredients.map((i) => ({ ...i })),
+        output: { ...r.output },
+      });
+    }
+  }
+  return pool;
 }
 
 // ---------------------------------------------------------------- item defs
@@ -296,10 +323,13 @@ export function materialItemDefs(): Record<string, ItemDef> {
  * (with materialItemDefs) into the item tables before crafting runs —
  * see ensureCraftingItemDefs. Items-expansion: includes the tier-2
  * outputs (lootTier2OutputDefs) so the tier-2 recipes validate.
+ * Master-crafting: includes the tier-3 outputs (masterTier3OutputDefs)
+ * so the master recipes validate.
  */
 export function craftedItemDefs(): Record<string, ItemDef> {
   return {
     ...lootTier2OutputDefs(),
+    ...masterTier3OutputDefs(),
     craft_field_kit: new ItemBuilder('craft_field_kit')
       .named('Field Repair Kit')
       .consumable()

@@ -13,11 +13,13 @@ import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
 import { Progression } from '../engine/game/Progression';
+import type { LevelGain } from '../engine/game/progressionCurve';
 import {
   makeCampaignObjectives,
   makeLevelUpFlow,
   grantKillXp,
   grantPickupXp,
+  grantCraftXp,
   bossPhaseBanner,
   needsReachGoal,
   registerWorldAssets,
@@ -87,7 +89,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       engine.hud.toast(`${def.name} rank ${rank}!`);
     },
   });
-  let notifyLevelUp: () => void = () => {};
+  let notifyLevelUp: (gain?: LevelGain) => void = () => {};
   // content depth: enemy variants, timed pickup effects, chapter dressing
   const fx = new EffectState();
   const fxHud = new EffectHud();
@@ -260,7 +262,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         // seed (NOT spec.meta.seed, the map build seed) feeds deriveMapBiome.
         getCurrentMap: () => engine.portalManager?.coord ?? null,
         worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
-        onLevelUp: () => notifyLevelUp(),
+        onLevelUp: (gain) => notifyLevelUp(gain),
         // quest wave: an open quest dialogue live-refreshes when its quest
         // completes underneath it (talk objective fired on open). The thunk
         // is lazy — talkSession is constructed just below.
@@ -311,6 +313,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         craftTimeMult: (stationId) => skills.craftTimeMult(stationId ?? undefined),
         onCrafted: (recipe) => {
           skills.onCraft(recipe.stationId);
+          // progression-curve: crafts grant player-level XP on the one additive path
+          grantCraftXp(prog, notifyLevelUp);
           // quest wave: crafts feed craft objectives
           quests?.onCraft(recipe.id);
         },
@@ -562,5 +566,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, npcs: npcManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar };
+  return { avatar, enemies, skills, skillsPanel, npcs: npcManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
 }

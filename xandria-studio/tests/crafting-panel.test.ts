@@ -16,6 +16,7 @@ import {
   STATION_IDS,
   type CraftingRecipe,
 } from '../src/engine/game/crafting';
+import { ensureLootItemDefs } from '../src/engine/game/loot';
 import { CraftingPanel, type CraftingPanelOpts } from '../src/engine/ui/CraftingPanel';
 
 function makeEl(tag = 'div'): any {
@@ -90,6 +91,10 @@ interface Harness {
 function makeHarness(opts: Partial<CraftingPanelOpts> = {}): Harness {
   const spec = defaultSpec(4242) as GameSpec;
   ensureCraftingItemDefs(spec);
+  // master recipes consume loot materials — mirror the real blueprint
+  // boot, which runs both ensure calls (loot's is additive and
+  // non-destructive here since custom.items already exists)
+  ensureLootItemDefs(spec);
   const defs = spec.custom!.items!.defs!;
   const pool = buildRecipePool(spec);
   const inv = makeInv();

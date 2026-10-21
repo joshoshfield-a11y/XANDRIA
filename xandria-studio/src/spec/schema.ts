@@ -5,6 +5,7 @@
  * Generators (deterministic or LLM) emit specs; blueprints consume them.
  * A spec that passes `validateSpec` is *guaranteed* to build into a playable game.
  */
+import { scoreSpecFulfillment } from '../generator/intent';
 
 // ---------------- unions ----------------
 export const GENRES = ['third-person-action', 'fps-arena', 'racing', 'platformer', 'top-down-shooter', 'survivor', 'tower-defense', 'endless-runner'] as const;
@@ -246,6 +247,8 @@ export interface NarrativeSpec {
 
 export interface ProgressionSpec {
   enabled: boolean; xpPerKill: number; xpPerPickup: number;
+  /** player-level XP per completed craft; progression-curve, default 15 */
+  xpPerCraft?: number;
 }
 
 export interface PickupSpec {
@@ -736,6 +739,18 @@ export interface CraftingPoolCustom {
 }
 
 /**
+ * Studio-authored override for one quest's curated reward
+ * (curated-quest-rewards wave). Keyed by quest template slug; see
+ * engine/game/questRewards for the curated tables.
+ */
+export interface QuestRewardOverride {
+  /** override XP (undefined = keep the curated xp) */
+  xp?: number;
+  /** override item lines (undefined = keep the curated items) */
+  items?: { id: string; count: number }[];
+}
+
+/**
  * Quest wave: Studio-authored quest-line controls. All fields optional;
  * absent = defaults (enabled, seeded 3..5 quests).
  */
@@ -757,6 +772,14 @@ export interface QuestsCustom {
    * which side quests appear is seeded.
    */
   sideQuestCount?: number;
+  /**
+   * Curated-quest-rewards wave: per-quest reward overrides, keyed by quest
+   * template slug (e.g. 'first_blood', 'spare_parts'). {xp?, items?} merge
+   * over the curated tables (engine/game/questRewards); unknown slugs are
+   * rejected at validation time. The seeded bonus-material line is NOT
+   * overridable — it stays deterministic per (pool seed, slug).
+   */
+  rewardOverrides?: Record<string, QuestRewardOverride>;
 }
 
 /** Skills wave: Studio-authored skill tuning. */
@@ -850,6 +873,15 @@ export interface ValidationResult {
   errors: string[];
   /** Non-fatal notices: unknown keys that were ignored, etc. Never affect `ok`. */
   warnings: string[];
+  /**
+   * Prompt->spec fidelity (prompt-fidelity wave): how much of the prompt's
+   * ask the spec actually honors, scored against meta.description (the
+   * compiler stores the prompt there). Additive diagnostics only — never
+   * affects `ok`, `errors`, or `warnings`. Undefined when there is no prompt
+   * text to score against. Re-exported type lives in generator/intent.ts
+   * (import type only there, so no runtime cycle).
+   */
+  fulfillment?: import('../generator/intent').FidelityScore;
 }
 
 interface WinnabilityCtx {
@@ -1188,6 +1220,8 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
       const pos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
       if (!pos(prg.xpPerKill)) err('progression.xpPerKill', 'must be a positive number');
       if (!pos(prg.xpPerPickup)) err('progression.xpPerPickup', 'must be a positive number');
+      if (prg.xpPerCraft !== undefined && !pos(prg.xpPerCraft))
+        err('progression.xpPerCraft', 'must be a positive number');
     }
   }
 
@@ -1494,6 +1528,46 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
           }
         }
       }
+      // quests — curated-quest-rewards wave: per-quest reward overrides.
+      // Slug membership is checked against the curated tables
+      // (engine/game/questRewards QUEST_REWARD_SLUGS); structural checks
+      // here keep schema.ts free of engine imports.
+      const qu = c.quests;
+      if (qu !== undefined) {
+        if (!isObj(qu)) err('custom.quests', 'must be an object');
+        else {
+          if (qu.enabled !== undefined && typeof qu.enabled !== 'boolean')
+            err('custom.quests.enabled', 'must be boolean');
+          if (qu.questCount !== undefined && !(Number.isInteger(qu.questCount) && (qu.questCount as number) >= 1 && (qu.questCount as number) <= 8))
+            err('custom.quests.questCount', 'must be an integer 1..8');
+          if (qu.sideQuestCount !== undefined && !(Number.isInteger(qu.sideQuestCount) && (qu.sideQuestCount as number) >= 1 && (qu.sideQuestCount as number) <= 12))
+            err('custom.quests.sideQuestCount', 'must be an integer 1..12');
+          if (qu.rewardOverrides !== undefined) {
+            if (!isObj(qu.rewardOverrides)) err('custom.quests.rewardOverrides', 'must be an object');
+            else for (const [slug, ov] of Object.entries(qu.rewardOverrides)) {
+              const p = `custom.quests.rewardOverrides.${slug}`;
+              if (!isObj(ov)) { err(p, 'must be an object'); continue; }
+              if (ov.xp !== undefined && !(typeof ov.xp === 'number' && Number.isFinite(ov.xp) && (ov.xp as number) >= 0))
+                err(`${p}.xp`, 'must be a non-negative number');
+              if (ov.items !== undefined) {
+                if (!Array.isArray(ov.items)) err(`${p}.items`, 'must be an array');
+                else (ov.items as unknown[]).forEach((it2: unknown, i: number) => {
+                  const q2 = `${p}.items[${i}]`;
+                  // Structural only (not knownItem): gear/material ids are
+                  // merged into custom.items.defs at blueprint boot
+                  // (ensureLootItemDefs / ensureCraftingItemDefs), after
+                  // validation runs. The pool builder merges only known
+                  // slugs; QuestManager skips ids without a def at turn-in.
+                  const rid = (it2 as Record<string, unknown>)?.id;
+                  if (typeof rid !== 'string' || !rid) err(`${q2}.id`, 'must be a non-empty item id');
+                  if (!(Number.isInteger((it2 as Record<string, unknown>)?.count) && ((it2 as Record<string, unknown>).count as number) >= 1))
+                    err(`${q2}.count`, 'must be an integer >= 1');
+                });
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1529,7 +1603,11 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
     }
   }
 
-  return { ok: errors.length === 0, errors, warnings };
+  // prompt-fidelity wave: score the spec against its own prompt (meta.description).
+  // intent.ts imports only TYPES from @spec, so this static import creates no
+  // runtime cycle. The scoring is pure and never affects ok/errors/warnings.
+  const fulfillment = scoreSpecFulfillment(spec);
+  return { ok: errors.length === 0, errors, warnings, ...(fulfillment ? { fulfillment } : {}) };
 }
 
 /** Deep-merge `partial` over defaults, then validate. Throws with full error list if invalid. */

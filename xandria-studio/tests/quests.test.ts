@@ -90,6 +90,7 @@ function makeManager(defs: QuestDef[], opts: Record<string, any> = {}) {
     defsTable: () => ({ [MAT_ORE]: { id: MAT_ORE } as any, [MAT_FIBER]: { id: MAT_FIBER } as any, [MAT_SCRAP]: { id: MAT_SCRAP } as any }),
     progression: {
       addXp: (n: number) => { xpCalls.push(n); return false; },
+      addXpEx: (n: number) => { xpCalls.push(n); return { leveled: false, gain: null }; },
     } as any,
     toast: (m: string) => toasts.push(m),
     onLevelUp: () => { leveledUp++; },
@@ -335,7 +336,7 @@ describe('QuestManager lifecycle', () => {
 
   it('onLevelUp fires when a quest reward levels the player', () => {
     const h = makeManager(defs, {
-      progression: { addXp: (n: number) => true } as any,
+      progression: { addXp: (n: number) => true, addXpEx: (n: number) => ({ leveled: true, gain: { from: 1, to: 2 } }) } as any,
     });
     h.mgr.accept('q1');
     h.mgr.onKill('walker'); h.mgr.onKill('walker'); h.mgr.onKill('walker');

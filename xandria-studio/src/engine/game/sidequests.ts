@@ -19,16 +19,18 @@
  *     palettes. Placement determinism = the pool itself plus the existing
  *     seeded enemy/node/station systems it targets.
  *   - Rewards are tiered slightly below the story line (side content is
- *     optional): less XP, seeded material grants via the real item defs.
+ *     optional): less XP, minor theme-matched grants from the curated
+ *     reward tables (engine/game/questRewards) plus the one small seeded
+ *     bonus-material line — no more random material roulette.
  *
  * Determinism: seeded RNG only — never Math.random/Date.now for gameplay.
  */
 import { Rng } from '../core/Rng';
 import type { GameSpec } from '@spec';
 import type { CraftingRecipe } from './crafting';
-import { buildRecipePool, resolveCraftingEnabled } from './crafting';
-import { MAT_ORE, MAT_FIBER, MAT_SCRAP } from './crafting';
+import { buildRecipePool, resolveCraftingEnabled, MAT_ORE, MAT_FIBER, MAT_SCRAP } from './crafting';
 import { portalsEnabled } from '@spec';
+import { curatedQuestReward, questBonusItem } from './questRewards';
 import type { QuestDef, QuestObjectiveDef } from './quests';
 
 /** Salt for the side-quest-pool stream — distinct from QUEST_SALT and every other wave's salt. */
@@ -36,6 +38,7 @@ export const SIDE_QUEST_SALT = 0x51445553; // 'QEDS'
 
 interface SideQuestBuildCtx {
   rng: Rng;
+  spec: GameSpec;
   recipePool: CraftingRecipe[];
   enemyKinds: string[];
   crafting: boolean;
@@ -51,11 +54,20 @@ interface SideQuestTemplate {
   build: (ctx: SideQuestBuildCtx, id: string) => QuestDef;
 }
 
-function sideRewardFor(rng: Rng, tier: number): QuestDef['rewards'] {
-  const mats = [MAT_ORE, MAT_FIBER, MAT_SCRAP];
+/**
+ * Curated side rewards (curated-quest-rewards wave): the theme-matched
+ * minor reward table for this template slug, merged with the
+ * Studio-authored override (custom.quests.rewardOverrides), plus the one
+ * small seeded bonus-material line from an independent stream (pure
+ * function of (pool seed, slug)).
+ */
+function sideRewardsFor(spec: GameSpec, slug: string): QuestDef['rewards'] {
+  const curated = curatedQuestReward(spec, slug);
+  if (!curated) throw new Error(`[sidequests] no curated reward table for side slug "${slug}"`);
   return {
-    xp: 30 + 20 * rng.int(0, 2) + tier * 15,
-    items: [{ id: rng.pick(mats), count: 1 + rng.int(0, 2) }],
+    xp: curated.xp,
+    items: curated.items,
+    bonus: [questBonusItem(spec.meta.seed, slug)],
   };
 }
 
@@ -72,7 +84,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Spare Parts', giver: 'villager', side: true,
         brief: 'The gate winch is held together with hope. Bring scrap and the smith will remember it.',
         objectives: [{ id: 'obj-fetch', kind: 'gather', desc: `Fetch ${count} scrap`, target: MAT_SCRAP, count }],
-        rewards: sideRewardFor(ctx.rng, 0),
+        rewards: sideRewardsFor(ctx.spec, 'spare_parts'),
       };
     },
   },
@@ -87,7 +99,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Timber Call', giver: 'villager', side: true,
         brief: 'The palisade took a beating last storm. The builders need fiber, and they need it soon.',
         objectives: [{ id: 'obj-fetch', kind: 'gather', desc: `Fetch ${count} fiber`, target: MAT_FIBER, count }],
-        rewards: sideRewardFor(ctx.rng, 0),
+        rewards: sideRewardsFor(ctx.spec, 'timber_call'),
       };
     },
   },
@@ -102,7 +114,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Ore Sample', giver: 'villager', side: true,
         brief: 'The forge wants to test a new alloy. A few good chunks of ore will settle the argument.',
         objectives: [{ id: 'obj-fetch', kind: 'gather', desc: `Fetch ${count} ore`, target: MAT_ORE, count }],
-        rewards: sideRewardFor(ctx.rng, 1),
+        rewards: sideRewardsFor(ctx.spec, 'ore_sample'),
       };
     },
   },
@@ -117,7 +129,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Stockpile', giver: 'villager', side: true,
         brief: 'Winter or war — either way the stores are thin. Bring whatever the land gives.',
         objectives: [{ id: 'obj-gather', kind: 'gather', desc: `Gather ${count} raw materials`, target: 'any', count }],
-        rewards: sideRewardFor(ctx.rng, 1),
+        rewards: sideRewardsFor(ctx.spec, 'stockpile'),
       };
     },
   },
@@ -134,7 +146,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Pest Control', giver: 'villager', side: true,
         brief: 'They raid the stores at night and fear nothing. Teach them fear.',
         objectives: [{ id: 'obj-hunt', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
-        rewards: sideRewardFor(ctx.rng, 1),
+        rewards: sideRewardsFor(ctx.spec, 'pest_control'),
       };
     },
   },
@@ -150,7 +162,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Apex Threat', giver: 'villager', side: true,
         brief: 'One of them runs the pack. Cut off the head and the rest scatter.',
         objectives: [{ id: 'obj-hunt', kind: 'kill', desc: `Defeat ${count} ${kind}s`, target: kind, count }],
-        rewards: sideRewardFor(ctx.rng, 2),
+        rewards: sideRewardsFor(ctx.spec, 'apex_threat'),
       };
     },
   },
@@ -171,7 +183,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
           desc: `Craft any ${count} items`,
           target: 'any', count,
         }],
-        rewards: sideRewardFor(ctx.rng, 1),
+        rewards: sideRewardsFor(ctx.spec, 'apprentice_work'),
       };
     },
   },
@@ -193,7 +205,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
           desc: `Visit ${count} distinct maps`,
           target: 'maps', count,
         }],
-        rewards: sideRewardFor(ctx.rng, 2),
+        rewards: sideRewardsFor(ctx.spec, 'waystations'),
       };
     },
   },
@@ -212,7 +224,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
           desc: `Set foot in ${count} distinct biomes`,
           target: 'biomes', count,
         }],
-        rewards: sideRewardFor(ctx.rng, 2),
+        rewards: sideRewardsFor(ctx.spec, 'biome_survey'),
       };
     },
   },
@@ -228,7 +240,7 @@ const SIDE_QUEST_CATALOG: SideQuestTemplate[] = [
         id, name: 'Rumor Mill', giver: 'villager', side: true,
         brief: 'Everyone knows something. Put the pieces together.',
         objectives: [{ id: 'obj-talk', kind: 'talk', desc: `Hear ${count} rumors`, target: 'any', count }],
-        rewards: sideRewardFor(ctx.rng, 0),
+        rewards: sideRewardsFor(ctx.spec, 'rumor_mill'),
       };
     },
   },
@@ -254,6 +266,7 @@ export function buildSideQuestPool(spec: GameSpec, opts: BuildSideQuestPoolOpts 
   const includeTalk = opts.includeTalk ?? spec.meta.genre === 'third-person-action';
   const ctx: SideQuestBuildCtx = {
     rng,
+    spec,
     recipePool: buildRecipePool(spec),
     enemyKinds: (spec.enemies ?? []).map((e) => e.kind),
     crafting: resolveCraftingEnabled(spec),
@@ -295,5 +308,10 @@ function validateSideQuestDef(def: QuestDef): string[] {
   }
   if (typeof def.rewards?.xp !== 'number' || def.rewards.xp < 0) errs.push(`quest ${def.id}: rewards.xp must be >= 0`);
   if (!Array.isArray(def.rewards?.items)) errs.push(`quest ${def.id}: rewards.items must be an array`);
+  // Curated-rewards wave: the bonus-material line is structural too.
+  for (const b of def.rewards?.bonus ?? []) {
+    if (typeof b?.id !== 'string' || !b.id) errs.push(`quest ${def.id}: rewards.bonus[].id must be a non-empty string`);
+    if (!Number.isInteger(b?.count) || b.count < 1) errs.push(`quest ${def.id}: rewards.bonus[].count must be an integer >= 1`);
+  }
   return errs;
 }

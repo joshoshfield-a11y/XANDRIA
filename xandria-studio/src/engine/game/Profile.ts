@@ -23,6 +23,7 @@
  */
 
 import type { GameSpec } from '@spec';
+import { invalidateProgressionSpeedAnchor } from './Progression';
 
 export const PROFILE_KEY = 'xandria.profile.v1';
 /** Bump when the stored shape changes; migrateProfile() handles old versions. */
@@ -313,6 +314,9 @@ export function applyLoadout(spec: GameSpec, p: ProfileData): void {
   if (equipped.has('vitality')) spec.player.health = Math.round(base.health + 25);
   if (equipped.has('swift')) spec.player.speed = base.speed * 1.08;
   if (equipped.has('secondwind')) spec.rules.lives = base.lives + 1;
+  // progression-curve: speed was rewritten from the pristine base — the
+  // progression speed anchor must re-anchor to this loadout-final value.
+  invalidateProgressionSpeedAnchor(spec);
 
   if (equipped.has('power')) custom.profileDamageMult = 1.1;
   else delete custom.profileDamageMult;

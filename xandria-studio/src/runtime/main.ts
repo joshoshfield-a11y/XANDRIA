@@ -17,6 +17,18 @@ import {
   type CustomEnemyKindDef,
 } from '../engine/game/Modding';
 import { applyLoadout, loadProfile } from '../engine/game/Profile';
+import { Progression } from '../engine/game/Progression';
+import {
+  PROGRESSION_TABLE,
+  LEVEL_CAP,
+  levelRow,
+} from '../engine/game/progressionCurve';
+import {
+  grantKillXp,
+  grantPickupXp,
+  grantCraftXp,
+} from '../blueprints/campaign';
+import type { PlayerAvatar } from '../blueprints/common';
 import { resolveSplash, showSplash } from './splash';
 import { spawnNpcsForMap } from '../engine/game/Npc';
 import {
@@ -58,6 +70,11 @@ import {
   ensureCraftingItemDefs,
 } from '../engine/game/crafting';
 import {
+  MASTER_CATALOG_RECIPES,
+  masterTier3OutputDefs,
+  MASTER_TIER3_OUTPUT_IDS,
+} from '../engine/game/mastercraft';
+import {
   LOOT_SALT,
   LOOT_MATERIAL_IDS,
   LOOT_GEAR_IDS,
@@ -76,6 +93,15 @@ import {
   QUEST_SALT,
 } from '../engine/game/quests';
 import { SIDE_QUEST_SALT, buildSideQuestPool } from '../engine/game/sidequests';
+import {
+  CURATED_STORY_REWARDS,
+  CURATED_SIDE_REWARDS,
+  QUEST_REWARD_SLUGS,
+  QUEST_REWARD_BONUS_SALT,
+  questBonusItem,
+  curatedQuestReward,
+  allCuratedItemIds,
+} from '../engine/game/questRewards';
 import { QuestTalkSession } from '../engine/game/questTalk';
 import {
   BOSS_SALT,
@@ -366,6 +392,10 @@ function boot() {
       craft,
       resolveCraftingEnabled,
       ensureCraftingItemDefs,
+      /** Master-crafting wave: tier-3 recipe catalog + output defs. */
+      MASTER_CATALOG_RECIPES,
+      masterTier3OutputDefs,
+      MASTER_TIER3_OUTPUT_IDS,
       /** Test seam: the live station manager from the blueprint build (null when absent). */
       liveStations: (): StationManager | null =>
         (blueprint as { stations?: StationManager }).stations ?? null,
@@ -426,6 +456,23 @@ function boot() {
     // builder, salts, manager class and the live blueprint handles.
     // Side-quests wave: SIDE_QUEST_SALT + buildSideQuestPool ride the same
     // seam for the side-quest e2e harness.
+    // PROGRESSION-CURVE: test-mode seam for the progression e2e harness —
+    // the live Progression instance, the frozen curve table, and the grant
+    // helpers so kill→XP→level-up→stat growth is asserted exactly.
+    (window.__XANDRIA__ as Record<string, unknown>).progressionTest = {
+      PROGRESSION_TABLE,
+      LEVEL_CAP,
+      levelRow,
+      grantKillXp,
+      grantPickupXp,
+      grantCraftXp,
+      /** Test seam: the live Progression from the blueprint build. */
+      liveProgression: (): Progression | null =>
+        (blueprint as { prog?: Progression }).prog ?? null,
+      /** Test seam: the live player avatar (maxHealth assertions). */
+      liveAvatar: (): PlayerAvatar | null =>
+        (blueprint as { avatar?: PlayerAvatar }).avatar ?? null,
+    };
     (window.__XANDRIA__ as Record<string, unknown>).questTest = {
       QuestManager,
       QuestTalkSession,
@@ -435,6 +482,16 @@ function boot() {
       buildSideQuestPool,
       resolveQuestsEnabled,
       validateQuestDef,
+      // Curated-quest-rewards wave: the tables, the slug list, the bonus
+      // seed fn and its salt, so e2e can replicate the bonus line
+      // independently of the defs and assert curated content.
+      CURATED_STORY_REWARDS,
+      CURATED_SIDE_REWARDS,
+      QUEST_REWARD_SLUGS,
+      QUEST_REWARD_BONUS_SALT,
+      questBonusItem,
+      curatedQuestReward,
+      allCuratedItemIds,
       /** Test seam: the live quest manager from the blueprint build (null when disabled). */
       liveManager: (): QuestManager | null =>
         (blueprint as { quests?: QuestManager | null }).quests ?? null,

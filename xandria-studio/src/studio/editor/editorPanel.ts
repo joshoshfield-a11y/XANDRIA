@@ -22,7 +22,12 @@ import { BUILT_IN_SKINS, resolveSkinDef, applySkin } from '../../engine/gfx/Skin
 import { mountSkinCreator } from '../creators/skinCreator';
 import { mountItemEditor, type LootSpot } from '../creators/itemEditor';
 import { renderItemsPanel, type ItemsPanelCtx } from '../itemsPanel';
-import type { ItemsCustom } from '../../spec/schema';
+import type { ItemsCustom, QuestRewardOverride } from '../../spec/schema';
+import {
+  curatedQuestReward, allCuratedItemIds, QUEST_REWARD_SLUGS,
+  CURATED_STORY_REWARDS, CURATED_SIDE_REWARDS,
+} from '../../engine/game/questRewards';
+import { invalidateProgressionSpeedAnchor } from '../../engine/game/Progression';
 import { attachUploadButton } from '../uploadUI';
 import {
   cloneSpec, getAtPath,
@@ -436,6 +441,99 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     }
   }
 
+  /**
+   * Per-quest reward pickers (curated-quest-rewards wave). One card per
+   * quest template slug: XP field + item rows (item select wired to the
+   * spec's item defs, count, remove) + add-item + reset-to-curated. Writes
+   * custom.quests.rewardOverrides, merged over the curated tables at pool
+   * build time.
+   */
+  function renderQuestRewardPickers(s: GameSpec): HTMLElement {
+    const box = h(`<div style="display:flex;flex-direction:column;gap:10px"></div>`);
+    // Picker options: the spec's authored item defs first (with display
+    // names), then the boot-ensured curated ids not otherwise listed.
+    const defs = (s.custom?.items?.defs ?? {}) as Record<string, ItemDef>;
+    const opts: { id: string; label: string }[] = [];
+    for (const cid of allCuratedItemIds()) {
+      const d = defs[cid];
+      opts.push({ id: cid, label: d?.name ? `${d.name} (${cid})` : `${cid} — boot-ensured` });
+    }
+    for (const [id, d] of Object.entries(defs)) {
+      if (!opts.some((o) => o.id === id)) opts.push({ id, label: `${d?.name ?? id} (${id})` });
+    }
+    const slugLabel = (slug: string): string =>
+      slug.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    const writeOverride = (sp: GameSpec, slug: string, xp: number, items: { id: string; count: number }[]): void => {
+      sp.custom = sp.custom ?? {};
+      sp.custom.quests = sp.custom.quests ?? {};
+      const ro = sp.custom.quests.rewardOverrides = sp.custom.quests.rewardOverrides ?? {};
+      ro[slug] = {
+        xp: Math.max(0, Math.round(xp)),
+        items: items.map((l) => ({ id: l.id, count: Math.max(1, Math.round(l.count)) })),
+      };
+    };
+    const effectiveItems = (sp: GameSpec, slug: string): { id: string; count: number }[] =>
+      (curatedQuestReward(sp, slug)?.items ?? []).map((l) => ({ ...l }));
+    const currentXp = (sp: GameSpec, slug: string, fallback: number): number =>
+      sp.custom?.quests?.rewardOverrides?.[slug]?.xp ?? fallback;
+    for (const slug of QUEST_REWARD_SLUGS) {
+      const merged = curatedQuestReward(s, slug);
+      if (!merged) continue;
+      const base = CURATED_STORY_REWARDS[slug] ?? CURATED_SIDE_REWARDS[slug];
+      const isStory = CURATED_STORY_REWARDS[slug] !== undefined;
+      const overridden = s.custom?.quests?.rewardOverrides?.[slug] !== undefined;
+      const { card: c, head: hd, body } = card(slugLabel(slug), isStory ? 'STORY' : 'SIDE');
+      hd.append(iconBtn('↺', 'Reset to curated reward', () => commit((sp) => {
+        const ro = sp.custom?.quests?.rewardOverrides;
+        if (ro) delete ro[slug];
+      }, true)));
+      body.appendChild(h(`<div class="xed-hint">Curated: ${base.xp} XP · ${base.items.map((l) => `${l.id} ×${l.count}`).join(', ')} (+ seeded bonus line)${overridden ? ' — OVERRIDDEN' : ''}</div>`));
+      body.appendChild(field('XP', numberField(merged.xp, (sp, v) => {
+        writeOverride(sp, slug, v, effectiveItems(sp, slug));
+        // numberField commits non-structurally; re-render so the
+        // OVERRIDDEN marker and the curated-line hint refresh immediately.
+        queueMicrotask(() => renderTab());
+      }, { min: 0 }), 'Turn-in XP.'));
+      merged.items.forEach((line, i) => {
+        const row = h(`<div class="xed-chrow"></div>`);
+        const sel = document.createElement('select');
+        const addOpt = (id: string, label: string) => {
+          const opt = document.createElement('option');
+          opt.value = id; opt.textContent = label; opt.selected = id === line.id;
+          sel.appendChild(opt);
+        };
+        for (const o of opts) addOpt(o.id, o.label);
+        if (!opts.some((o) => o.id === line.id)) addOpt(line.id, `⚠ ${line.id} (not in defs)`);
+        sel.addEventListener('change', () => commit((sp) => {
+          const ls = effectiveItems(sp, slug);
+          ls[i].id = sel.value;
+          writeOverride(sp, slug, currentXp(sp, slug, merged.xp), ls);
+        }, true));
+        const cnt = numberField(line.count, (sp, v) => {
+          const ls = effectiveItems(sp, slug);
+          ls[i].count = Math.max(1, Math.round(v));
+          writeOverride(sp, slug, currentXp(sp, slug, merged.xp), ls);
+        }, { min: 1 });
+        const del = iconBtn('✕', 'Remove this reward line', () => commit((sp) => {
+          const ls = effectiveItems(sp, slug);
+          ls.splice(i, 1);
+          writeOverride(sp, slug, currentXp(sp, slug, merged.xp), ls);
+        }, true));
+        row.append(sel, cnt, del);
+        body.appendChild(row);
+      });
+      const add = h(`<button>＋ ADD REWARD ITEM</button>`) as HTMLButtonElement;
+      add.addEventListener('click', () => commit((sp) => {
+        const ls = effectiveItems(sp, slug);
+        ls.push({ id: opts[0]?.id ?? 'mat_ore', count: 1 });
+        writeOverride(sp, slug, currentXp(sp, slug, merged.xp), ls);
+      }, true));
+      body.appendChild(add);
+      box.appendChild(c);
+    }
+    return box;
+  }
+
   function renderWorld(s: GameSpec, host: HTMLElement): void {
     host.appendChild(field('MOOD (music)', select(MOODS, s.audio.mood, (sp, v) => { sp.audio.mood = v as GameSpec['audio']['mood']; })));
     host.appendChild(field('ENVIRONMENT', select(ENVIRONMENTS, s.theme.environment, (sp, v) => {
@@ -575,6 +673,43 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'Scales all skill XP gains. 2× = twice as fast through the ranks; 0 = frozen ranks.',
     ));
 
+    // Curated-quest-rewards wave: QUESTS section — master toggle, pool
+    // counts, and per-quest reward pickers (XP + item lines) writing
+    // custom.quests.rewardOverrides over the curated tables. The seeded
+    // bonus-material line is not authorable (it stays deterministic per
+    // pool seed + slug).
+    host.appendChild(h(`<div class="xed-ns">QUESTS</div>`));
+    host.appendChild(field(
+      'QUESTS — ENABLED',
+      checkbox('Quest system', s.custom?.quests?.enabled ?? true, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.quests = sp.custom.quests ?? {};
+        sp.custom.quests.enabled = v;
+      }, true),
+      'Off = no quest manager, no tracker, no quest dialogue. Applies on the next Play.',
+    ));
+    host.appendChild(field(
+      'STORY QUEST COUNT',
+      slider(s.custom?.quests?.questCount ?? 4, 1, 8, 1, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.quests = sp.custom.quests ?? {};
+        sp.custom.quests.questCount = Math.round(v);
+      }, (v) => `${Math.round(v)}`),
+      'Exact story-line length (1–8). Which quests appear is still seeded.',
+    ));
+    host.appendChild(field(
+      'SIDE QUEST COUNT',
+      slider(s.custom?.quests?.sideQuestCount ?? 8, 1, 12, 1, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.quests = sp.custom.quests ?? {};
+        sp.custom.quests.sideQuestCount = Math.round(v);
+      }, (v) => `${Math.round(v)}`),
+      'Exact side-quest count (1–12). Which side quests appear is still seeded.',
+    ));
+    host.appendChild(h(`<div class="xed-ns">QUEST REWARD PICKERS — OVERRIDES</div>`));
+    host.appendChild(h(`<div class="xed-hint">Pickers override the curated reward tables (merged on top of them). Leave a quest untouched for its curated reward; RESET returns it to curated. Item ids resolve at Play time — gear/material ids are boot-ensured, unknown ids are skipped honestly at turn-in.</div>`));
+    host.appendChild(renderQuestRewardPickers(s));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;
@@ -651,7 +786,7 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
   }
 
   function renderPlayer(s: GameSpec, host: HTMLElement): void {
-    host.appendChild(field('MOVE SPEED (m/s)', slider(s.player.speed, 1, 60, 0.5, (sp, v) => { sp.player.speed = v; })));
+    host.appendChild(field('MOVE SPEED (m/s)', slider(s.player.speed, 1, 60, 0.5, (sp, v) => { sp.player.speed = v; invalidateProgressionSpeedAnchor(sp); })));
     host.appendChild(field('MAX HEALTH', slider(s.player.health, 1, 10000, 50, (sp, v) => { sp.player.health = Math.round(v); })));
     host.appendChild(field('JUMP', slider(s.player.jump, 0, 40, 0.5, (sp, v) => { sp.player.jump = v; })));
     host.appendChild(field(
