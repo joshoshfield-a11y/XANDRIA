@@ -11,7 +11,7 @@ import { Physics } from './core/Physics';
 import { Input } from './core/Input';
 import { AudioEngine } from './core/Audio';
 import { PerfMonitor } from './core/Perf';
-import { PerformanceManager, type PerfTier } from './core/PerformanceManager';
+import { PerformanceManager, tierDetailQuality, tierShadowMapSize, type PerfTier, type QualityLevel } from './core/PerformanceManager';
 import { MaterialLibrary, applyGroundDetailForQuality } from './gfx/Materials';
 import { createSky, type SkyRig } from './gfx/Sky';
 import { Particles } from './gfx/Particles';
@@ -258,18 +258,22 @@ export class Engine {
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec, {
       // Graphics wave 2 (E): desktop tier gets the heavier-post bloom look.
       bloomBoost: this.tiers.flags.bloomBoost,
+      // QA 2026-10-22 (F3): tier MSAA ceiling (s25 caps composer samples at 2).
+      msaaCap: this.tiers.flags.msaaCap,
     });
 
     this.sky = createSky(spec, this.scene, this.effectiveQuality());
     this.renderer.toneMappingExposure = this.sky.exposure;
-    // Graphics wave 2 (E): the tier may floor-raise the shadow-map
-    // resolution createSky just set (desktop 2048 = the "real-time shadows"
-    // look; s25 keeps the base 1024). Never lowers. Resolution changes GPU
-    // cost, never the draw-call census. applySettings keeps it in step with
-    // later pause-menu changes.
+    // Graphics wave 2 (E) + QA 2026-10-22 (F3): resolve the shadow-map
+    // resolution createSky just set from quality against the tier. Desktop:
+    // floor-raise only (2048 = the "real-time shadows" look), never lowers —
+    // unchanged. s25: tier-as-ceiling — quality=high no longer forces 2048
+    // over the tier's 1024 cap. Resolution changes GPU cost, never the
+    // draw-call census. applySettings keeps it in step with later
+    // pause-menu changes via the same helper.
     if (this.sky.sun) {
-      const want = this.tiers.flags.shadowMapSize;
-      if (this.sky.sun.shadow.mapSize.x < want) this.sky.sun.shadow.mapSize.set(want, want);
+      const res = tierShadowMapSize(this.tiers.flags, this.sky.sun.shadow.mapSize.x);
+      if (this.sky.sun.shadow.mapSize.x !== res) this.sky.sun.shadow.mapSize.set(res, res);
     }
     // Wire the pooled flash-light pool into juice (muzzle flashes, explosions).
     this.juice.setFlash((color, pos, intensity, distance, duration) =>
@@ -543,14 +547,15 @@ export class Engine {
   }
 
   /**
-   * Graphics wave 2 (E integration): the perf tier provides a quality floor
-   * for the ground micro-detail layer (workstream A). Ordering: retro <
-   * standard < high. Desktop always gets 'high'; s25 gets max('retro', q).
+   * Graphics wave 2 (E integration) + QA 2026-10-22 (F3): combine the quality
+   * setting with the perf tier's ground-detail level. Ordering: retro <
+   * standard < high. Desktop: tier is a floor (unchanged — always 'high').
+   * s25: tier is a CEILING — quality=high no longer re-enables the full
+   * micro-detail layer the tier turned off (pre-fix max-semantics defeated
+   * the cap; see PerformanceManager.tierDetailQuality).
    */
-  detailQualityForTier(q: 'retro' | 'standard' | 'high'): 'retro' | 'standard' | 'high' {
-    const order = { retro: 0, standard: 1, high: 2 } as const;
-    const floor = this.tiers.flags.detailQuality;
-    return order[q] >= order[floor] ? q : floor;
+  detailQualityForTier(q: QualityLevel): QualityLevel {
+    return tierDetailQuality(this.tiers.flags, q);
   }
 
   /** Apply settings to audio + renderer (called on boot and from the pause menu). */
@@ -569,13 +574,11 @@ export class Engine {
     this.renderer.setPixelRatio(Math.min(pr, this.tiers.flags.pixelRatioCap));
     // T1-4: keep the shadow map resolution in step with quality changes from
     // the pause menu (resizing a shadow map requires dropping the old one).
-    // Graphics wave 2 (E): the tier floor-raises it — desktop gets the
-    // 2048 "real-time shadows" look, s25 stays at the base 1024. Resolution
-    // changes GPU cost, never the draw-call census.
-    const shadowRes = Math.max(
-      quality === 'high' ? 2048 : 1024,
-      this.tiers.flags.shadowMapSize,
-    );
+    // Graphics wave 2 (E) + QA 2026-10-22 (F3): desktop floor-raises it to
+    // the 2048 "real-time shadows" look (unchanged); on s25 the tier CAPS it
+    // at 1024 even at quality=high. Resolution changes GPU cost, never the
+    // draw-call census.
+    const shadowRes = tierShadowMapSize(this.tiers.flags, quality === 'high' ? 2048 : 1024);
     const sun = this.sky?.sun;
     if (sun && sun.shadow.mapSize.x !== shadowRes) {
       sun.shadow.mapSize.set(shadowRes, shadowRes);

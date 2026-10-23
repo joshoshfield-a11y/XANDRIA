@@ -298,15 +298,19 @@ describe('Engine tier wiring', () => {
     const e = new Engine(container, spec, { testMode: true, noTerrain: true });
     expect(e.tiers.tier).toBe('s25');
   });
-  it('detailQualityForTier: tier floor with max-semantics (workstream A integration)', () => {
+  it('detailQualityForTier: desktop floor (max) / s25 ceiling (min) — F3 2026-10-22', () => {
     const de = makeEngine('desktop');
     expect(de.detailQualityForTier('retro')).toBe('high');
     expect(de.detailQualityForTier('standard')).toBe('high');
     expect(de.detailQualityForTier('high')).toBe('high');
     const se = makeEngine('s25');
+    // QA 2026-10-22 (F3): pre-fix this pinned max-semantics on s25 too
+    // ('standard'→'standard', 'high'→'high'), which is exactly the defect —
+    // quality=high silently defeated the s25 detail cap. The tier is now a
+    // ceiling on mobile: nothing exceeds the tier's 'retro' detail level.
     expect(se.detailQualityForTier('retro')).toBe('retro');
-    expect(se.detailQualityForTier('standard')).toBe('standard'); // user high beats retro floor
-    expect(se.detailQualityForTier('high')).toBe('high');
+    expect(se.detailQualityForTier('standard')).toBe('retro');
+    expect(se.detailQualityForTier('high')).toBe('retro');
   });
 });
 

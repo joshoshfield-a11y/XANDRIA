@@ -74,20 +74,34 @@ describe('CharacterRig legacy contract', () => {
 });
 
 describe('sub-pivot articulation', () => {
+  // F2 (QA 2026-10-22): animate() integrates the stride phase from successive
+  // call times, so a pose at a given phase is reached by STEPPING the rig at
+  // a fine fixed rate from t=0 — at constant speed the accumulated phase
+  // equals w·t exactly, so the phase-addressed poses below are unchanged.
+  const driveToPhase = (r: CharacterRig, phase: number, w: number, speed = 6) => {
+    const target = phase / w;
+    const step = 1 / 240;
+    for (let t = 0; t <= target; t += step) r.animate(t, speed);
+    r.animate(target, speed);
+  };
+
   it('knees bend one way as the leg swings forward, phase-offset from the hip', () => {
     const r = rig(44);
     // stride angular frequency from the M2 ground-speed coupling
     // (w = max(speed,6) / (0.7 * legL0)), not the old fixed 12 rad/s
     const w = 6 / (0.7 * r.limbs.legL.position.y);
     // stride phase f = 3π/2 → legL at full forward swing
-    r.animate((3 * Math.PI) / 2 / w, 6);
+    driveToPhase(r, (3 * Math.PI) / 2, w);
     expect(r.limbs.legL.rotation.x).toBeCloseTo(-0.7, 4); // forward extreme
     expect(r.limbs.kneeL!.rotation.x).toBeCloseTo(0.93, 3); // knee near max bend
-    // stride phase f = π/2 → legL at full back swing
-    r.animate(Math.PI / 2 / w, 6);
-    expect(r.limbs.legL.rotation.x).toBeCloseTo(0.7, 4); // back extreme
-    expect(r.limbs.kneeL!.rotation.x).toBeCloseTo(0.08, 3); // knee near straight
     r.dispose();
+    // stride phase f = π/2 → legL at full back swing (fresh rig: phase only
+    // accumulates forward, like real time)
+    const r2 = rig(44);
+    driveToPhase(r2, Math.PI / 2, w);
+    expect(r2.limbs.legL.rotation.x).toBeCloseTo(0.7, 4); // back extreme
+    expect(r2.limbs.kneeL!.rotation.x).toBeCloseTo(0.08, 3); // knee near straight
+    r2.dispose();
   });
 
   it('elbows counter-swing: bend grows as the arm swings back', () => {
@@ -95,14 +109,16 @@ describe('sub-pivot articulation', () => {
     // stride angular frequency from the M2 ground-speed coupling (see above)
     const w = 6 / (0.7 * r.limbs.legL.position.y);
     // f = 3π/2 → armL swings back (opposite phase to legL)
-    r.animate((3 * Math.PI) / 2 / w, 6);
+    driveToPhase(r, (3 * Math.PI) / 2, w);
     expect(r.limbs.armL.rotation.x).toBeCloseTo(0.595, 3);
     expect(r.limbs.elbowL!.rotation.x).toBeCloseTo(-0.62, 3); // deep bend
-    // f = π/2 → armL forward, elbow relaxes toward rest
-    r.animate(Math.PI / 2 / w, 6);
-    expect(r.limbs.armL.rotation.x).toBeCloseTo(-0.595, 3);
-    expect(r.limbs.elbowL!.rotation.x).toBeCloseTo(-0.12, 3);
     r.dispose();
+    // f = π/2 → armL forward, elbow relaxes toward rest
+    const r2 = rig(44);
+    driveToPhase(r2, Math.PI / 2, w);
+    expect(r2.limbs.armL.rotation.x).toBeCloseTo(-0.595, 3);
+    expect(r2.limbs.elbowL!.rotation.x).toBeCloseTo(-0.12, 3);
+    r2.dispose();
   });
 
   it('sub-pivots stay quiet at rest and follow the swing through the attack', () => {

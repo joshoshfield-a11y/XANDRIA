@@ -33,7 +33,12 @@ const CSS = `
     width: 220px; background: #14141c; border: 1px solid #2a2a3a;
     border-radius: 8px; padding: 10px; box-shadow: 0 4px 24px #000a;
   }
+  .panel.collapsed { width: auto; }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #9a9ab0; }
+  .head h2 { margin: 0; }
+  .toggle { background: #1e1e2a; color: inherit; border: 1px solid #2a2a3a; border-radius: 4px;
+            width: 22px; height: 22px; line-height: 1; padding: 0; cursor: pointer; flex: 0 0 auto; }
   label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 6px 0; }
   input[type='range'] { width: 110px; }
   input[type='number'], select { width: 110px; background: #1e1e2a; color: inherit; border: 1px solid #2a2a3a; border-radius: 4px; padding: 2px 4px; }
@@ -46,6 +51,11 @@ export class XandriaSpecInspector extends HTMLElement {
   #spec: Record<string, unknown> | null = null;
   #locked = new Set<string>(['seed']); // seed locked by default — v1 lock requirement
   #fields: FieldValue[] = [];
+  /** F1 (QA 2026-10-22): collapsed = header bar only. The panel is fixed
+   *  top-right with no dismiss control pre-fix and covered ~65% of the
+   *  game on a phone in landscape. */
+  #collapsed = false;
+  #collapseInit = false;
 
   static get observedAttributes(): string[] { return []; }
 
@@ -53,6 +63,11 @@ export class XandriaSpecInspector extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
   }
+
+  /** Collapsed state (header only). Settable by the host (studio play mode
+   *  hides the panel entirely via CSS; this is the in-studio control). */
+  get collapsed(): boolean { return this.#collapsed; }
+  set collapsed(v: boolean) { this.#collapsed = v; this.#render(); }
 
   /** The current spec. Setting it re-renders the panel. */
   set spec(value: Record<string, unknown> | null) {
@@ -70,7 +85,17 @@ export class XandriaSpecInspector extends HTMLElement {
     this.#render();
   }
 
-  connectedCallback(): void { this.#render(); }
+  connectedCallback(): void {
+    if (!this.#collapseInit) {
+      this.#collapseInit = true;
+      // F1: default collapsed on phone-width layouts — the expanded panel
+      // would cover most of the game before the user even starts.
+      try {
+        if (window.matchMedia && window.matchMedia('(max-width: 720px)').matches) this.#collapsed = true;
+      } catch { /* non-browser hosts: stay expanded */ }
+    }
+    this.#render();
+  }
 
   #emit(key: string, value: Scalar): void {
     if (this.#locked.has(key)) return;
@@ -142,18 +167,29 @@ export class XandriaSpecInspector extends HTMLElement {
     this.shadowRoot.append(style);
 
     const panel = document.createElement('div');
-    panel.className = 'panel';
+    panel.className = this.#collapsed ? 'panel collapsed' : 'panel';
+    const head = document.createElement('div');
+    head.className = 'head';
     const h = document.createElement('h2');
     h.textContent = 'Spec Inspector';
-    panel.append(h);
+    const toggle = document.createElement('button');
+    toggle.className = 'toggle';
+    toggle.textContent = this.#collapsed ? '+' : '–';
+    toggle.title = this.#collapsed ? 'Expand spec inspector' : 'Collapse spec inspector';
+    toggle.setAttribute('aria-label', toggle.title);
+    toggle.addEventListener('click', () => { this.#collapsed = !this.#collapsed; this.#render(); });
+    head.append(h, toggle);
+    panel.append(head);
 
-    if (this.#fields.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'empty';
-      empty.textContent = 'No spec loaded';
-      panel.append(empty);
-    } else {
-      for (const f of this.#fields) panel.append(this.#control(f.def, f.value));
+    if (!this.#collapsed) {
+      if (this.#fields.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'No spec loaded';
+        panel.append(empty);
+      } else {
+        for (const f of this.#fields) panel.append(this.#control(f.def, f.value));
+      }
     }
 
     this.shadowRoot.append(panel);

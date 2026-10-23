@@ -159,7 +159,9 @@ export class Scatter {
       const count = def.count;
       if (count <= 0) continue;
       const inst = new THREE.InstancedMesh(def.makeGeo(), def.makeMat(mats), count);
-      inst.castShadow = true; inst.receiveShadow = true;
+      // F3 shadow diet (QA 2026-10-22): debris-class sets don't cast (see
+      // PropSetDef.debris); matches the chunked pool rule in ChunkScatter.
+      inst.castShadow = !def.debris; inst.receiveShadow = true;
       const positions: THREE.Vector3[] = [];
       let placed = 0;
       for (let i = 0; i < count; i++) {

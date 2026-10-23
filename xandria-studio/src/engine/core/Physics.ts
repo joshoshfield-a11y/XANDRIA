@@ -185,6 +185,25 @@ export class Physics {
     return body;
   }
 
+  /**
+   * ONE static body carrying many cylinder shapes — the merged form of
+   * calling cylinder() once per prop: identical shape parameters, material
+   * and collision group, with per-shape offsets in place of per-body
+   * positions. Collision geometry is preserved exactly; only the broadphase
+   * census changes. QA 2026-10-22 (F3 physics diet): chunked scatter used
+   * to add one body per prop instance (2,752 bodies at spawn in the
+   * reference scene); pools now merge their colliders per chunk into a
+   * single body via this helper.
+   */
+  compoundCylinders(cyls: { rt: number; rb: number; h: number; x: number; y: number; z: number }[], opts: { group?: number; mask?: number; segments?: number } = {}): CANNON.Body {
+    const body = new CANNON.Body({ mass: 0, material: this.defaultMat, collisionFilterGroup: opts.group ?? GROUP.WORLD, collisionFilterMask: opts.mask ?? -1 });
+    for (const c of cyls) {
+      body.addShape(new CANNON.Cylinder(c.rt, c.rb, c.h, opts.segments ?? 8), new CANNON.Vec3(c.x, c.y, c.z));
+    }
+    this.world.addBody(body);
+    return body;
+  }
+
   /** Capsule-ish character body: a sphere stack with locked rotation. */
   capsule(radius: number, height: number, pos: THREE.Vector3 | [number, number, number], opts: { mass?: number; group?: number; mask?: number } = {}): CANNON.Body {
     const p = Array.isArray(pos) ? pos : [pos.x, pos.y, pos.z];

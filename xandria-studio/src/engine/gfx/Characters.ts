@@ -454,6 +454,16 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
   /** ragdoll-lite corpse state (polish wave): the body's death velocity becomes
    *  angular tumble + a visual-only slide/bounce. Sim bodies are never touched. */
   let deadTumble: { vel: THREE.Vector3; ang: THREE.Vector3; lastT: number } | null = null;
+  /** F2 (QA 2026-10-22): accumulated stride phase. The pre-fix code computed
+   *  phase as t * w(speed) from ABSOLUTE time, so any speed change above the
+   *  6 m/s cadence clamp teleported the pose (phase error ∝ t·Δw; measured
+   *  1.39 rad frame-to-frame hip jumps under speed jitter). The phase is now
+   *  the integral of the same w(speed) over successive animate() calls —
+   *  lastStrideT follows the dead-tumble path's lastT pattern above. First
+   *  call contributes dt 0, so constant-speed poses stay bit-identical to
+   *  the old t·w formula. */
+  let stridePhase = 0;
+  let lastStrideT = -1;
   /** lazy snapshot of group.scale so the landing squash restores exactly (enemies re-scale post-build) */
   let squashBase: THREE.Vector3 | null = null;
 
@@ -525,7 +535,14 @@ export function makeHumanoid(mats: MaterialLibrary, colors: { skin?: string; shi
         //   w = speed / (legL0 * 0.7 * k) = max(speed, 6) / (0.7 * legL0)
         // (for speed ≤ 6, k = speed/6 and speed cancels — constant cadence with
         // growing amplitude; above 6 m/s the cadence rises with speed).
-        const f = t * (Math.max(speed, 6) / (0.7 * legL0));
+        // F2: w is integrated into stridePhase (see declaration) instead of
+        // multiplied by absolute t — speed changes now bend the cadence
+        // instead of teleporting the pose.
+        const w = Math.max(speed, 6) / (0.7 * legL0);
+        const sdt = lastStrideT < 0 ? 0 : Math.min(0.05, Math.max(0, t - lastStrideT));
+        lastStrideT = t;
+        stridePhase += w * sdt;
+        const f = stridePhase;
         const s = Math.sin(f);
         const sw = s * 0.7 * k;
         legL.hip.rotation.x = sw; legR.hip.rotation.x = -sw;

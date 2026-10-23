@@ -37,6 +37,14 @@ export interface PropSetDef {
   collideR: number;
   yOff: number | ((rng: Rng) => number);
   physical: boolean;
+  /**
+   * QA 2026-10-22 (F3 shadow diet): debris-class sets — small loose props
+   * (rocks, crystal shards, glow caps, vents) whose per-instance shadow
+   * contribution is negligible at gameplay distance. Debris pools do not
+   * cast shadows; trees, structures and large props keep theirs. Class is
+   * by prop kind/size, never by biome.
+   */
+  debris?: boolean;
   tilt: number;
   place: (rng: Rng, r: number, b: PlaceBounds) => THREE.Vector3 | null;
 }
@@ -163,30 +171,30 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
     key: string, makeGeo: () => THREE.BufferGeometry, makeMat: (m: MaterialLibrary) => THREE.Material,
     enabled: boolean, fixedCount: number, perM2: number, budget: number,
     scale: (rng: Rng) => THREE.Vector3, collideR: number,
-    yOff: number | ((rng: Rng) => number) = 0, physical = false, tilt = 0,
+    yOff: number | ((rng: Rng) => number) = 0, physical = false, tilt = 0, debris = false,
   ) => {
     defs.push({
       key, tag: 'base', makeGeo, makeMat, count: enabled ? fixedCount * heroGate : 0,
       chunkCount: (a) => enabled ? Math.min(budget, Math.round(a * perM2 * density)) * heroGate : 0,
-      budget, scale, collideR, yOff, physical, tilt, place: placeBase,
+      budget, scale, collideR, yOff, physical, tilt, debris, place: placeBase,
     });
   };
 
-  // rocks
+  // rocks — debris-class (F3): no per-instance shadow casting
   base('rocks',
     () => new THREE.DodecahedronGeometry(1, 0),
     (m) => m.standard('rock', pal.rock, { roughness: 1 }),
     ctx.eff.rocks, Math.round(70 * density), ROCKS_PER_M2, 128,
     (rng) => { const s = rng.range(0.5, 2.6); return new THREE.Vector3(s, s * rng.range(0.6, 1), s); },
-    0.9, 0.2, true);
-  // crystals (glowing)
+    0.9, 0.2, true, 0, true);
+  // crystals (glowing) — debris-class (F3)
   if (ctx.eff.crystals) {
     base('crystals',
       () => new THREE.OctahedronGeometry(0.9, 0),
       (m) => m.glow(pal.accent, 1.4),
       true, Math.round(50 * density), CRYSTALS_PER_M2, 96,
       (rng) => { const s = rng.range(0.5, 2.0); return new THREE.Vector3(s * 0.6, s, s * 0.6); },
-      0.6, 0.5, false);
+      0.6, 0.5, false, 0, true);
   }
   // ruins: broken pillars
   if (ctx.eff.ruins) {
@@ -204,13 +212,13 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
     baseCount: number,
     scale: (rng: Rng) => THREE.Vector3, collideR: number,
     yOff: number | ((rng: Rng) => number) = 0, physical = false, tilt = 0,
-    place: PropSetDef['place'] = placeHero,
+    place: PropSetDef['place'] = placeHero, debris = false,
   ) => {
     const count = hCount(baseCount);
     defs.push({
       key, tag: 'genre-hero', makeGeo, makeMat, count,
       chunkCount: (a) => Math.min(96, scaled(baseCount, qMul, density, a)),
-      budget: 96, scale, collideR, yOff, physical, tilt, place,
+      budget: 96, scale, collideR, yOff, physical, tilt, debris, place,
     });
   };
 
@@ -247,7 +255,7 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
       (m) => m.standard('metal', '#4a4a52', { roughness: 0.7, metalness: 0.5 }),
       26,
       (rng) => { const s = rng.range(0.7, 1.6); return new THREE.Vector3(s, s, s); },
-      0.9, 0.15, true, 0.35);
+      0.9, 0.15, true, 0.35, placeHero, true); // low trackside scrap plates — debris-class (F3)
   } else if (genre === 'platformer') {
     // floating crystal shards + wisps drift along the course band (course
     // space: the platformer terrain sits far below the course).
@@ -296,13 +304,13 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
     key: string, makeGeo: () => THREE.BufferGeometry, makeMat: (m: MaterialLibrary) => THREE.Material,
     baseCount: number,
     scale: (rng: Rng) => THREE.Vector3, collideR: number,
-    yOff: number | ((rng: Rng) => number) = 0, physical = false, tilt = 0,
+    yOff: number | ((rng: Rng) => number) = 0, physical = false, tilt = 0, debris = false,
   ) => {
     const count = bCount(baseCount) * biomeGate;
     defs.push({
       key, tag: 'biome', makeGeo, makeMat, count,
       chunkCount: (a) => Math.min(96, scaled(baseCount, qMul, density, a)) * biomeGate,
-      budget: 96, scale, collideR, yOff, physical, tilt, place: placeHero,
+      budget: 96, scale, collideR, yOff, physical, tilt, debris, place: placeHero,
     });
   };
   // Signature motif, every biome: amber lantern posts (post + orb merged —
@@ -340,14 +348,14 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
       (m) => m.glow('#ffb43c', 1.2),
       22,
       (rng) => new THREE.Vector3(rng.range(0.7, 1.6), rng.range(0.6, 1), rng.range(0.7, 1.6)),
-      0, 0.1, false);
+      0, 0.1, false, 0, true); // debris-class (F3)
   } else if (id === 'snow') {
     bprop('biome-iceshards',
       () => new THREE.OctahedronGeometry(0.9, 0),
       (m) => m.flat('#bfe0ff', { roughness: 0.25, metalness: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.35 }),
       24,
       (rng) => { const s = rng.range(0.6, 1.8); return new THREE.Vector3(s * 0.6, s, s * 0.6); },
-      0.5, 0.4, false, 0.2);
+      0.5, 0.4, false, 0.2, true); // debris-class (F3)
   } else if (id === 'volcanic') {
     bprop('biome-columns',
       () => new THREE.CylinderGeometry(0.55, 0.7, 5, 6),
@@ -360,7 +368,7 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
       (m) => m.glow('#ff7a2e', 2.2),
       16,
       (rng) => new THREE.Vector3(rng.range(0.8, 1.4), 0.6, rng.range(0.8, 1.4)),
-      0, 0.05, false);
+      0, 0.05, false, 0, true); // debris-class (F3)
   } else if (id === 'coastline') {
     bprop('biome-pilings',
       () => new THREE.CylinderGeometry(0.22, 0.26, 3.2, 7),
@@ -386,7 +394,7 @@ export function definePropSets(ctx: PropSetCtx, mats: MaterialLibrary): PropSetD
       (m) => m.glow('#59d8ff', 1.6),
       22,
       (rng) => { const s = rng.range(0.6, 1.5); return new THREE.Vector3(s * 0.7, s, s * 0.7); },
-      0, 0.3, false);
+      0, 0.3, false, 0, true); // debris-class (F3)
   } else {
     // plains: waystones
     bprop('biome-waystones',

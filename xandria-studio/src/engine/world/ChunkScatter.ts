@@ -104,7 +104,12 @@ export class ChunkedScatter {
     for (const def of defs) {
       const poolBudget = scaleBudget(def.budget, this.densityMul);
       const mesh = new THREE.InstancedMesh(def.makeGeo(), def.makeMat(mats), poolBudget * MAX_RESIDENT_CHUNKS);
-      mesh.castShadow = true;
+      // F3 shadow diet (QA 2026-10-22): debris-class pools (rocks, crystal
+      // shards, glow caps, vents — see PropSetDef.debris) don't cast; the
+      // shadow pass was ~42% of all draw calls and small loose props are
+      // its least visible contributors. Trees/structures/large props keep
+      // castShadow=true.
+      mesh.castShadow = !def.debris;
       mesh.receiveShadow = true;
       mesh.count = 0;
       mesh.visible = false;
@@ -295,7 +300,13 @@ export class ChunkedScatter {
     const matrices = new Float32Array(n * 16);
     const positions: THREE.Vector3[] = [];
     const colliders: { x: number; z: number; r: number }[] = [];
-    const bodies: CANNON.Body[] = [];
+    // F3 physics diet (QA 2026-10-22): collider cylinders are collected and
+    // merged into ONE compound static body per pool-chunk after the loop
+    // (Physics.compoundCylinders) instead of one cannon body per instance.
+    // Every collider shape is preserved exactly — only the body census
+    // changes (reference scene: 2,752 per-instance bodies → ≤1 per pool
+    // per chunk). The 2D colliders[] array (player push-out) is untouched.
+    const cyls: { rt: number; rb: number; h: number; x: number; y: number; z: number }[] = [];
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const e = new THREE.Euler();
@@ -315,11 +326,16 @@ export class ChunkedScatter {
       if (def.collideR > 0) {
         colliders.push({ x: p.x, z: p.z, r: def.collideR * Math.max(s.x, s.z) });
         if (def.physical) {
-          bodies.push(this.physics.cylinder(def.collideR * s.x * 0.8, def.collideR * s.x * 0.9, 6 * s.y,
-            [p.x, p.y + 3 * s.y, p.z], { group: GROUP.WORLD }));
+          cyls.push({
+            rt: def.collideR * s.x * 0.8, rb: def.collideR * s.x * 0.9, h: 6 * s.y,
+            x: p.x, y: p.y + 3 * s.y, z: p.z,
+          });
         }
       }
     }
+    const bodies: CANNON.Body[] = cyls.length > 0
+      ? [this.physics.compoundCylinders(cyls, { group: GROUP.WORLD })]
+      : [];
     return { matrices: matrices.subarray(0, placed * 16), positions, colliders, bodies, count: placed };
   }
 

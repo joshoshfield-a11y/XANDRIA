@@ -101,12 +101,21 @@ export class PostFX {
   private gradePass: ShaderPass | null = null;
   /** true when the filmic grade pass is in the chain (standard/high, non-retro) */
   readonly gradeActive: boolean;
+  /** Effective composer MSAA samples after the tier cap (QA 2026-10-22, F3).
+   *  Set before the composer try-block so tests can read the resolved value
+   *  even where the composer itself can't be constructed headlessly. */
+  readonly msaaSamples: number;
 
-  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, spec: GameSpec, opts: { bloomBoost?: number } = {}) {
+  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, spec: GameSpec, opts: { bloomBoost?: number; msaaCap?: number } = {}) {
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
     const quality = spec.custom?.quality ?? 'retro';
+    // QA 2026-10-22 (F3): MSAA is capped by the perf tier on mobile — s25
+    // gets at most 2 samples even at quality=high. Desktop cap is 4 (the
+    // authored base), so desktop is unchanged. min() against the quality
+    // base: retro already asks for 2.
+    this.msaaSamples = Math.min(quality === 'retro' ? 2 : 4, opts.msaaCap ?? 4);
     // Graphics wave 2 (E): tier bloom multiplier for the desktop "heavier
     // post" look. 1.0 = the authored strength. Same passes, same draw calls.
     const bloomBoost = opts.bloomBoost ?? 1;
@@ -116,7 +125,7 @@ export class PostFX {
       // multisampled target every non-retro game shipped with ZERO
       // antialiasing (the renderer's antialias:true only affects the default
       // framebuffer, which the composer bypasses).
-      const samples = quality === 'retro' ? 2 : 4;
+      const samples = this.msaaSamples;
       const target = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
         type: THREE.HalfFloatType,
         samples,

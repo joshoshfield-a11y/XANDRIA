@@ -52,8 +52,10 @@ export interface TierFlags {
   densityMul: number;
   /**
    * Ground micro-detail layer tuning (workstream A). Desktop gets the full
-   * layer; s25 stays off like base retro. The Engine takes the max of this
-   * and the user's quality setting, so s25+high keeps A's quality behavior.
+   * layer. QA 2026-10-22 (F3): on the mobile tier this is a CEILING, not a
+   * floor — s25+high used to inherit the desktop detail layer wholesale
+   * because the Engine combined tier and quality with max-semantics. See
+   * tierDetailQuality().
    */
   detailQuality: 'retro' | 'standard' | 'high';
   /**
@@ -80,6 +82,14 @@ export interface TierFlags {
    * 1.0 = the authored strength. Same passes, same draw calls.
    */
   bloomBoost: number;
+  /**
+   * Cap on PostFX composer MSAA samples (QA 2026-10-22, F3). Desktop: 4 =
+   * the authored base for standard/high, so the cap never binds. s25: 2 —
+   * a 4× HalfFloat target at phone resolutions is bandwidth the tier never
+   * budgeted. Base samples come from the quality level (retro 2, else 4);
+   * the effective count is min(base, msaaCap) on every tier.
+   */
+  msaaCap: number;
 }
 
 /**
@@ -100,6 +110,7 @@ export const TIER_FLAGS: Record<PerfTier, TierFlags> = {
     windMul: 1.0,
     maxRealLights: 8,
     bloomBoost: 1.25,
+    msaaCap: 4,
   },
   s25: {
     tier: 's25',
@@ -112,6 +123,7 @@ export const TIER_FLAGS: Record<PerfTier, TierFlags> = {
     windMul: 0.5,
     maxRealLights: 1,
     bloomBoost: 1.0,
+    msaaCap: 2,
   },
 };
 
@@ -125,6 +137,34 @@ export function scaleBudget(budget: number, densityMul: number): number {
 export function scaleCount(count: number, densityMul: number): number {
   if (densityMul === 1) return count;
   return Math.max(0, Math.round(count * densityMul));
+}
+
+export type QualityLevel = 'retro' | 'standard' | 'high';
+const QUALITY_ORDER: Record<QualityLevel, number> = { retro: 0, standard: 1, high: 2 };
+
+/**
+ * QA 2026-10-22 (F3) — tier-as-ceiling on mobile. The pre-fix combinations
+ * used max-semantics everywhere (tier as FLOOR), so a manual quality=high
+ * on the s25 tier silently defeated three tier caps: shadow resolution
+ * (forced 2048), ground micro-detail (full strength), and PostFX MSAA (4×).
+ * On the mobile tier the tier value now CAPS the quality-driven value
+ * (Math.min semantics). On desktop the historical floor semantics are
+ * preserved exactly — desktop behavior is unchanged by this wave.
+ */
+export function tierShadowMapSize(flags: TierFlags, qualityRes: number): number {
+  return flags.tier === 's25' ? Math.min(qualityRes, flags.shadowMapSize) : Math.max(qualityRes, flags.shadowMapSize);
+}
+
+/** Ground micro-detail level under the tier rules (see tierShadowMapSize). */
+export function tierDetailQuality(flags: TierFlags, q: QualityLevel): QualityLevel {
+  const f = flags.detailQuality;
+  if (flags.tier === 's25') return QUALITY_ORDER[q] <= QUALITY_ORDER[f] ? q : f;
+  return QUALITY_ORDER[q] >= QUALITY_ORDER[f] ? q : f;
+}
+
+/** PostFX MSAA samples: quality base (retro 2, standard/high 4) capped by the tier. */
+export function tierMsaaSamples(flags: TierFlags, quality: QualityLevel): number {
+  return Math.min(quality === 'retro' ? 2 : 4, flags.msaaCap);
 }
 
 export class PerformanceManager {

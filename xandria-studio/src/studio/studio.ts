@@ -57,8 +57,8 @@ const css = `
   }
   * { box-sizing: border-box; }
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,system-ui,sans-serif;
-         background:var(--bg0); color:var(--txt); height:100vh; overflow:hidden; -webkit-font-smoothing:antialiased; }
-  #layout { display:flex; height:100vh; }
+         background:var(--bg0); color:var(--txt); height:100dvh; overflow:hidden; -webkit-font-smoothing:antialiased; }
+  #layout { display:flex; height:100dvh; }
   /* ---- Icon rail ---- */
   #sidenav { width:88px; flex:0 0 88px; display:flex; flex-direction:column; align-items:center; gap:4px;
              padding:16px 0 12px; background:var(--bg1); border-right:1px solid var(--line); z-index:25; }
@@ -86,6 +86,9 @@ const css = `
              border:1px solid var(--lime-line); border-radius:10px; padding:7px 12px; font-weight:700; font-size:13px; }
   .avatar { width:34px; height:34px; border-radius:50%; background:#2a3342; border:1px solid var(--line2);
             color:#cfd6e0; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; }
+  .play-btn { width:34px; height:34px; border-radius:50%; background:var(--lime); border:none; color:#161a08;
+              display:flex; align-items:center; justify-content:center; font-size:13px; padding:0; flex:0 0 auto; }
+  .play-btn:hover { background:var(--lime-hi); border:none; }
   .card { background:var(--bg1); border:1px solid var(--line); border-radius:16px; padding:22px;
           display:flex; flex-direction:column; gap:16px; }
   .card-head { display:flex; gap:14px; align-items:flex-start; }
@@ -152,6 +155,20 @@ const css = `
                 color:var(--lime); border:1px solid var(--lime-line); border-radius:999px;
                 padding:9px 18px 9px 14px; background:rgba(201,242,75,.06); }
   #empty p { margin:0; color:var(--mut); font-size:14px; line-height:1.65; max-width:300px; }
+  /* ---- Play mode (F1, QA 2026-10-22): at EVERY width the studio chrome
+     hides and the game frame owns the viewport. Pre-fix the panel could
+     only be dismissed via the ≤720px drawer, so on a landscape phone the
+     game was squeezed into ~41% of the width with no way to close the
+     menus. The exit chip lives inside #frame-wrap so it stays visible
+     when the wrap is the fullscreen element. ---- */
+  #play-exit { display:none; position:absolute; top:10px; left:10px; z-index:40; align-items:center; gap:7px;
+               background:rgba(16,20,27,.82); color:var(--txt); border:1px solid var(--line2);
+               border-radius:999px; padding:8px 14px; font-size:12px; font-weight:700; letter-spacing:.04em;
+               backdrop-filter:blur(6px); }
+  body.playing #sidenav, body.playing #side { display:none !important; }
+  body.playing #drawer-fab { display:none !important; }
+  body.playing xandria-spec-inspector { display:none !important; }
+  body.playing #play-exit { display:flex; }
   /* ---- Mobile: #side becomes a bottom drawer, #sidenav a top bar ---- */
   #drawer-grabber { display:none; height:52px; flex:0 0 auto; margin:-20px -20px 0; cursor:pointer;
                     align-items:center; justify-content:center; touch-action:manipulation; }
@@ -213,7 +230,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
           <div class="brand"><span class="wordmark">XANDRIA</span><span class="playable"><i class="dot"></i>PLAYABLE ▾</span></div>
           <div class="top-right">
             ${billingOn ? '<span id="credits-pill" class="credits" style="display:none">⚡ …</span>' : ''}
-            <span class="avatar">X</span>
+            <button id="play-toggle" class="play-btn" title="Play fullscreen — hide the menus" aria-label="Play fullscreen">▶</button>
           </div>
         </div>
         <div id="view-generate" class="card" style="display:flex">
@@ -259,7 +276,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
         <div id="view-editor" style="display:none;flex:1;min-height:0;overflow:hidden"></div>
         ${billingOn ? '<div id="view-pricing" style="display:none;flex:1;min-height:0;overflow-y:auto"></div>' : ''}
       </div>
-      <div id="frame-wrap"><div id="empty"><span class="ready-pill"><i class="dot"></i>READY</span><p>Generate a game, scene or interactive experience.</p></div><iframe id="game" style="display:none"></iframe></div>
+      <div id="frame-wrap"><div id="empty"><span class="ready-pill"><i class="dot"></i>READY</span><p>Generate a game, scene or interactive experience.</p></div><iframe id="game" style="display:none"></iframe><button id="play-exit" aria-label="Back to Studio" title="Back to Studio">✕ Studio</button></div>
       <button id="drawer-fab" aria-label="toggle panel" title="panel">✦</button>
     </div>`;
 
@@ -412,6 +429,45 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
   const inspector = document.createElement('xandria-spec-inspector') as XandriaSpecInspector;
   frameWrap.appendChild(inspector);
 
+  // ---- Play mode (F1, QA 2026-10-22): hide ALL studio chrome at every
+  // ---- layout width so the game frame owns the full viewport; one small
+  // ---- floating chip (#play-exit, inside #frame-wrap) returns to the
+  // ---- studio. Entered from Generate & Play and editor play; the top-bar
+  // ---- ▶ button toggles it too. Fullscreen + landscape lock are attempted
+  // ---- from the same user gesture as progressive enhancement — any
+  // ---- failure leaves play mode fully functional.
+  const enterPlayMode = () => {
+    document.body.classList.add('playing');
+    collapseDrawer();
+    try {
+      const req = frameWrap.requestFullscreen() as Promise<void> | undefined;
+      const lockLandscape = () => {
+        try {
+          const p = (screen.orientation as { lock?: (o: string) => Promise<void> } | undefined)?.lock?.('landscape');
+          if (p && typeof p.catch === 'function') p.catch(() => { /* best-effort */ });
+        } catch { /* orientation lock unsupported — play mode continues */ }
+      };
+      if (req && typeof req.then === 'function') req.then(lockLandscape, () => { /* fullscreen denied — play mode continues */ });
+    } catch { /* fullscreen unsupported — play mode continues */ }
+  };
+  const exitPlayMode = () => {
+    document.body.classList.remove('playing');
+    try {
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => { /* ignore */ });
+    } catch { /* ignore */ }
+  };
+  root.querySelector<HTMLButtonElement>('#play-exit')!.addEventListener('click', exitPlayMode);
+  root.querySelector<HTMLButtonElement>('#play-toggle')!.addEventListener('click', () => {
+    if (document.body.classList.contains('playing')) exitPlayMode();
+    else if (lastSpec) enterPlayMode();
+    else meta.innerHTML += '<br/><i>generate a game first — then this plays it fullscreen</i>';
+  });
+  document.addEventListener('keydown', (e) => {
+    // In fullscreen the browser reserves Esc for exiting fullscreen itself;
+    // this covers the windowed play-mode case.
+    if (e.key === 'Escape' && document.body.classList.contains('playing') && !document.fullscreenElement) exitPlayMode();
+  });
+
   const reloadPreview = () => {
     if (!lastSpec) return;
     frame.src = `${playerBase}?spec=${b64url(lastSpec)}${splashQuery()}`;
@@ -444,7 +500,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
       frame.src = `${playerBase}?spec=${b64url(lastSpec)}&autostart=1${splashQuery()}`;
       frame.style.display = 'block';
       empty.style.display = 'none';
-      collapseDrawer(); // mobile: give the canvas the full viewport
+      enterPlayMode(); // F1: full-viewport play at every width
     },
     regenerate: (): GameSpec | null => {
       if (!lastSpec) return null;
@@ -559,7 +615,7 @@ export function mountStudio(root: HTMLElement, opts: { playerUrl?: string } = {}
     frame.src = url;
     frame.style.display = 'block';
     empty.style.display = 'none';
-    collapseDrawer(); // mobile: give the canvas the full viewport
+    enterPlayMode(); // F1: full-viewport play at every width (was: drawer collapse only ≤720px)
     // Remember successful prompts for the history list (cap 6, deduped).
     if (intent !== 'a heroic adventure in the forest') {
       history = [intent, ...history.filter((h) => h !== intent)].slice(0, 6);
