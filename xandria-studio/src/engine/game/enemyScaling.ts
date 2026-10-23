@@ -14,8 +14,9 @@
  * travelling deeper into the portal graph toughens encounters even when
  * the player hasn't leveled.
  *
- * Determinism: given the same (mapSeed, playerLevel, mapDist, roster specs)
- * every enemy's band AND variance draws are identical. Variance is drawn
+ * Determinism: given the same (mapSeed, playerLevel, mapDist, tier,
+ * roster specs) every enemy's band AND variance draws are identical.
+ * Variance is drawn
  * from `new Rng((enemySeed ^ SCALING_SALT) >>> 0)`, where enemySeed is the
  * per-enemy spawn seed already derived from mapSeed — a pure function of
  * the inputs. engine.rng, Math.random and Date.now are never touched.
@@ -23,6 +24,10 @@
  * Band 0 (levels 1-5) is the identity band: all multipliers 1.0, variance 0 —
  * so blueprint initial builds (fresh player, origin map) are byte-identical
  * to before this feature existed.
+ *
+ * WORLD-TIERS (upgrade loop): applyEnemyScaling takes an optional world
+ * tier (default 1 = identity). The tier flows from Engine.worldTier, itself
+ * a pure function of (mapSeed, map depth).
  */
 import { Rng } from '../core/Rng';
 import type { EnemySpec } from '@spec';
@@ -80,14 +85,28 @@ export function mapDistanceFromSpec(spec: { custom?: { portalMap?: { mx?: number
 }
 
 /**
+ * WORLD-TIERS (upgrade loop): levels contributed by the world tier.
+ * Each tier above tier 1 raises the spawn-level floor by this many levels.
+ * Tier 1 (origin map, single-map games) contributes 0 — the identity.
+ */
+export const TIER_LEVEL_STEP = 2;
+
+/**
  * The level enemies spawn at: the player's level, or the map's depth
  * floor (1 + hops from origin), whichever is higher. A fresh player
  * wandering deep portals still meets tougher bands.
+ *
+ * WORLD-TIERS: the world tier adds (tier - 1) * TIER_LEVEL_STEP to the
+ * floor (default tier = 1, identity). Deeper maps are tougher through two
+ * reinforcing signals — the mapDist floor and the tier bump — both pure
+ * functions of (seed, path), so same (mapSeed, playerLevel, map, tier) ->
+ * identical encounters.
  */
-export function effectiveSpawnLevel(playerLevel: number, mapDist: number): number {
+export function effectiveSpawnLevel(playerLevel: number, mapDist: number, tier = 1): number {
   const pl = Number.isFinite(playerLevel) ? Math.max(1, Math.floor(playerLevel)) : 1;
   const md = Number.isFinite(mapDist) ? Math.max(0, Math.floor(mapDist)) : 0;
-  return Math.max(pl, 1 + md);
+  const t = Number.isFinite(tier) ? Math.max(1, Math.floor(tier)) : 1;
+  return Math.max(pl, 1 + md + (t - 1) * TIER_LEVEL_STEP);
 }
 
 /**
@@ -111,17 +130,18 @@ export interface ScaledEnemySpec {
 
 /**
  * Apply the scaling band to one enemy's spec. Pure + deterministic: the
- * same (baseSpec fields, enemySeed, playerLevel, mapDist) always yields the
- * same result. The returned spec is a shallow copy — callers must pass it
- * to the Enemy constructor instead of the shared spec object.
+ * same (baseSpec fields, enemySeed, playerLevel, mapDist, tier) always
+ * yields the same result. The returned spec is a shallow copy — callers
+ * must pass it to the Enemy constructor instead of the shared spec object.
  */
 export function applyEnemyScaling(
   base: EnemySpec,
   enemySeed: number,
   playerLevel: number,
   mapDist: number,
+  tier = 1,
 ): ScaledEnemySpec {
-  const bandIndex = bandIndexForLevel(effectiveSpawnLevel(playerLevel, mapDist));
+  const bandIndex = bandIndexForLevel(effectiveSpawnLevel(playerLevel, mapDist, tier));
   const band = ENEMY_LEVEL_BANDS[bandIndex];
   // Seeded variance stream: per-enemy, derived from the spawn seed (itself
   // a pure function of mapSeed) mixed with SCALING_SALT. Two draws in a

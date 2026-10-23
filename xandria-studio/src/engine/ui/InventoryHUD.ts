@@ -19,9 +19,32 @@
  * - Call `refresh()` after any external inventory mutation (loot pickup,
  *   quest grants) so the DOM matches the model.
  */
-import { EQUIP_SLOTS, type EquipSlot, type ItemDef, type ItemRarity } from '@spec';
+import { EQUIP_SLOTS, ITEM_RARITIES, ITEM_TYPES, type EquipSlot, type ItemDef, type ItemRarity } from '@spec';
 import type { Input } from '../core/Input';
 import { Inventory, BACKPACK_SIZE } from '../game/items/Inventory';
+import { unitSellPrice, isSellable } from '../game/economy';
+import {
+  ITEM_TIERS,
+  ITEM_TIER_LABELS,
+  type ItemTier,
+  NO_FILTER,
+  SORT_MODE_LABELS,
+  type InventoryFilter,
+  type InventorySortMode,
+  applyInventoryView,
+} from '../game/items/inventoryView';
+
+/**
+ * Optional sell integration (vendor-economy wave). When present the HUD
+ * offers "sell junk", crediting scrap via addScrap at
+ * unitSellPrice(def, sellMult) per unit sold. Absent on blueprints
+ * without the economy — the sell button is hidden, not faked.
+ */
+export interface InventorySellHooks {
+  addScrap: (n: number) => void;
+  sellMult: number;
+}
+import type { SetUiReport } from '../game/setBonuses';
 
 export const RARITY_COLORS: Record<ItemRarity, string> = {
   common: '#9a9a9a',
@@ -56,6 +79,14 @@ const CSS = `
 .xinv .cell:hover { border-color:rgba(255,210,63,.7); }
 .xinv .msg { min-height:18px; font-size:12.5px; color:#7af7ff; margin-top:10px; }
 .xinv .hint { font-size:11px; opacity:.55; margin-top:4px; }
+.xinv .sets { margin-top:6px; }
+.xinv .setrow { font-size:12px; padding:6px 8px; border:1px solid rgba(140,180,220,.22); border-radius:8px;
+  margin-bottom:6px; background:rgba(16,24,40,.55); }
+.xinv .setrow .sn { font-weight:700; color:#ffd23f; }
+.xinv .setrow .sc { opacity:.75; font-size:11px; margin-left:6px; }
+.xinv .setrow .st { font-size:11px; margin-top:2px; opacity:.85; }
+.xinv .setrow .st.on { color:#7dffa8; font-weight:700; }
+.xinv .setrow .st.off { opacity:.45; }
 .xinv .tip { position:fixed; z-index:30; max-width:260px; pointer-events:none;
   background:rgba(8,11,18,.96); border:1px solid rgba(140,180,220,.4); border-radius:8px;
   padding:10px 12px; font-size:12px; }
@@ -65,6 +96,19 @@ const CSS = `
 .xinv .tip .tb { color:#7af7ff; margin:2px 0; }
 .xinv .tip .td { opacity:.8; line-height:1.45; margin-top:6px; }
 .xinv .tip .tv { opacity:.6; margin-top:6px; font-size:11px; }
+.xinv .tools { display:flex; gap:6px; flex-wrap:wrap; margin:2px 0 6px; }
+.xinv .tools select { min-height:28px; background:rgba(20,28,44,.85); color:#e8ecf1;
+  border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 4px; max-width:32%; }
+.xinv .actions { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 2px; }
+.xinv .actions button, .xinv .confirm button { min-height:28px; background:rgba(30,42,64,.9); color:#e8ecf1;
+  border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 10px; cursor:pointer; }
+.xinv .actions button:hover, .xinv .confirm button:hover { border-color:rgba(255,210,63,.7); }
+.xinv .actions button.on { border-color:#ffd23f; color:#ffd23f; }
+.xinv .confirm { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 2px;
+  font-size:12.5px; color:#ffd23f; }
+.xinv .cell .jk { position:absolute; left:3px; top:2px; font-size:8px; font-weight:800; letter-spacing:.08em;
+  color:#0a0e14; background:#ffb13d; border-radius:4px; padding:1px 4px; }
+.xinv .cell.isjunk { border-style:dashed; }
 @media (max-width:760px) { .xinv .grid { grid-template-columns:repeat(6, 1fr); } .xinv .cell .nm { font-size:8.5px; } }
 `;
 
@@ -111,13 +155,29 @@ export class InventoryHUD {
   private gpPrev: boolean[] = [];
   private gpRepeatAt = 0;
   private gpRepeatDir = -1;
+  // inventory-qol: filter/sort/junk view state (client-side projection only)
+  private filter: InventoryFilter = { ...NO_FILTER };
+  private sort: InventorySortMode = 'default';
+  private junkMode = false;
+  /** Display index -> backpack slot (rebuilt by refresh()). */
+  private viewSlots: number[] = [];
+  private sellHooks: InventorySellHooks | null = null;
+  private junkModeBtn!: HTMLButtonElement;
+  private actionsEl!: HTMLDivElement;
+  private confirmEl!: HTMLDivElement;
+  // Gear sets wave: resolver for the set-bonus UI section (null = hidden).
+  private setReport: (() => SetUiReport) | null = null;
+  private setSection: HTMLDivElement;
+  private setRows: HTMLDivElement;
 
   constructor(
     private container: HTMLElement,
     private inventory: Inventory,
-    opts?: { input?: Input },
+    opts?: { input?: Input; sell?: InventorySellHooks | null; setReport?: () => SetUiReport },
   ) {
     if (opts?.input) this.input = opts.input;
+    if (opts?.sell) this.sellHooks = opts.sell;
+    if (opts?.setReport) this.setReport = opts.setReport;
     if (typeof document !== 'undefined') {
       const style = document.createElement('style');
       style.textContent = CSS;
@@ -138,6 +198,7 @@ export class InventoryHUD {
     title.className = 'title';
     title.textContent = 'INVENTORY';
     this.panel.appendChild(title);
+    this.buildToolbar();
 
     const equipSec = document.createElement('div');
     equipSec.className = 'sec';
@@ -157,6 +218,17 @@ export class InventoryHUD {
     }
     this.panel.appendChild(equipRow);
 
+    // Gear sets wave: set-bonus indicator (pieces collected, thresholds active).
+    this.setSection = document.createElement('div');
+    this.setSection.className = 'sets';
+    const setSec = document.createElement('div');
+    setSec.className = 'sec';
+    setSec.textContent = 'SET BONUSES';
+    this.setSection.appendChild(setSec);
+    this.setRows = document.createElement('div');
+    this.setSection.appendChild(this.setRows);
+    this.panel.appendChild(this.setSection);
+
     const packSec = document.createElement('div');
     packSec.className = 'sec';
     packSec.textContent = 'BACKPACK';
@@ -168,6 +240,10 @@ export class InventoryHUD {
       cell.className = 'cell';
       cell.dataset.index = String(i);
       cell.addEventListener('click', () => this.onPackCellClick(i));
+      cell.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        this.toggleJunkAt(i);
+      });
       cell.addEventListener('mouseenter', (e) => this.showTipForPack(i, e));
       cell.addEventListener('mouseleave', () => this.hideTip());
       grid.appendChild(cell);
@@ -180,7 +256,7 @@ export class InventoryHUD {
     this.panel.appendChild(this.msgEl);
     const hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = 'I / Tab: close · arrows: move · Enter: equip / use · click item: equip / use · click equipped: unequip';
+    hint.textContent = 'I / Tab: close · arrows: move · Enter: equip / use · click item: equip / use · click equipped: unequip · right-click: mark junk';
     this.panel.appendChild(hint);
 
     this.tip = document.createElement('div');
@@ -206,6 +282,228 @@ export class InventoryHUD {
     window.addEventListener('keydown', onKey);
     this.disposers.push(() => window.removeEventListener('keydown', onKey));
     this.refresh();
+  }
+
+  // ------------------------------------------------------------ toolbar (inventory-qol)
+
+  private cap(s: string): string {
+    return s.length ? s[0].toUpperCase() + s.slice(1) : s;
+  }
+
+  /** Filter/sort selects + junk/sell/destroy actions. All >=28px touch targets. */
+  private buildToolbar(): void {
+    const tools = document.createElement('div');
+    tools.className = 'tools';
+
+    const mkSelect = (
+      label: string,
+      options: Array<[string, string]>,
+      onChange: (v: string) => void,
+    ): HTMLSelectElement => {
+      const sel = document.createElement('select');
+      sel.setAttribute('aria-label', label);
+      sel.title = label;
+      for (const [value, text] of options) {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = text;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => {
+        onChange(sel.value);
+        this.clampCursor();
+        this.refresh();
+      });
+      tools.appendChild(sel);
+      return sel;
+    };
+
+    mkSelect(
+      'Filter by type',
+      [['all', 'Type: all'], ...ITEM_TYPES.map((t): [string, string] => [t, `Type: ${this.cap(t)}`])],
+      (v) => { this.filter = { ...this.filter, type: v as InventoryFilter['type'] }; },
+    );
+    mkSelect(
+      'Filter by rarity',
+      [['all', 'Rarity: all'], ...ITEM_RARITIES.map((r): [string, string] => [r, `Rarity: ${this.cap(r)}`])],
+      (v) => { this.filter = { ...this.filter, rarity: v as ItemRarity | 'all' }; },
+    );
+    mkSelect(
+      'Filter by tier',
+      [['all', 'Tier: all'], ...ITEM_TIERS.map((t): [string, string] => [t, `Tier: ${ITEM_TIER_LABELS[t as ItemTier]}`])],
+      (v) => { this.filter = { ...this.filter, tier: v as ItemTier | 'all' }; },
+    );
+    mkSelect(
+      'Sort',
+      (Object.keys(SORT_MODE_LABELS) as InventorySortMode[]).map(
+        (m): [string, string] => [m, `Sort: ${SORT_MODE_LABELS[m]}`],
+      ),
+      (v) => { this.sort = v as InventorySortMode; },
+    );
+    this.panel.appendChild(tools);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    this.actionsEl = actions;
+
+    const mkButton = (text: string, onClick: () => void): HTMLButtonElement => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      b.addEventListener('click', onClick);
+      actions.appendChild(b);
+      return b;
+    };
+
+    this.junkModeBtn = mkButton('Mark junk: off', () => {
+      this.junkMode = !this.junkMode;
+      this.junkModeBtn.textContent = `Mark junk: ${this.junkMode ? 'on' : 'off'}`;
+      this.junkModeBtn.classList.toggle('on', this.junkMode);
+      this.junkModeBtn.setAttribute('aria-pressed', String(this.junkMode));
+      this.toast(this.junkMode ? 'Junk mode: tap items to mark/unmark' : 'Junk mode off');
+    });
+    mkButton('Mark shown junk', () => this.markShownJunk());
+    if (this.sellHooks) mkButton('Sell junk', () => this.sellJunkFlow());
+    mkButton('Destroy junk', () => this.destroyJunkFlow());
+    this.panel.appendChild(actions);
+
+    const confirm = document.createElement('div');
+    confirm.className = 'confirm';
+    confirm.style.display = 'none';
+    this.confirmEl = confirm;
+    this.panel.appendChild(confirm);
+  }
+
+  /** Two-step inline confirm (no native confirm() — testable + touch-safe). */
+  private askConfirm(text: string, onYes: () => void): void {
+    this.confirmEl.innerHTML = '';
+    this.confirmEl.style.display = '';
+    const span = document.createElement('span');
+    span.textContent = text;
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.textContent = 'Confirm';
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.textContent = 'Cancel';
+    const done = () => {
+      this.confirmEl.innerHTML = '';
+      this.confirmEl.style.display = 'none';
+    };
+    yes.addEventListener('click', () => { done(); onYes(); });
+    no.addEventListener('click', done);
+    this.confirmEl.append(span, yes, no);
+  }
+
+  /** Backpack entries (slot, entry, def) currently junk-marked. */
+  private junkBackpackEntries(): Array<{ slot: number; itemId: string; count: number; def: ItemDef }> {
+    const out: Array<{ slot: number; itemId: string; count: number; def: ItemDef }> = [];
+    const pack = this.inventory.getBackpack();
+    for (let slot = 0; slot < pack.length; slot++) {
+      const entry = pack[slot];
+      if (!entry || !this.inventory.isJunk(entry.itemId)) continue;
+      const def = this.inventory.getDef(entry.itemId);
+      if (!def) continue;
+      out.push({ slot, itemId: entry.itemId, count: entry.count, def });
+    }
+    return out;
+  }
+
+  /** Toggle junk on the display cell at view index i. */
+  private toggleJunkAt(i: number): void {
+    const slot = this.viewSlots[i];
+    if (slot === undefined) return;
+    const entry = this.inventory.getBackpack()[slot];
+    if (!entry) return;
+    const now = !this.inventory.isJunk(entry.itemId);
+    this.inventory.setJunk(entry.itemId, now);
+    const def = this.inventory.getDef(entry.itemId);
+    this.toast(now ? `Marked junk: ${def?.name ?? entry.itemId}` : `Unmarked: ${def?.name ?? entry.itemId}`);
+    this.refresh();
+  }
+
+  /** Mark every currently shown (filtered) item as junk. */
+  private markShownJunk(): void {
+    let n = 0;
+    const pack = this.inventory.getBackpack();
+    for (const slot of this.viewSlots) {
+      const entry = pack[slot];
+      if (!entry || this.inventory.isJunk(entry.itemId)) continue;
+      this.inventory.setJunk(entry.itemId, true);
+      n++;
+    }
+    this.toast(n > 0 ? `Marked ${n} shown item${n === 1 ? '' : 's'} as junk` : 'Nothing shown to mark');
+    this.refresh();
+  }
+
+  /** Sell-all-junk with exact per-unit pricing + inline confirm. */
+  private sellJunkFlow(): void {
+    const hooks = this.sellHooks;
+    if (!hooks) return;
+    const entries = this.junkBackpackEntries();
+    if (entries.length === 0) {
+      this.toast('No junk to sell');
+      return;
+    }
+    let total = 0;
+    let units = 0;
+    let skipped = 0;
+    for (const e of entries) {
+      if (!isSellable(e.def)) { skipped += e.count; continue; }
+      const unit = unitSellPrice(e.def, hooks.sellMult);
+      total += unit * e.count;
+      units += e.count;
+    }
+    if (units === 0) {
+      this.toast('Junk has no sell value');
+      return;
+    }
+    const skipNote = skipped > 0 ? ` (${skipped} unsellable skipped)` : '';
+    this.askConfirm(`Sell ${units} junk for ${total} scrap?${skipNote}`, () => {
+      let sold = 0;
+      let gained = 0;
+      for (const e of this.junkBackpackEntries()) {
+        if (!isSellable(e.def)) continue;
+        const unit = unitSellPrice(e.def, hooks.sellMult);
+        const removed = this.inventory.remove(e.itemId, e.count);
+        if (removed > 0) {
+          hooks.addScrap(unit * removed);
+          sold += removed;
+          gained += unit * removed;
+        }
+      }
+      this.inventory.pruneJunk();
+      this.clampCursor();
+      this.refresh();
+      this.toast(`Sold ${sold} junk for ${gained} scrap`);
+    });
+  }
+
+  /** Destroy-all-junk with inline confirm. Irreversible — always confirms. */
+  private destroyJunkFlow(): void {
+    const entries = this.junkBackpackEntries();
+    if (entries.length === 0) {
+      this.toast('No junk to destroy');
+      return;
+    }
+    const units = entries.reduce((n, e) => n + e.count, 0);
+    this.askConfirm(`Destroy ${units} junk item${units === 1 ? '' : 's'}? Cannot be undone.`, () => {
+      let n = 0;
+      for (const e of this.junkBackpackEntries()) {
+        n += this.inventory.remove(e.itemId, e.count);
+      }
+      this.inventory.pruneJunk();
+      this.clampCursor();
+      this.refresh();
+      this.toast(`Destroyed ${n} junk item${n === 1 ? '' : 's'}`);
+    });
+  }
+
+  private clampCursor(): void {
+    if (this.cursor.area === 'pack') {
+      const max = Math.max(0, this.viewSlots.length - 1);
+      if (this.cursor.index > max) this.cursor.index = max;
+    }
   }
 
   // ------------------------------------------------------------ open/close
@@ -244,31 +542,48 @@ export class InventoryHUD {
 
   // ------------------------------------------------------------ render
 
-  /** Re-render every cell from the inventory model. */
+  /**
+   * Re-render every cell from the inventory model through the current
+   * filter/sort projection. Display index i maps to backpack slot
+   * viewSlots[i]; cells past the view are hidden (client-side only —
+   * the model keeps slot order).
+   */
   refresh(): void {
-    const pack = this.inventory.getBackpack();
+    const view = applyInventoryView(this.inventory, this.filter, this.sort);
+    this.viewSlots = view.map((v) => v.slot);
     for (let i = 0; i < BACKPACK_SIZE; i++) {
       const cell = this.packCells[i];
-      const entry = pack[i];
-      if (!entry) {
+      const row = i < view.length ? view[i] : null;
+      if (!row) {
         cell.innerHTML = '';
         cell.style.cssText = '';
-      } else {
-        const def = this.inventory.getDef(entry.itemId);
-        const name = def?.name ?? entry.itemId;
-        cell.innerHTML = '';
-        const nm = document.createElement('div');
-        nm.className = 'nm';
-        nm.textContent = name;
-        cell.appendChild(nm);
-        if (entry.count > 1) {
-          const ct = document.createElement('div');
-          ct.className = 'ct';
-          ct.textContent = `×${entry.count}`;
-          cell.appendChild(ct);
-        }
-        cell.style.cssText = def ? rarityBorder(def) : '';
+        cell.style.display = 'none';
+        cell.classList.remove('cursor', 'isjunk');
+        continue;
       }
+      cell.style.display = '';
+      const entry = row.entry;
+      const def = this.inventory.getDef(entry.itemId);
+      const name = def?.name ?? entry.itemId;
+      cell.innerHTML = '';
+      const nm = document.createElement('div');
+      nm.className = 'nm';
+      nm.textContent = name;
+      cell.appendChild(nm);
+      if (entry.count > 1) {
+        const ct = document.createElement('div');
+        ct.className = 'ct';
+        ct.textContent = `×${entry.count}`;
+        cell.appendChild(ct);
+      }
+      if (this.inventory.isJunk(entry.itemId)) {
+        const jk = document.createElement('div');
+        jk.className = 'jk';
+        jk.textContent = 'JUNK';
+        cell.appendChild(jk);
+      }
+      cell.style.cssText = def ? rarityBorder(def) : '';
+      cell.classList.toggle('isjunk', this.inventory.isJunk(entry.itemId));
       cell.classList.toggle('cursor', this.openFlag && this.cursor.area === 'pack' && this.cursor.index === i);
     }
     for (let j = 0; j < EQUIP_SLOTS.length; j++) {
@@ -292,6 +607,7 @@ export class InventoryHUD {
       }
       cell.classList.toggle('cursor', this.openFlag && this.cursor.area === 'equip' && this.cursor.index === j);
     }
+    this.renderSetRows();
   }
 
   /** Transient feedback line inside the panel. */
@@ -304,12 +620,60 @@ export class InventoryHUD {
     }, ms);
   }
 
+  /**
+   * Gear sets wave: render the SET BONUSES section. Only sets with at
+   * least one owned piece show (no clutter for untouched sets); each
+   * row shows pieces collected (owned/equipped) and which thresholds
+   * are active. textContent everywhere (def text is spec-sourced —
+   * never innerHTML).
+   */
+  private renderSetRows(): void {
+    this.setRows.innerHTML = '';
+    if (!this.setReport) {
+      this.setSection.style.display = 'none';
+      return;
+    }
+    this.setSection.style.display = '';
+    let report: SetUiReport;
+    try {
+      report = this.setReport();
+    } catch {
+      return;
+    }
+    for (const set of report.sets) {
+      const owned = report.owned[set.setId] ?? 0;
+      if (owned <= 0) continue;
+      const row = document.createElement('div');
+      row.className = 'setrow';
+      row.dataset.setId = set.setId;
+      const head = document.createElement('div');
+      const sn = document.createElement('span');
+      sn.className = 'sn';
+      sn.textContent = set.name;
+      const sc = document.createElement('span');
+      sc.className = 'sc';
+      sc.textContent = `${owned}/${set.pieces.length} owned · ${set.equippedCount}/${set.pieces.length} equipped`;
+      head.append(sn, sc);
+      row.appendChild(head);
+      for (const t of set.thresholds) {
+        const on = set.active.includes(t);
+        const div = document.createElement('div');
+        div.className = `st ${on ? 'on' : 'off'}`;
+        div.textContent = `${on ? 'ACTIVE' : `${set.equippedCount}/${t.pieces}`} — ${t.label}`;
+        row.appendChild(div);
+      }
+      this.setRows.appendChild(row);
+    }
+  }
+
   // ------------------------------------------------------------ actions
 
   /** Keyboard/mouse "confirm" on the cursor cell. */
   private confirm(): void {
     if (this.cursor.area === 'equip') {
       this.unequipAt(this.cursor.index);
+    } else if (this.junkMode) {
+      this.toggleJunkAt(this.cursor.index);
     } else {
       this.activatePackCell(this.cursor.index);
     }
@@ -317,6 +681,10 @@ export class InventoryHUD {
 
   private onPackCellClick(i: number): void {
     this.cursor = { area: 'pack', index: i };
+    if (this.junkMode) {
+      this.toggleJunkAt(i);
+      return;
+    }
     this.activatePackCell(i);
   }
 
@@ -325,8 +693,11 @@ export class InventoryHUD {
     this.unequipAt(this.cursor.index);
   }
 
+  /** i = display index (maps to a backpack slot via viewSlots). */
   private activatePackCell(i: number): void {
-    const entry = this.inventory.getBackpack()[i];
+    const slot = this.viewSlots[i];
+    if (slot === undefined) return;
+    const entry = this.inventory.getBackpack()[slot];
     if (!entry) return;
     const def = this.inventory.getDef(entry.itemId);
     if (!def) return;
@@ -358,11 +729,14 @@ export class InventoryHUD {
   private moveCursor(code: string): void {
     const cur = this.cursor;
     if (cur.area === 'pack') {
+      // pack cursor runs over display indices (the filter/sort view)
+      const maxIndex = Math.max(0, this.viewSlots.length - 1);
+      if (cur.index > maxIndex) cur.index = maxIndex;
       const row = Math.floor(cur.index / PACK_COLS);
       const col = cur.index % PACK_COLS;
       if (code === 'ArrowLeft' && col > 0) cur.index -= 1;
-      else if (code === 'ArrowRight' && col < PACK_COLS - 1) cur.index += 1;
-      else if (code === 'ArrowDown' && row < BACKPACK_SIZE / PACK_COLS - 1) cur.index += PACK_COLS;
+      else if (code === 'ArrowRight' && col < PACK_COLS - 1 && cur.index < maxIndex) cur.index += 1;
+      else if (code === 'ArrowDown' && cur.index + PACK_COLS <= maxIndex) cur.index += PACK_COLS;
       else if (code === 'ArrowUp') {
         if (row > 0) cur.index -= PACK_COLS;
         else this.cursor = { area: 'equip', index: Math.min(col, EQUIP_SLOTS.length - 1) };
@@ -378,7 +752,9 @@ export class InventoryHUD {
   // ------------------------------------------------------------ tooltip
 
   private showTipForPack(i: number, e: MouseEvent): void {
-    const entry = this.inventory.getBackpack()[i];
+    const slot = this.viewSlots[i];
+    if (slot === undefined) return;
+    const entry = this.inventory.getBackpack()[slot];
     if (!entry) return;
     const def = this.inventory.getDef(entry.itemId);
     if (!def) return;

@@ -185,6 +185,13 @@ export interface NpcSpec {
   armorSet?: string;
   /** roster size when spawned by a manager; default 1 */
   count?: number;
+  /**
+   * vendor-economy wave: vendor id (see engine/game/economy.ts
+   * VENDOR_CATALOG). NPCs with a vendorId get role 'merchant' + the
+   * "Trade with <name>" prompt and open the shop panel instead of the
+   * quest dialogue. Villagers leave this undefined.
+   */
+  vendorId?: string;
 }
 
 /** Explicit (non-generated) NPC palette. */
@@ -193,6 +200,44 @@ export interface NpcPaletteSpec {
   pants?: string;
   accent?: string;
   visor?: string;
+}
+
+/**
+ * Vendor-economy wave: Studio override surface for the vendor roster
+ * (see engine/game/economy.ts resolveVendorDefs). Per-vendor field
+ * overrides keyed by vendor id (unknown ids are dropped; empty stock
+ * pools fall back to the catalog pool) + a disabled-vendors list.
+ * Config-only — never touches the seed.
+ */
+export interface VendorsCustom {
+  /** per-vendor field overrides (id-keyed) */
+  defs?: Record<string, Partial<VendorDef>>;
+  /** vendor ids to skip entirely */
+  disabledVendors?: string[];
+}
+
+/**
+ * Vendor-economy wave: data-driven vendor definition. The full defs live
+ * in engine/game/economy.ts (VENDOR_CATALOG); this interface keeps the
+ * schema's override surface typed without a module cycle.
+ */
+export interface VendorDef {
+  /** stable id, e.g. 'vendor_ironfangs' */
+  id: string;
+  /** shop display name */
+  name: string;
+  /** the keeper's person name */
+  keeper: string;
+  /** one-line flavor shown in the shop header */
+  tagline: string;
+  /** item ids the vendor may stock */
+  stockPool: string[];
+  /** buy price multiplier over def.value */
+  buyMult: number;
+  /** sell price multiplier over def.value */
+  sellMult: number;
+  /** max distinct items offered per map visit */
+  maxStock: number;
 }
 
 export interface ObjectiveSpec {
@@ -613,6 +658,18 @@ export interface CustomSpec {
    */
   crafting?: CraftingCustom;
   /**
+   * Dynamic-events wave: authoring controls for seeded world events
+   * (ambushes, wandering merchants, supply caches, elite patrols). Master
+   * toggle, per-type disable flags, and per-type instance counts (0..4).
+   * Config-only — never touches the seed. Read by resolveEventsEnabled /
+   * resolveEventCount / isEventTypeDisabled (engine/game/dynamicEvents).
+   */
+  events?: {
+    enabled?: boolean;
+    disabled?: Record<string, boolean>;
+    counts?: Record<string, number>;
+  };
+  /**
    * Quest wave: authoring controls for the main-story quest line. Master
    * toggle + an exact quest-count override (1..8); absent = the seeded
    * 3..5-quest pool from the spec seed. Config-only — never touches the
@@ -637,6 +694,27 @@ export interface CustomSpec {
    * the Studio SKILLS section writes these fields.
    */
   skills?: SkillsTuningCustom;
+  /**
+   * Vendor-economy wave: Studio overrides for the vendor roster
+   * (engine/game/economy.ts). Per-vendor field overrides keyed by vendor
+   * id (unknown ids are dropped) + a disabled-vendors list. Config-only —
+   * never touches the seed. Read by resolveVendorDefs.
+   */
+  vendors?: VendorsCustom;
+  /**
+   * Bestiary wave: codex tuning. Master toggle + studied/mastered kill
+   * thresholds. Config-only — never touches the seed. Read by
+   * resolveBestiaryEnabled / resolveBestiaryTiers (engine/game/bestiary).
+   */
+  bestiary?: BestiaryCustom;
+  /**
+   * UPGRADE LOOP (weather-cycles): Studio-authored weather-cycle controls.
+   * Master toggle + a forced weather for testing. Config-only — never
+   * touches the seed. Read by resolveWeatherCyclesEnabled /
+   * resolveForcedWeather (engine/game/weatherCycles); the Studio world tab
+   * writes these fields.
+   */
+  weatherCycles?: WeatherCyclesCustom;
 }
 
 /**
@@ -795,6 +873,42 @@ export interface SkillsTuningCustom {
    * fast through the ranks; 0 = frozen ranks.
    */
   xpMultiplier?: number;
+}
+
+/** Bestiary wave: codex tuning. All fields optional; absent = defaults. */
+export interface BestiaryCustom {
+  /**
+   * master bestiary toggle (default true). When false, the
+   * BestiaryManager no-ops: kills are not counted and the codex stays
+   * locked.
+   */
+  enabled?: boolean;
+  /**
+   * studied/mastered kill thresholds (defaults 10/50). `seen` is always
+   * 1 (first kill unlocks the entry). Values clamp to 2..10000.
+   */
+  tierThresholds?: {
+    studied?: number;
+    mastered?: number;
+  };
+}
+
+/**
+ * UPGRADE LOOP (weather-cycles): Studio-authored weather-cycle controls.
+ * All fields optional; absent = the seeded cycle runs untouched.
+ */
+export interface WeatherCyclesCustom {
+  /**
+   * master weather-cycle toggle (default true). When false, the manager
+   * stays inert and the authored static spec.theme weather/timeOfDay look
+   * is kept.
+   */
+  enabled?: boolean;
+  /**
+   * force one weather for testing ('auto' = the seeded cycle picks).
+   * The day/night phase cycle keeps running under a forced weather.
+   */
+  forced?: 'auto' | Weather;
 }
 
 export interface GameSpec {

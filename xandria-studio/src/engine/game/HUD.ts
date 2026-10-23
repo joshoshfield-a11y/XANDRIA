@@ -5,6 +5,7 @@
 import type { GameSpec, NarrativeSpec } from '@spec';
 import type { Engine } from '../Engine';
 import type { UpgradeDef } from './Progression';
+import type { DailyBoardRow } from './dailyChallenges';
 
 /** End-of-run stats shown on the victory/defeat screen. */
 export interface RunStats {
@@ -34,8 +35,14 @@ const CSS = `
 .xhud .score { top:16px; right:16px; text-align:right; }
 .xhud .score .val { font-size:22px; font-weight:800; color:#ffd23f; }
 .xhud .score .lbl { font-size:10px; letter-spacing:.18em; opacity:.7; }
+/* vendor-economy wave: the scrap (currency) readout under the score */
+.xhud .score .coinval { font-size:15px; font-weight:800; color:#8fe3a8; margin-top:4px; }
 .xhud .timer { font-size:13px; opacity:.9; margin-top:4px; font-variant-numeric:tabular-nums; }
 .xhud .lives { font-size:13px; margin-top:2px; color:#ff8a9a; }
+/* WORLD-TIERS: map tier readout, hidden on tier 1 (origin / single-map games).
+   Lives inside the score panel so it can't collide with the quest tracker
+   (desktop tracker top is 136px; the panel stays ~123px tall with the chip). */
+.xhud .tier { font-size:13px; margin-top:2px; color:#7dd3fc; letter-spacing:.12em; font-weight:700; }
 .xhud .crosshair { position:absolute; left:50%; top:50%; width:14px; height:14px; transform:translate(-50%,-50%); }
 .xhud .crosshair::before, .xhud .crosshair::after { content:''; position:absolute; background:rgba(240,250,255,.9); }
 .xhud .crosshair::before { left:6px; top:0; width:2px; height:14px; }
@@ -82,9 +89,18 @@ const CSS = `
 /* N10: unaffordable purchase attempt — shake + red flash on the mod card */
 .xhud .title-screen .mod.denied { border-color:#ff6a7a; animation:deny-shake .45s ease; }
 @keyframes deny-shake { 0%,100% { transform:translateX(0); } 20% { transform:translateX(-6px); } 40% { transform:translateX(5px); } 60% { transform:translateX(-4px); } 80% { transform:translateX(3px); } }
-.xhud .title-screen .daily-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:18px; }
+.xhud .title-screen .daily-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:14px; flex-wrap:wrap; }
 .xhud .title-screen .daily-btn { font-size:14px; padding:10px 26px; }
-.xhud .title-screen .daily-best { font-size:12px; opacity:.7; }
+.xhud .title-screen .daily-btn.played { opacity:.55; cursor:default; }
+.xhud .title-screen .daily-challenge-line { font-size:12px; opacity:.75; letter-spacing:.06em; }
+.xhud .title-screen .daily-board { margin:0 auto 18px; max-width:520px; width:min(92%,520px); border:1px solid rgba(140,180,220,.25); border-radius:10px; padding:10px 14px; background:rgba(10,16,26,.55); font-size:12px; }
+.xhud .title-screen .daily-board-head { font-size:11px; letter-spacing:.22em; opacity:.65; margin-bottom:8px; text-align:center; }
+.xhud .title-screen .daily-board-row { display:flex; gap:10px; align-items:baseline; padding:3px 0; border-top:1px solid rgba(140,180,220,.12); }
+.xhud .title-screen .daily-board-row:first-of-type { border-top:none; }
+.xhud .title-screen .daily-board-row.today .dbr-date { color:#ffd23f; font-weight:700; }
+.xhud .title-screen .dbr-date { width:64px; flex:none; opacity:.8; letter-spacing:.08em; }
+.xhud .title-screen .dbr-goal { flex:1; opacity:.85; }
+.xhud .title-screen .dbr-result { flex:none; opacity:.9; text-align:right; }
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
 .xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
 .xhud .settings-row { display:flex; align-items:center; gap:14px; font-size:13px; letter-spacing:.1em; }
@@ -178,6 +194,7 @@ export class HUD {
   private objDesc: HTMLDivElement;
   private objProg: HTMLDivElement;
   private scoreVal: HTMLDivElement;
+  private coinVal: HTMLDivElement;
   private timerEl: HTMLDivElement;
   private livesEl: HTMLDivElement;
   private vignette: HTMLDivElement;
@@ -215,6 +232,13 @@ export class HUD {
   private bossEl: HTMLDivElement;
   private bossName: HTMLDivElement;
   private bossFill: HTMLDivElement;
+  /**
+   * WORLD-TIERS: map tier readout in the score panel. Hidden at tier 1
+   * (origin / single-map games) so the common case renders exactly as
+   * before. Updated ONLY via setTier (engine calls it on boot + portal
+   * arrival) — zero per-frame cost; update() never touches it.
+   */
+  private tierEl: HTMLDivElement;
 
   constructor(private container: HTMLElement, private spec: GameSpec) {
     const style = document.createElement('style');
@@ -238,8 +262,11 @@ export class HUD {
       <div class="panel score">
         <div class="val">0</div>
         <div class="lbl">SCORE</div>
+        <div class="coinval">0</div>
+        <div class="lbl">SCRAP</div>
         <div class="timer"></div>
         <div class="lives"></div>
+        <div class="tier" style="display:none"></div>
       </div>
       <div class="vignette"></div>
       <div class="toast"></div>
@@ -261,6 +288,7 @@ export class HUD {
     this.objDesc = this.root.querySelector('.objective .desc')!;
     this.objProg = this.root.querySelector('.objective .progress')!;
     this.scoreVal = this.root.querySelector('.score .val')!;
+    this.coinVal = this.root.querySelector('.score .coinval')!;
     this.timerEl = this.root.querySelector('.timer')!;
     this.livesEl = this.root.querySelector('.lives')!;
     this.vignette = this.root.querySelector('.vignette')!;
@@ -269,6 +297,7 @@ export class HUD {
     this.bossEl = this.root.querySelector('.boss')!;
     this.bossName = this.root.querySelector('.boss .name')!;
     this.bossFill = this.root.querySelector('.boss .bar > div')!;
+    this.tierEl = this.root.querySelector('.score .tier')!;
     this.crosshair = document.createElement('div');
     this.crosshair.className = 'crosshair';
     this.crosshair.style.display = 'none';
@@ -284,6 +313,8 @@ export class HUD {
   }
   setProgress(text: string) { this.objProg.textContent = text; }
   setScore(v: number) { this.scoreVal.textContent = String(Math.round(v)); }
+  /** vendor-economy wave: the scrap (currency) readout under the score. */
+  setCurrency(n: number) { this.coinVal.textContent = String(Math.max(0, Math.floor(n))); }
   setHealth(frac: number) { this.hpFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`; }
   setBoost(frac: number) { this.boostFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`; }
   showBoostBar(show: boolean) {
@@ -295,6 +326,21 @@ export class HUD {
     this.timerEl.textContent = `${m}:${s.toFixed(1).padStart(4, '0')}`;
   }
   setLives(n: number) { this.livesEl.textContent = n > 1 ? '♥'.repeat(Math.min(9, n)) : ''; }
+  /**
+   * WORLD-TIERS: set the map tier chip. Tier <= 1 hides the chip (the
+   * common case). Called by the engine on boot and portal arrival only —
+   * never per frame.
+   */
+  setTier(tier: number) {
+    const t = Number.isFinite(tier) ? Math.max(1, Math.floor(tier)) : 1;
+    if (t <= 1) {
+      this.tierEl.style.display = 'none';
+      this.tierEl.textContent = '';
+    } else {
+      this.tierEl.style.display = '';
+      this.tierEl.textContent = `TIER ${t}`;
+    }
+  }
   setCrosshair(show: boolean) { this.crosshair.style.display = show ? '' : 'none'; }
   setHint(text: string) { this.hintEl.textContent = text; }
   /** Boss health bar. Pass null to hide. */
@@ -616,7 +662,12 @@ export class HUD {
     onToggleModifier?: (id: string) => void;
     onBuyModifier?: (id: string) => void;
     dailyLabel?: string;
-    dailyBest?: number | null;
+    /** today already has a completed attempt — lock the button */
+    dailyPlayed?: boolean;
+    /** "Kill 40 enemies · Vitality + Power" line under the daily button */
+    dailyChallengeLine?: string;
+    /** today + previous 7 days, newest first */
+    dailyBoard?: DailyBoardRow[];
     onDaily?: () => void;
   }) {
     this.clearOverlays();
@@ -711,22 +762,56 @@ export class HUD {
       const row = document.createElement('div');
       row.className = 'daily-row';
       const db = document.createElement('button');
-      db.className = 'daily-btn';
+      db.className = 'daily-btn' + (opts.dailyPlayed ? ' played' : '');
       db.textContent = opts.dailyLabel;
-      db.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (started) return;
-        started = true;
-        opts.onDaily!();
-      });
+      if (opts.dailyPlayed) {
+        // one attempt per day: the button is locked, clicking does nothing.
+        db.disabled = true;
+      } else {
+        db.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (started) return;
+          started = true;
+          opts.onDaily!();
+        });
+      }
       row.appendChild(db);
-      if (opts.dailyBest != null && opts.dailyBest > 0) {
-        const best = document.createElement('div');
-        best.className = 'daily-best';
-        best.textContent = `today's best: ${opts.dailyBest.toLocaleString()}`;
-        row.appendChild(best);
+      if (opts.dailyChallengeLine && !opts.dailyPlayed) {
+        const line = document.createElement('div');
+        line.className = 'daily-challenge-line';
+        line.textContent = opts.dailyChallengeLine;
+        row.appendChild(line);
       }
       ov.append(b, row);
+
+      // Challenge board: today + the last 7 days, newest first. Local-only —
+      // the tuples recompute from each date, results come from the profile.
+      if (opts.dailyBoard && opts.dailyBoard.length) {
+        const board = document.createElement('div');
+        board.className = 'daily-board';
+        const head = document.createElement('div');
+        head.className = 'daily-board-head';
+        head.textContent = 'CHALLENGE BOARD';
+        board.appendChild(head);
+        for (const r of opts.dailyBoard) {
+          const d = document.createElement('div');
+          d.className = 'daily-board-row' + (r.today ? ' today' : '');
+          const dt = document.createElement('span');
+          dt.className = 'dbr-date';
+          dt.textContent = r.today ? 'TODAY' : r.date.slice(5);
+          const gl = document.createElement('span');
+          gl.className = 'dbr-goal';
+          gl.textContent = `${r.goalText} · ${r.loadoutText}`;
+          const rs = document.createElement('span');
+          rs.className = 'dbr-result';
+          rs.textContent = r.result
+            ? `${r.result.won ? 'WON' : 'LOST'} ${r.result.score.toLocaleString('en-US')} · K${r.result.kills}`
+            : '—';
+          d.append(dt, gl, rs);
+          board.appendChild(d);
+        }
+        ov.appendChild(board);
+      }
     } else {
       ov.appendChild(b);
     }
@@ -831,6 +916,45 @@ export class HUD {
     });
     trow.append(tlab, tsel);
 
+    // UPGRADE LOOP (difficulty-modes): difficulty selector. Player-scoped
+    // and persisted via the profile (engine.setDifficultyMode). Changes
+    // are refused while any enemy is hostile (no changes in combat) — the
+    // row is disabled and carries an explanatory note in that case.
+    const drow = document.createElement('div');
+    drow.className = 'settings-row';
+    const dlab = document.createElement('span');
+    dlab.textContent = 'DIFFICULTY';
+    const dsel = document.createElement('select');
+    dsel.setAttribute('aria-label', 'Difficulty');
+    const inCombat = typeof eng?.inCombat === 'function' ? eng.inCombat() : false;
+    const curDiff = typeof eng?.getDifficultyMode === 'function' ? eng.getDifficultyMode() : 'normal';
+    for (const d of ['story', 'normal', 'hard'] as const) {
+      const o = document.createElement('option');
+      o.value = d;
+      o.textContent = d.toUpperCase();
+      if (d === curDiff) o.selected = true;
+      dsel.appendChild(o);
+    }
+    const dnote = document.createElement('span');
+    dnote.className = 'settings-note';
+    if (inCombat) {
+      dsel.disabled = true;
+      dnote.textContent = 'LOCKED IN COMBAT';
+    }
+    dsel.addEventListener('change', () => {
+      const setMode = typeof eng?.setDifficultyMode === 'function' ? eng.setDifficultyMode.bind(eng) : null;
+      const res = setMode?.(dsel.value as 'story' | 'normal' | 'hard');
+      if (res && !res.ok) {
+        // refused (in combat) — revert the picker and say why
+        dsel.value = typeof eng?.getDifficultyMode === 'function' ? eng.getDifficultyMode() : 'normal';
+        dnote.textContent = (res.reason ?? 'change refused').toUpperCase();
+        eng?.audio.play('alarm');
+      } else {
+        eng?.audio.play('click');
+      }
+    });
+    drow.append(dlab, dsel, dnote);
+
     const mrow = document.createElement('div');
     mrow.className = 'settings-row';
     const mlab = document.createElement('span');
@@ -848,7 +972,7 @@ export class HUD {
     const back = document.createElement('button');
     back.textContent = 'BACK';
     back.addEventListener('click', () => { eng?.audio.play('click'); this.showPause(); });
-    wrap.append(vrow, qrow, trow, mrow);
+    wrap.append(vrow, qrow, trow, drow, mrow);
     ov.append(h, wrap, back);
     this.overlay = ov;
   }
@@ -897,6 +1021,7 @@ export class HUD {
     this.setBoost(1);
     this.setBoss(null, 0);
     this.setCrosshair(false);
+    this.setTier(1);
     this.setObjective(this.spec.objective.description, '');
     this.setProgress('');
     this.setHint('');

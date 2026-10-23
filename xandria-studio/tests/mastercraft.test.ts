@@ -240,7 +240,9 @@ describe('master recipes in the seeded pool', () => {
 
   it('catalog grew by exactly 4 (prefix pins elsewhere stay honest)', () => {
     expect(MASTER_CATALOG_RECIPES).toHaveLength(4);
-    expect(RECIPE_CATALOG_SIZE).toBe(17); // 10 base + 3 tier-2 + 4 master
+    // Gear sets wave: +1 additive master recipe (recipe_masterforged_crown)
+    // appended after the master entries.
+    expect(RECIPE_CATALOG_SIZE).toBe(18); // 10 base + 3 tier-2 + 4 master + 1 set
   });
 });
 

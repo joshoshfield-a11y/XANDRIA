@@ -7,7 +7,7 @@ import { Rng } from './Rng';
 
 export type Sfx =
   | 'jump' | 'land' | 'hit' | 'hurt' | 'shoot' | 'laser' | 'explosion' | 'pickup' | 'coin' | 'swing'
-  | 'dash' | 'die' | 'kill' | 'levelup' | 'chapter' | 'roar' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step';
+  | 'dash' | 'die' | 'kill' | 'levelup' | 'chapter' | 'roar' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step' | 'thunder';
 
 const SCALES: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -140,6 +140,8 @@ export class AudioEngine {
       case 'boost': this.tone(150, 0.5, 'sawtooth', 0.3 * v, b, { slide: 4, filter: 2500 }); this.noise(0.4, 0.3 * v, b, 3000, undefined, 'highpass'); break;
       case 'click': this.tone(1000, 0.04, 'square', 0.15 * v, b); break;
       case 'alarm': this.tone(880, 0.15, 'square', 0.2 * v, b); this.tone(660, 0.15, 'square', 0.2 * v, b, { when: this.ctx.currentTime + 0.17 }); break;
+      // UPGRADE LOOP (weather-cycles): lightning thunder — low rumble.
+      case 'thunder': this.noise(1.2, 0.7 * v, b, 300); this.tone(55, 0.9, 'sine', 0.5 * v, b, { slide: 0.3 }); break;
       case 'engine': break; // continuous, see setEngine
     }
   }

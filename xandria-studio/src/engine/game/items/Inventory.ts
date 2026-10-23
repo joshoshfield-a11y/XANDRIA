@@ -21,6 +21,7 @@ import {
   type ItemStats,
   type ItemStatKey,
 } from '@spec';
+import { addItemStats, computeSetBonuses } from '../setBonuses';
 
 /** Structural contract shared with the runtime crew's wireItems. */
 export interface InventoryLike {
@@ -42,6 +43,11 @@ export interface SerializedInventory {
   version: 1;
   slots: Array<InventoryEntry | null>;
   equipped: Partial<Record<EquipSlot, string>>;
+  /** Junk-marked item ids (inventory-qol wave; absent = none). */
+  junk?: string[];
+  /** Acquisition order: [itemId, seq][] + the sequence counter (absent = none). */
+  acq?: Array<[string, number]>;
+  acqSeq?: number;
 }
 
 const isFiniteNum = (v: unknown): v is number =>
@@ -68,6 +74,20 @@ export class Inventory implements InventoryLike {
 
   private slots: Array<InventoryEntry | null> = [];
   private equipped: Partial<Record<EquipSlot, string>> = {};
+  /**
+   * Inventory-qol wave: junk-marked item ids. Marking is per item id (all
+   * units of that id count as junk) — simple, deterministic, and it
+   * serializes cleanly. Equipped items are never junk-actionable.
+   */
+  private junk = new Set<string>();
+  /**
+   * Inventory-qol wave: monotonic acquisition sequence for the "newest"
+   * sort. Bumped on every successful add(); derived from the event
+   * sequence, never Date.now/Math.random — deterministic given the same
+   * play sequence. Maps itemId -> last-acquired sequence number.
+   */
+  private acqSeq = 0;
+  private acqOrder = new Map<string, number>();
 
   constructor(private defs: Record<string, ItemDef>) {
     this.slots = Array.from({ length: BACKPACK_SIZE }, () => null);
@@ -144,6 +164,7 @@ export class Inventory implements InventoryLike {
     }
     const max = this.stackSize(itemId);
     let rest = Math.floor(count);
+    const startRest = rest;
     // 1) top up existing stacks
     for (const s of this.slots) {
       if (rest <= 0) break;
@@ -161,6 +182,10 @@ export class Inventory implements InventoryLike {
         this.slots[i] = { itemId, count: take };
         rest -= take;
       }
+    }
+    if (rest < startRest) {
+      // inventory-qol: record acquisition order (deterministic event counter)
+      this.acqOrder.set(itemId, ++this.acqSeq);
     }
     this.emitChange();
     return rest;
@@ -319,6 +344,74 @@ export class Inventory implements InventoryLike {
     return true;
   }
 
+  // ------------------------------------------------------------ junk + acquisition order
+
+  /**
+   * Inventory-qol wave: true when the item id is junk-marked. Marking is
+   * per item id (every unit of that id counts as junk). Junk flags never
+   * touch equip semantics; mass actions only operate on the backpack.
+   */
+  isJunk(itemId: string): boolean {
+    return this.junk.has(itemId);
+  }
+
+  /**
+   * Mark or unmark an item id as junk. Unknown ids are warned about and
+   * ignored (same policy as add/remove). Fires onChange when the set
+   * changed.
+   */
+  setJunk(itemId: string, flag: boolean): void {
+    if (!this.defs[itemId]) {
+      this.warnUnknown(itemId);
+      return;
+    }
+    const had = this.junk.has(itemId);
+    if (flag && !had) {
+      this.junk.add(itemId);
+      this.emitChange();
+    } else if (!flag && had) {
+      this.junk.delete(itemId);
+      this.emitChange();
+    }
+  }
+
+  /** All junk-marked item ids (in marking order). */
+  junkItemIds(): string[] {
+    return [...this.junk];
+  }
+
+  /** Drop all junk marks. Fires onChange when anything was marked. */
+  clearJunk(): void {
+    if (this.junk.size > 0) {
+      this.junk.clear();
+      this.emitChange();
+    }
+  }
+
+  /**
+   * Drop junk marks for item ids that no longer exist anywhere in the
+   * backpack or equipped slots (housekeeping after mass actions).
+   */
+  pruneJunk(): void {
+    let changed = false;
+    for (const id of [...this.junk]) {
+      if (this.count(id) === 0) {
+        this.junk.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) this.emitChange();
+  }
+
+  /**
+   * Acquisition sequence number for the "newest" sort (0 = never added
+   * this session/deserialized without order data). Higher = acquired
+   * later. Deterministic: derived from the add() event sequence.
+   */
+  acquiredOrder(itemId: string): number {
+    return this.acqOrder.get(itemId) ?? 0;
+  }
+
   // ------------------------------------------------------------ stats
 
   /**
@@ -342,6 +435,27 @@ export class Inventory implements InventoryLike {
     return out;
   }
 
+  /**
+   * Gear set bonuses wave: the additive stat bonuses from the currently
+   * equipped gear sets (2-piece / 4-piece thresholds). Pure function of
+   * the equipped slots — equip/unequip mutate `equipped`, so the bonuses
+   * are recomputed fresh on every equip change by construction. Never
+   * throws; see engine/game/setBonuses.ts for the tuning table.
+   */
+  setBonusStats(): ItemStats {
+    return computeSetBonuses(this.getAllEquipped()).bonusStats;
+  }
+
+  /**
+   * Gear set bonuses wave: the stat math the engine actually uses —
+   * equipped item stats PLUS active set bonuses, additive (addItemStats
+   * merges finite numbers only). Equip slot semantics and the loot ladder
+   * are untouched; equippedStats() keeps its original contract.
+   */
+  effectiveStats(): ItemStats {
+    return addItemStats(this.equippedStats(), this.setBonusStats());
+  }
+
   // ------------------------------------------------------------ save / load
 
   /** Serialize to a JSON string for save games. */
@@ -350,6 +464,9 @@ export class Inventory implements InventoryLike {
       version: 1,
       slots: this.slots.map((s) => (s ? { itemId: s.itemId, count: s.count } : null)),
       equipped: { ...this.equipped },
+      junk: [...this.junk],
+      acq: [...this.acqOrder.entries()],
+      acqSeq: this.acqSeq,
     };
     return JSON.stringify(data);
   }
@@ -372,6 +489,9 @@ export class Inventory implements InventoryLike {
     // deserialize() never throws; copy its validated state over wholesale.
     this.slots = fresh.slots;
     this.equipped = fresh.equipped;
+    this.junk = fresh.junk;
+    this.acqOrder = fresh.acqOrder;
+    this.acqSeq = fresh.acqSeq;
     this.emitChange();
   }
 
@@ -421,6 +541,31 @@ export class Inventory implements InventoryLike {
           console.warn(`[inventory] deserialize: "${itemId}" does not belong in slot "${slot}" — skipped`);
         }
       }
+    }
+    // inventory-qol: restore junk marks + acquisition order (validated).
+    if (Array.isArray(d.junk)) {
+      for (const id of d.junk) {
+        if (typeof id === 'string' && defs[id]) inv.junk.add(id);
+      }
+    }
+    if (Array.isArray(d.acq)) {
+      let maxSeq = 0;
+      for (const pair of d.acq) {
+        if (!Array.isArray(pair) || pair.length !== 2) continue;
+        const [id, seq] = pair as [unknown, unknown];
+        if (typeof id !== 'string' || !defs[id]) continue;
+        if (!isFiniteNum(seq)) continue;
+        const s = Math.floor(seq);
+        inv.acqOrder.set(id, s);
+        if (s > maxSeq) maxSeq = s;
+      }
+      inv.acqSeq = Math.max(
+        inv.acqSeq,
+        maxSeq,
+        isFiniteNum(d.acqSeq) ? Math.floor(d.acqSeq) : 0,
+      );
+    } else if (isFiniteNum(d.acqSeq)) {
+      inv.acqSeq = Math.max(inv.acqSeq, Math.floor(d.acqSeq));
     }
     return inv;
   }

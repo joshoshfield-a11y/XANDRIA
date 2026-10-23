@@ -33,6 +33,7 @@ import { Rng } from '../core/Rng';
 import { ItemBuilder } from './items/ItemBuilder';
 import { LOOT_CATALOG_RECIPES, lootTier2OutputDefs } from './loot';
 import { MASTER_CATALOG_RECIPES, masterTier3OutputDefs } from './mastercraft';
+import { SET_CATALOG_RECIPES, setCraftedOutputDefs } from './setBonuses';
 import type { SkillsLike } from './skills';
 
 // ---------------------------------------------------------------- salts
@@ -231,6 +232,10 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
   ...BASE_RECIPE_CATALOG,
   ...LOOT_CATALOG_RECIPES,
   ...MASTER_CATALOG_RECIPES,
+  // Gear sets wave: one additive master recipe for the Masterforged
+  // crown (smithing 3). Catalog check order and the minSkillRank-3
+  // always-include rule are untouched.
+  ...SET_CATALOG_RECIPES,
 ];
 
 /** Catalog length — poolSize clamps to 1..this. */
@@ -330,6 +335,8 @@ export function craftedItemDefs(): Record<string, ItemDef> {
   return {
     ...lootTier2OutputDefs(),
     ...masterTier3OutputDefs(),
+    // Gear sets wave: the Masterforged crown output def (additive).
+    ...setCraftedOutputDefs(),
     craft_field_kit: new ItemBuilder('craft_field_kit')
       .named('Field Repair Kit')
       .consumable()

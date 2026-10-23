@@ -34,6 +34,10 @@
  *    Sanctioned exception (upgrade loop, enemy-scaling): enemy STATS may
  *    additionally depend on (playerLevel, mapDist) — same (mapSeed,
  *    playerLevel, map) → identical stats; positions/kinds stay mapSeed-alone.
+ *    Sanctioned exception (upgrade loop, world-tiers): the world tier
+ *    additionally feeds the scaling level floor and loot rarity weighting —
+ *    the tier is itself a pure function of (mapSeed, map depth), so same
+ *    (seed, path) → identical tiers and the round-trip contract holds.
  * 3. Systems run in registration order on both paths; a throwing system must
  *    not abort the others (the registry try/catches and reports).
  * 4. Loot/pickup *state* (a chest already opened, an item already taken) is
@@ -87,6 +91,15 @@ export class MapEntityRegistry {
 
   get count(): number { return this.systems.length; }
   ids(): string[] { return this.systems.map((s) => s.id); }
+
+  /**
+   * UPGRADE LOOP (difficulty-modes): look up a registered system by id
+   * (e.g. the 'enemies' EnemyManager for the difficulty selector's
+   * no-changes-in-combat rule). Returns undefined when not registered.
+   */
+  byId(id: string): MapLocalEntitySystem | undefined {
+    return this.systems.find((s) => s.id === id);
+  }
 
   /** Departure path: despawn every registered system (registration order). */
   despawnAll(): void {

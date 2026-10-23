@@ -10,9 +10,14 @@ import { EnemyManager } from '../engine/game/EnemyAI';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
+import { ensureSetItemDefs } from '../engine/game/setBonuses';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
+import { AchievementsPanel } from '../engine/ui/AchievementsPanel';
+import { AchievementManager } from '../engine/game/achievements';
+import { BestiaryPanel } from '../engine/ui/BestiaryPanel';
 import { resolveGatheringDensity } from '../engine/game/crafting';
 import { QuestManager, buildQuestPool, resolveQuestsEnabled } from '../engine/game/quests';
 import { buildSideQuestPool } from '../engine/game/sidequests';
@@ -83,6 +88,19 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const skills = new SkillSystem(engine, {
     onRankUp: (def, rank) => {
       engine.hud.toast(`${def.name} rank ${rank}!`);
+    },
+  });
+  // bestiary wave: enemy codex kill tracker. Blueprint-owned like skills —
+  // rides the live object across portal transitions (NOT a portal entity).
+  // Taps the existing onKill hook (observe-only); no enemy contract change.
+  // Panel is assigned below (after skillsPanel) so unlock toasts refresh it.
+  let bestiaryPanel: BestiaryPanel | null = null;
+  const bestiary = new BestiaryManager(engine, {
+    onUnlocked: (def, tier, kills) => {
+      engine.hud.toast(
+        `\u{1F4D6} Bestiary: ${def.name} \u2014 ${BESTIARY_TIER_NAMES[tier]} (${kills} kill${kills === 1 ? '' : 's'})`,
+      );
+      bestiaryPanel?.refresh();
     },
   });
   let notifyLevelUp: (gain?: LevelGain) => void = () => {};
@@ -188,6 +206,9 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     // scales every spec count on the portal-arrival path.
     // UPGRADE LOOP (enemy-scaling): live player level feeds the spawn stat band.
     playerLevel: () => prog.level,
+    // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
+    difficulty: () => engine.getDifficultyMode(),
+
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
   engine.portalEntities.register(enemies);
@@ -205,6 +226,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   // outputs). Merges only when custom.items exists — never activates the
   // item system on its own (preserves wireItems' null contract).
   ensureLootItemDefs(spec);
+  // Gear sets wave: set-piece item defs (additive, idempotent).
+  ensureSetItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -249,6 +272,26 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
       })
     : null;
   engine.questManager = quests;
+  // achievements wave: player-scoped achievement manager (observe-only).
+  // Built here so the station session's onCrafted chain below can feed it
+  // crafts; the codex panel is constructed after the modal sessions.
+  const achievements = new AchievementManager({
+    hooks: engine.hooks,
+    toast: (m, s) => engine.hud.toast(m, s),
+    progression: () => prog,
+    quests: () => quests,
+    portalHooks: () => engine.portalManager?.hooks ?? null,
+    avatarPos: () => engine.portalsPlayerAvatar?.ctrl.position ?? null,
+    addScore: (n) => {
+      engine.score += n;
+      engine.hud.setScore(engine.score);
+    },
+    // progression-curve: reward XP that levels the player opens the
+    // level-up flow, like every other XP source (lazy — notifyLevelUp is
+    // assigned below, same as QuestManager's onLevelUp).
+    onLevelUp: (gain) => notifyLevelUp(gain),
+  });
+  engine.achievementManager = achievements;
   // crafting wave (workstream B): harvestable gathering nodes (ore veins,
   // fiber plants, salvage caches), map-local lifecycle. The manager
   // registers itself with engine.portalEntities ({ id: 'gathering' }) so
@@ -310,6 +353,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
           grantCraftXp(prog, notifyLevelUp);
           // quest wave: crafts feed craft objectives
           quests?.onCraft(recipe.id);
+          // achievements wave: crafts feed craft achievements (observe-only)
+          achievements.onCraft(recipe);
         },
         toast: (m) => engine.hud.toast(m),
       })
@@ -332,6 +377,23 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
         isModalOpen: () => stationSession?.isPanelOpen ?? false,
       })
     : null;
+  // achievements wave: the achievement codex panel (J key / trophy chip).
+  // Never opens while the crafting panel (or quest dialogue, where one
+  // exists) owns input.
+  const achievementsPanel = new AchievementsPanel({
+    container: engine.container,
+    achievements: () => achievements,
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+  });
+  // bestiary wave: the codex panel (B key / BESTIARY chip toggle). Never
+  // opens while the crafting panel or the skills panel owns input.
+  bestiaryPanel = new BestiaryPanel({
+    container: engine.container,
+    bestiary: () => bestiary,
+    defs: () => spec.custom?.items?.defs ?? {},
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+    otherOpen: () => skillsPanel?.isOpen ?? false,
+  });
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -544,5 +606,5 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (spec.objective.type === 'survive') hud.setProgress(`${enemies.aliveCount()} hostiles`);
   });
 
-  return { avatar, enemies, skills, skillsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
 }

@@ -74,9 +74,12 @@ import { Engine } from '../src/engine/Engine';
 import { generateSpec } from '../src/generator/generate';
 import {
   _setProfileStorage,
-  dailySeed,
-  todayLocalDate,
 } from '../src/engine/game/Profile';
+import {
+  challengeSeed,
+  generateDailyChallenge,
+  todayUtcDate,
+} from '../src/engine/game/dailyChallenges';
 import type { GameSpec } from '../src/spec/schema';
 
 function memStore() {
@@ -145,9 +148,13 @@ describe('R2-M1 daily challenge uses the daily seed', () => {
     (engine as any).state = 'title';
     engine.startDailyRun();
 
-    const expected = dailySeed(todayLocalDate());
+    const expected = challengeSeed(todayUtcDate());
     expect(spec.meta.seed).toBe(expected);
     expect(expected).not.toBe(42);
+    // the pinned challenge tuple is on the engine: same seed the Rng derived
+    const ch = generateDailyChallenge(todayUtcDate());
+    expect((engine as any).challenge).toEqual(ch);
+    expect((engine as any).challengeTracker?.armed).toBe(true);
 
     const dailyTerrain = sampleTerrain(engine);
     expect(dailyTerrain).not.toEqual(baseTerrain); // the world actually changed
@@ -158,22 +165,47 @@ describe('R2-M1 daily challenge uses the daily seed', () => {
     expect(engine.state).toBe('playing');
     expect(sampleTerrain(engine)).toEqual(dailyTerrain); // same terrain
     expect(spawns).toEqual(attempt1); // same spawns
+    // the tracker survives the in-place restart (same attempt, same goal)
+    expect((engine as any).challengeTracker?.armed).toBe(true);
 
     engine.toTitle(); // leaving the daily behind restores the base game
     expect(spec.meta.seed).toBe(42);
     expect(sampleTerrain(engine)).toEqual(baseTerrain);
+    expect((engine as any).challenge).toBeNull();
+    expect((engine as any).challengeTracker).toBeNull();
   });
 
-  it('two independent engines on the same day generate the identical daily world', () => {
+  it('a pinned date produces the identical challenge on two engines', () => {
     const a = makeDailyEngine();
     const b = makeDailyEngine();
     (a.engine as any).state = 'title';
-    a.engine.startDailyRun();
+    a.engine.startDailyRun('2026-10-21');
     (b.engine as any).state = 'title';
-    b.engine.startDailyRun();
+    b.engine.startDailyRun('2026-10-21');
     expect(a.spec.meta.seed).toBe(b.spec.meta.seed);
+    expect(a.spec.meta.seed).toBe(challengeSeed('2026-10-21'));
+    expect((a.engine as any).challenge).toEqual((b.engine as any).challenge);
     expect(sampleTerrain(a.engine)).toEqual(sampleTerrain(b.engine));
     expect(a.spawns).toEqual(b.spawns);
+  });
+
+  it('the fixed challenge loadout (not the profile loadout) applies to the run', () => {
+    const baseSpec = generateSpec('neon fps arena at night', { seed: 42 });
+    const baseHealth = baseSpec.player.health;
+    const baseSpeed = baseSpec.player.speed;
+    const { engine, spec } = makeDailyEngine();
+    (engine as any).state = 'title';
+    engine.startDailyRun('2026-10-21');
+    const ch = generateDailyChallenge('2026-10-21');
+    expect((engine as any).challenge).toEqual(ch);
+    // the run config reflects the challenge's fixed loadout exactly:
+    // vitality => base+25 health, swift => base*1.08 speed (applyLoadout math)
+    const expectHealth = ch.loadout.includes('vitality') ? Math.round(baseHealth + 25) : baseHealth;
+    expect(spec.player.health).toBe(expectHealth);
+    const expectSpeed = ch.loadout.includes('swift') ? baseSpeed * 1.08 : baseSpeed;
+    expect(spec.player.speed).toBeCloseTo(expectSpeed, 9);
+    // and the loadout is pinned: regenerating the date gives the same ids
+    expect(generateDailyChallenge('2026-10-21').loadout).toEqual(ch.loadout);
   });
 
   it('normal startRun still uses the base seed and base terrain', () => {

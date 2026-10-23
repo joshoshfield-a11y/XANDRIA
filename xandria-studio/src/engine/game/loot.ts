@@ -36,6 +36,7 @@
 import type { GameSpec, ItemDef } from '@spec';
 import { Rng } from '../core/Rng';
 import { ItemBuilder } from './items/ItemBuilder';
+import { SET_DROP_ADDONS } from './setBonuses';
 import type { CraftingRecipe } from './crafting';
 
 /**
@@ -290,14 +291,14 @@ export interface LootDrop {
   count: number;
 }
 
-interface LootEntry {
+export interface LootEntry {
   itemId: string;
   weight: number;
   min: number;
   max: number;
 }
 
-interface LootTable {
+export interface LootTable {
   /** always-eligible material drops */
   materials: readonly LootEntry[];
   /** gear/consumable drops (weapons, armor, tonics) */
@@ -306,7 +307,13 @@ interface LootTable {
   nothing: number;
 }
 
-const DROP_TABLES: Record<string, LootTable> = {
+/**
+ * Base drop tables, exported READ-ONLY for tests (do not mutate).
+ * Gear-set bonus pieces merge in ADDITIVELY via SET_DROP_ADDONS in
+ * rollLoot — this table's entries/weights are never modified by that
+ * merge (pinned by tests/setbonuses.test.ts).
+ */
+export const DROP_TABLES: Record<string, LootTable> = {
   walker: {
     materials: [
       { itemId: MAT_EMBER_SHARD, weight: 40, min: 1, max: 2 },
@@ -368,6 +375,82 @@ const DROP_TABLES: Record<string, LootTable> = {
 /** Bosses always drop epic+ gear: Void Edge or the legendary Starforged Aegis. */
 const BOSS_GEAR = ['loot_void_edge', 'loot_star_aegis'] as const;
 
+/**
+ * WORLD-TIERS (upgrade loop): rarity index of each direct-drop gear id,
+ * cached from the authored defs. Drives the tier weight shift below —
+ * rarer gear gains weight faster as tiers climb. Legendary stays
+ * boss-exclusive (boss drops never go through the weighted roll).
+ */
+const GEAR_RARITY_IDX: Record<string, number> = (() => {
+  const idx: Record<string, number> = { common: 0, uncommon: 1, rare: 2, epic: 3, legendary: 4 };
+  const out: Record<string, number> = {};
+  for (const [id, def] of Object.entries(lootGearDefs())) {
+    out[id] = idx[def.rarity ?? 'common'] ?? 0;
+  }
+  return out;
+})();
+
+/**
+ * Weight multiplier for one gear entry at the given tier. Tier 1 = 1.0
+ * for every entry (the authored tables, byte-identical). Higher tiers
+ * boost rarer gear more: mult = 1 + (tier-1) * rarityIdx * 0.25, so at
+ * tier 3 a rare drop weighs 2x and an epic 2.5x its authored weight,
+ * while uncommon gear only gains 1.5x. Materials and the "nothing"
+ * weight are untouched — the tier makes GOOD drops better, it never
+ * makes drops more frequent.
+ */
+export function tierGearWeightMult(itemId: string, tier: number): number {
+  const t = Number.isFinite(tier) ? Math.max(1, Math.floor(tier)) : 1;
+  if (t <= 1) return 1;
+  const ri = GEAR_RARITY_IDX[itemId] ?? 0;
+  return 1 + (t - 1) * ri * 0.25;
+}
+
+// ---------------------------------------------------------------- bestiary surface
+
+/**
+ * BESTIARY wave (additive, read-only): expose the drop tables for the
+ * codex UI. Chance percentages are computed from the SAME weights
+ * rollLoot() uses, so the codex never lies about drops. Unknown kinds
+ * fall back to the walker table — the same fallback the roller uses.
+ * `isBoss` kills are not rolled from a table: bosses always drop one
+ * epic+ gear piece plus two material rolls (BOSS_GEAR above).
+ */
+export interface BestiaryLootEntry {
+  itemId: string;
+  min: number;
+  max: number;
+  /** 0..100 chance this entry is the one rolled on a non-boss kill */
+  chancePct: number;
+}
+
+export interface BestiaryLootTable {
+  materials: readonly BestiaryLootEntry[];
+  gear: readonly BestiaryLootEntry[];
+}
+
+export function lootTableForBestiary(kind: string): BestiaryLootTable {
+  const t = DROP_TABLES[kind] ?? DROP_TABLES.walker;
+  const all = [...t.materials, ...t.gear];
+  let total = t.nothing;
+  for (const e of all) total += e.weight;
+  const pct = (e: LootEntry): BestiaryLootEntry => ({
+    itemId: e.itemId,
+    min: e.min,
+    max: e.max,
+    chancePct: total > 0 ? (e.weight / total) * 100 : 0,
+  });
+  return {
+    materials: t.materials.map(pct),
+    gear: t.gear.map(pct),
+  };
+}
+
+/** Boss kill loot, as rolled by rollLoot(isBoss=true): guaranteed epic+ gear + 2 material rolls. */
+export function bossLootForBestiary(): { gear: readonly string[]; materialRolls: number } {
+  return { gear: BOSS_GEAR, materialRolls: 2 };
+}
+
 /** The seeded loot stream for one map: Rng(mapSeed ^ LOOT_SALT), never engine.rng. */
 export function buildLootRng(mapSeed: number): Rng {
   return new Rng((mapSeed ^ LOOT_SALT) >>> 0);
@@ -389,14 +472,30 @@ function toDrop(rng: Rng, e: LootEntry): LootDrop {
 }
 
 /**
- * Roll one kill's loot. Pure in (rng state, kind, isBoss) — the caller
- * owns the rng stream (EnemyManager keeps Rng(mapSeed ^ LOOT_SALT)).
+ * Roll one kill's loot. Pure in (rng state, kind, isBoss, tier) — the
+ * caller owns the rng stream (EnemyManager keeps Rng(mapSeed ^ LOOT_SALT)).
  * Unknown kinds fall back to the walker table. Non-boss kills roll at
  * most one table entry (possibly nothing); bosses always drop one
  * epic+ gear piece plus two material rolls. Legendary drops are
  * boss-exclusive by construction.
+ *
+ * WORLD-TIERS: the optional tier (default 1 = identity) scales GEAR entry
+ * weights via tierGearWeightMult — rarer gear gets likelier on deeper
+ * maps. Tier 1 rolls are byte-identical to the pre-tier tables.
+ * Gear sets wave: SET_DROP_ADDONS (setBonuses.ts) merges ADDITIVE gear
+ * entries onto the base tables — the base entries, weights, and rarities
+ * below are untouched by that merge (pinned by unit test). Same
+ * (seed, kill sequence) -> identical drops, addon tables included.
  */
-export function rollLoot(rng: Rng, kind: string, isBoss: boolean): LootDrop[] {
+/**
+ * UPGRADE LOOP (difficulty-modes): chanceMult scales the drop chance by
+ * narrowing (m > 1) or widening (m < 1) the "nothing" slot of the drop
+ * table only. Loot ladder tiers, item ids and per-entry weights are
+ * untouched. No extra RNG draws — chanceMult = 1 is byte-identical to
+ * before, and the same (rng state, chanceMult) always yields the same
+ * drops. The boss guaranteed-drop path is unaffected.
+ */
+export function rollLoot(rng: Rng, kind: string, isBoss: boolean, tier = 1, chanceMult = 1): LootDrop[] {
   const t = DROP_TABLES[kind] ?? DROP_TABLES.walker;
   const drops: LootDrop[] = [];
   if (isBoss) {
@@ -406,14 +505,20 @@ export function rollLoot(rng: Rng, kind: string, isBoss: boolean): LootDrop[] {
     }
     return drops;
   }
-  const all = [...t.materials, ...t.gear];
-  let total = t.nothing;
-  for (const e of all) total += e.weight;
+  const m = Number.isFinite(chanceMult) && chanceMult >= 0 ? chanceMult : 1;
+  // m = 0 means "no drops": the nothing slot is infinitely wide.
+  if (m === 0) return drops;
+  const nothingW = t.nothing / m;
+  // additive only: base gear entries first, set-bonus entries appended
+  const gear = [...t.gear, ...(SET_DROP_ADDONS[kind] ?? [])];
+  const all = [...t.materials, ...gear];
+  let total = nothingW;
+  for (const e of all) total += e.weight * (t.gear.includes(e) ? tierGearWeightMult(e.itemId, tier) : 1);
   const x = rng.range(0, total);
-  if (x < t.nothing) return drops;
-  let y = x - t.nothing;
+  if (x < nothingW) return drops;
+  let y = x - nothingW;
   for (const e of all) {
-    y -= e.weight;
+    y -= e.weight * (t.gear.includes(e) ? tierGearWeightMult(e.itemId, tier) : 1);
     if (y <= 0) { drops.push(toDrop(rng, e)); return drops; }
   }
   drops.push(toDrop(rng, all[all.length - 1]));

@@ -40,6 +40,13 @@ export interface QuestTalkSessionOpts {
   doc?: Document;
   /** false = headless: register interactables but build no UI */
   enableUi?: boolean;
+  /**
+   * vendor-economy wave: when an NPC with a vendorId is activated, this
+   * opens the shop panel instead of the quest dialogue. Return true when
+   * consumed (the dialogue stays closed); false falls through to the
+   * dialogue. Undefined = vendors open the dialogue like villagers.
+   */
+  openVendor?: (npc: Npc) => boolean;
 }
 
 /** Stale-session guard: one live session per engine (mirrors the other sessions). */
@@ -47,6 +54,7 @@ const liveSessions = new WeakMap<Engine, QuestTalkSession>();
 
 export class QuestTalkSession {
   private readonly byId = new Map<string, Npc>();
+  private readonly managers: readonly NpcManager[];
   private dialogue: DialoguePanel | null = null;
   private prompt: InteractionPrompt | null = null;
   private disposed = false;
@@ -56,10 +64,14 @@ export class QuestTalkSession {
 
   constructor(
     private readonly engine: Engine,
-    private readonly npcManager: NpcManager,
+    npcManagers: NpcManager | readonly NpcManager[],
     private readonly quests: QuestManager,
     private readonly opts: QuestTalkSessionOpts = {},
   ) {
+    // vendor-economy wave: the session can cover several rosters (the
+    // villager manager + the vendor manager) — one prompt pill, one
+    // dialogue, both rosters registered in engine.npcInteractions.
+    this.managers = Array.isArray(npcManagers) ? npcManagers : [npcManagers];
     // replace any stale session from a blueprint rebuild (one prompt pill, one dialogue)
     liveSessions.get(engine)?.dispose();
     liveSessions.set(engine, this);
@@ -90,12 +102,15 @@ export class QuestTalkSession {
 
   /**
    * Open the quest dialogue for an interactable id. Talk objectives advance
-   * here (the player actually spoke). Returns true when the activation was
-   * consumed; false lets E continue to other handlers.
+   * here (the player actually spoke). Vendors (vendor-economy wave) open
+   * the shop panel instead — via opts.openVendor — and skip onTalk, since
+   * trading is not talking. Returns true when the activation was consumed;
+   * false lets E continue to other handlers.
    */
   openDialogue(interactableId: string): boolean {
     const npc = this.byId.get(interactableId);
     if (!npc || !this.dialogue) return false;
+    if (npc.vendorId && this.opts.openVendor && this.opts.openVendor(npc)) return true;
     this.openNpcId = npc.interactable.id;
     this.quests.onTalk(npc.role);
     this.showFor(npc);
@@ -176,19 +191,21 @@ export class QuestTalkSession {
   private refresh(): void {
     const reg: InteractionRegistry = this.engine.npcInteractions;
     this.byId.clear();
-    for (const npc of this.npcManager.npcs) {
-      const acts = this.quests.actionsForNpc(npc.role);
-      const produces = [
-        ...acts.accept.map((d) => questProducesFor('accept', d)),
-        ...acts.turnIn.map((d) => questProducesFor('turnin', d)),
-      ];
-      const requires = [...new Set(acts.locked.flatMap((d) => questRequiresFor(d)))];
-      // mutate in place: the registry holds the same object reference, and
-      // the NPC wave's register is idempotent (skips present ids)
-      npc.interactable.produces = produces.length > 0 ? produces : undefined;
-      npc.interactable.requires = requires.length > 0 ? requires : undefined;
-      if (!reg.get(npc.interactable.id)) reg.register(npc.interactable);
-      this.byId.set(npc.interactable.id, npc);
+    for (const mgr of this.managers) {
+      for (const npc of mgr.npcs) {
+        const acts = this.quests.actionsForNpc(npc.role);
+        const produces = [
+          ...acts.accept.map((d) => questProducesFor('accept', d)),
+          ...acts.turnIn.map((d) => questProducesFor('turnin', d)),
+        ];
+        const requires = [...new Set(acts.locked.flatMap((d) => questRequiresFor(d)))];
+        // mutate in place: the registry holds the same object reference, and
+        // the NPC wave's register is idempotent (skips present ids)
+        npc.interactable.produces = produces.length > 0 ? produces : undefined;
+        npc.interactable.requires = requires.length > 0 ? requires : undefined;
+        if (!reg.get(npc.interactable.id)) reg.register(npc.interactable);
+        this.byId.set(npc.interactable.id, npc);
+      }
     }
     // the dialogue's NPC left the roster (portal departure): close honestly
     if (this.dialogue?.isOpen && this.openNpcId && !this.byId.has(this.openNpcId)) {

@@ -25,6 +25,8 @@ import type { Projectiles } from './Projectiles';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import { Rng, hashString } from '../core/Rng';
 import { buildLootRng, rollLoot, type LootDrop } from './loot';
+import { buildCurrencyRng, rollCurrencyDrops } from './economy';
+import { LOOT_SALT } from './loot';
 /**
  * UPGRADE LOOP (enemy-scaling): world difficulty scaling — enemies spawn
  * with stat bands derived from max(player Progression level, map depth),
@@ -35,6 +37,17 @@ import {
   applyEnemyScaling,
   mapDistanceFromSpec,
 } from './enemyScaling';
+/**
+ * UPGRADE LOOP (difficulty-modes): player-selectable difficulty modes
+ * (story / normal / hard). Additive on top of enemyScaling's level bands —
+ * spawnOne applies the band first, then the difficulty multiplier from
+ * difficulty.ts's DIFFICULTY_TABLE.
+ */
+import {
+  applyDifficultyScaling,
+  difficultyById,
+  type DifficultyId,
+} from './difficulty';
 
 /**
  * Salt for the enemy roster stream — keeps it off the NPC stream and the
@@ -43,7 +56,12 @@ import {
 export const ENEMY_SALT = 0x454e454d;
 
 export interface EnemyEvents {
-  onPlayerHit?: (damage: number, from: THREE.Vector3) => void;
+  /**
+   * UPGRADE LOOP (weather-cycles): the enemy's kind now rides along as an
+   * optional third argument so blueprints can apply additive per-kind
+   * modifiers (night damage). Existing handlers (dmg, from) are unaffected.
+   */
+  onPlayerHit?: (damage: number, from: THREE.Vector3, kind?: EnemyKind) => void;
   onDeath?: (e: Enemy) => void;
 
   /** boss phase transitions (1 at ≤66% HP, 2 at ≤33% HP) */
@@ -70,6 +88,14 @@ export class Enemy {
   alive = true;
   home: THREE.Vector3;
   private state: 'idle' | 'chase' | 'attack' = 'idle';
+  /**
+   * UPGRADE LOOP (difficulty-modes): true when this enemy is actively
+   * hostile (chasing or attacking). EnemyManager.anyHostile() aggregates
+   * this for the difficulty selector's no-changes-in-combat rule.
+   */
+  get hostile(): boolean {
+    return this.state !== 'idle';
+  }
   private attackCd = 0;
   private wanderTarget: THREE.Vector3 | null = null;
   private hoverPhase: number;
@@ -447,7 +473,7 @@ export class Enemy {
           if (this.state === 'attack' && this.attackCd <= 0) {
             this.attackCd = 1.2;
             this.rig!.swing?.();
-            if (dist < 2.6) this.events.onPlayerHit?.(this.spec.damage, pos);
+            if (dist < 2.6) this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
           }
         } else {
           // wander
@@ -533,6 +559,12 @@ export interface EnemyPoi {
 export interface EnemyLootHooks {
   /** fired once per rolled drop on the die() path, with the death position */
   onLoot: (drop: LootDrop, pos: THREE.Vector3) => void;
+  /**
+   * VENDOR-ECONOMY: fired once per kill with the seeded scrap payout (may
+   * be 0 — most kills pay nothing). Optional: when undefined the death
+   * path is byte-identical to before this wave.
+   */
+  onCurrency?: (amount: number, pos: THREE.Vector3) => void;
 }
 
 export interface EnemyManagerOpts {
@@ -563,6 +595,12 @@ export interface EnemyManagerOpts {
    * spawns). Blueprints wire () => prog.level.
    */
   playerLevel?: () => number;
+  /**
+   * UPGRADE LOOP (difficulty-modes): player-selected difficulty mode, read
+   * at spawn time. Default () => 'normal' (identity mode, byte-identical
+   * spawns). Blueprints wire () => engine.getDifficultyMode().
+   */
+  difficulty?: () => DifficultyId;
 }
 
 /** Spawns and manages the full enemy roster from spec. */
@@ -589,7 +627,18 @@ export class EnemyManager implements MapLocalEntitySystem {
    * Re-seeded on every spawnForMap; lazily primed from opts.lootSeed /
    * spec.meta.seed on the initial-build spawnAll path. Never engine.rng.
    */
+  /**
+   * ITEMS-EXPANSION: the per-map loot stream, Rng(mapSeed ^ LOOT_SALT).
+   * (see the items-expansion doc above)
+   */
   private lootRng: Rng | null = null;
+  /**
+   * VENDOR-ECONOMY: the per-map currency stream, Rng(mapSeed ^ LOOT_SALT ^
+   * CURRENCY_SALT) — a SEPARATE stream from the item loot so the
+   * items-expansion drop sequence (and its e2e replication) is untouched.
+   * Re-seeded on every spawnForMap; lazily primed like lootRng.
+   */
+  private currencyRng: Rng | null = null;
 
   constructor(
     private engine: Engine,
@@ -611,13 +660,25 @@ export class EnemyManager implements MapLocalEntitySystem {
     // the authored spec object is never mutated — the Enemy gets a scaled
     // copy. Band 0 (levels 1-5) is the identity band (mults 1.0, variance 0),
     // so fresh-player spawns are byte-identical to pre-scaling builds.
+    // WORLD-TIERS: engine.worldTier (pure function of (mapSeed, map depth),
+    // 1 on the origin map / single-map games) raises the level floor via
+    // effectiveSpawnLevel's tier term — tier 1 is the identity.
     const scaled = applyEnemyScaling(
       spec,
       seed,
       this.opts.playerLevel?.() ?? 1,
       mapDistanceFromSpec(this.engine.spec),
+      this.engine.worldTier ?? 1,
     );
-    const e = new Enemy(this.engine, scaled.spec, pos, this.projectiles, {
+    // UPGRADE LOOP (difficulty-modes): additive difficulty multiplier on
+    // top of the band scaling (normal = identity, byte-identical spawns).
+    // The authored spec object is never mutated — the Enemy gets a scaled
+    // copy. Deterministic: same (mapSeed, playerLevel, difficulty) ->
+    // identical encounters.
+    const diff = difficultyById(this.opts.difficulty?.() ?? 'normal');
+    const dScaled = applyDifficultyScaling(scaled.spec.health, scaled.spec.damage, scaled.xpMult, diff);
+    const finalSpec = { ...scaled.spec, health: dScaled.health, damage: dScaled.damage };
+    const e = new Enemy(this.engine, finalSpec, pos, this.projectiles, {
       onPlayerHit: this.events.onPlayerHit,
       // ANIMATION wave: the kill is counted at death; the roster entry is
       // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
@@ -628,12 +689,27 @@ export class EnemyManager implements MapLocalEntitySystem {
         // stream is Rng(mapSeed ^ LOOT_SALT) — reset on every spawnForMap
         // so each map's kill sequence rolls identically. A grant failure
         // must never break the death path (variants, score, XP run above).
+        // WORLD-TIERS: the map's tier shifts gear rarity weighting
+        // (tier 1 = authored tables, byte-identical).
         if (this.lootHooks) {
           if (!this.lootRng) {
             this.lootRng = buildLootRng(this.opts.lootSeed ?? this.engine.spec.meta.seed);
           }
-          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss)) {
+          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss, this.engine.worldTier ?? 1, this.difficultyDef().lootChanceMult)) {
             try { this.lootHooks.onLoot(drop, en.position); } catch { /* loot is cosmetic */ }
+          }
+          // VENDOR-ECONOMY: seeded scrap payout off the separate currency
+          // stream (never the item stream). Optional hook — undefined keeps
+          // the death path byte-identical. A grant failure must never break
+          // the death path.
+          if (this.lootHooks.onCurrency) {
+            if (!this.currencyRng) {
+              this.currencyRng = buildCurrencyRng(this.opts.lootSeed ?? this.engine.spec.meta.seed, LOOT_SALT);
+            }
+            const coins = rollCurrencyDrops(this.currencyRng, en.spec.kind, en.isBoss);
+            if (coins > 0) {
+              try { this.lootHooks.onCurrency(coins, en.position); } catch { /* currency is cosmetic */ }
+            }
           }
         }
       },
@@ -643,10 +719,31 @@ export class EnemyManager implements MapLocalEntitySystem {
     // the direct-render initial-build path is unaffected.
     e.instancer = this.instancer;
     // UPGRADE LOOP (enemy-scaling): per-enemy band metadata (see fields).
-    e.xpMult = scaled.xpMult;
+    // UPGRADE LOOP (difficulty-modes): the kill XP multiplier is the band
+    // xpMult times the difficulty enemyXpMult.
+    e.xpMult = dScaled.xpMult;
     e.scalingBand = scaled.bandIndex;
     this.enemies.push(e);
     return e;
+  }
+
+  /**
+   * UPGRADE LOOP (difficulty-modes): the live difficulty def for this
+   * manager's roster. Read per spawn/kill so a difficulty change applies
+   * to enemies spawned after the change (already-spawned enemies keep
+   * their spawn-time stats — deterministic per (seed, level, difficulty)).
+   */
+  private difficultyDef() {
+    return difficultyById(this.opts.difficulty?.() ?? 'normal');
+  }
+
+  /**
+   * UPGRADE LOOP (difficulty-modes): true when any live enemy is hostile
+   * (chasing or attacking the player). The difficulty selector uses this
+   * to refuse changes mid-combat.
+   */
+  anyHostile(): boolean {
+    return this.enemies.some((e) => e.alive && e.hostile);
   }
 
   spawnAll(specs: EnemySpec[], spawnFor: (kind: string, i: number, n: number) => THREE.Vector3) {

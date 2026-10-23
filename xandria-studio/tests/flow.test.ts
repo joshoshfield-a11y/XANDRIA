@@ -253,6 +253,10 @@ describe('HUD flow screens', () => {
     togglePause: vi.fn(),
     restart: vi.fn(),
     toTitle: vi.fn(),
+    // UPGRADE LOOP (difficulty-modes): the HUD settings panel reads these
+    inCombat: () => false,
+    getDifficultyMode: () => 'normal',
+    setDifficultyMode: vi.fn((_id: string) => ({ ok: true })),
   });
 
   const makeHud = () => {
@@ -307,7 +311,8 @@ describe('HUD flow screens', () => {
     btnWrap.children[2].__fire('click'); // SETTINGS
     const wrap = ov.children.find((c: any) => c.className === 'settings');
     // graphics wave 2 (E): volume, quality, PERF TIER, mute
-    expect(wrap.children).toHaveLength(4);
+    // UPGRADE LOOP (difficulty-modes): + DIFFICULTY row (index 3)
+    expect(wrap.children).toHaveLength(5);
     const vslider = wrap.children[0].children[1];
     vslider.value = '25';
     vslider.__fire('input');
@@ -319,7 +324,17 @@ describe('HUD flow screens', () => {
     tselect.value = 's25';
     tselect.__fire('change');
     expect(eng.settings.data.tier).toBe('s25');
-    const mcheck = wrap.children[3].children[1];
+    // DIFFICULTY row (index 3): three modes, change routes to setDifficultyMode
+    const dselect = wrap.children[3].children[1];
+    expect(dselect.tag).toBe('select');
+    expect(dselect.children.map((o: any) => o.value)).toEqual(['story', 'normal', 'hard']);
+    // mock DOM has no selected-option behavior: check the selected flag
+    expect(dselect.children.find((o: any) => o.value === 'normal').selected).toBe(true);
+    expect(dselect.disabled).toBeFalsy();
+    dselect.value = 'hard';
+    dselect.__fire('change');
+    expect(eng.setDifficultyMode).toHaveBeenCalledWith('hard');
+    const mcheck = wrap.children[4].children[1];
     mcheck.checked = true;
     mcheck.__fire('change');
     expect(eng.settings.data.muted).toBe(true);

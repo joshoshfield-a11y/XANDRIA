@@ -11,7 +11,7 @@ import {
   CHARACTER_PIVOTS,
   type GameSpec, type ObjectiveStage, type EnemySpec, type Weapon,
   type CharacterPivot, type SkinDef, type ItemSkinDef, type ItemDef,
-  type BiomeId, type FloraId, type PerfTier,
+  type BiomeId, type FloraId, type PerfTier, type Weather,
 } from '@spec';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -21,6 +21,7 @@ import { makeHumanoid, type CharacterRig } from '../../engine/gfx/Characters';
 import { BUILT_IN_SKINS, resolveSkinDef, applySkin } from '../../engine/gfx/Skins';
 import { mountSkinCreator } from '../creators/skinCreator';
 import { mountItemEditor, type LootSpot } from '../creators/itemEditor';
+import { deriveWorldTier } from '../../engine/world/worldTiers';
 import { renderItemsPanel, type ItemsPanelCtx } from '../itemsPanel';
 import type { ItemsCustom, QuestRewardOverride } from '../../spec/schema';
 import {
@@ -139,6 +140,7 @@ const css = `
 .xed-sw .xed-dot { width:14px; height:14px; border-radius:50%; border:1px solid #0006; }
 .xed-ns { font-size:10px; letter-spacing:.22em; color:#3fd8ff; margin-top:4px; }
 .xed-hint { font-size:11px; color:#5a6a85; line-height:1.5; }
+.xed-readout { font-size:12px; color:#a9bcd8; background:#0f1626; border:1px solid #1e2a45; border-radius:8px; padding:8px 10px; line-height:1.7; }
 .xed-asset { background:#0f1626; border:1px solid #1e2a45; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px; }
 .xed-asset > .xed-aname { font-size:12.5px; color:#a9bcd8; font-weight:600; }
 .xed-empty { color:#3a4a65; font-size:12.5px; text-align:center; padding:30px 10px; letter-spacing:.06em; line-height:1.8; }
@@ -762,6 +764,24 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       'Off = legacy single map with boundary walls. On = boundary walls become the energy field; crossing a map edge loads the neighboring map (deterministic per map coordinate). Designed for 8000m open-world maps; arena genres keep it off.',
     ));
 
+    // WORLD-TIERS (upgrade loop): the derived world-tier ladder for this
+    // spec's seed — read-only, computed from the shipped deriveWorldTier.
+    // Same (seed, depth) → identical tiers in the live game; the Studio
+    // shows the ladder so the map panel reflects the engine's difficulty
+    // geography. Only meaningful with portals on (single map = tier 1).
+    {
+      const ladder: string[] = [];
+      for (let d = 0; d <= 8; d += 2) {
+        ladder.push(`depth ${d} → T${deriveWorldTier(s.meta.seed, d)}`);
+      }
+      const lad = h(`<div class="xed-readout">${ladder.join(' · ')}</div>`);
+      host.appendChild(field(
+        'MAP — WORLD TIER LADDER',
+        lad,
+        'World tier per map depth (|mx|+|my|) for this seed. Higher tiers toughen enemy bands and weight loot toward rarer gear. Origin is always tier 1.',
+      ));
+    }
+
     host.appendChild(h(`<div class="xed-ns">PALETTE — APPLY ENVIRONMENT LOOK</div>`));
     const sw = h(`<div class="xed-swatches"></div>`);
     for (const env of ENVIRONMENTS) {
@@ -782,6 +802,24 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       `FOG DENSITY — ${fogTierLabel(s.theme.weather)} (${s.theme.weather})`,
       slider(w0, 0, 100, 1, (sp, v) => { sp.theme.weather = fogSliderToWeather(v); }, (v) => `${Math.round(v)}`),
       'Fog is engine-derived from weather: light = clear, medium = storm, heavy = fog.',
+    ));
+    // UPGRADE LOOP (weather-cycles): master toggle + forced weather for
+    // testing the seeded day/night + weather cycle.
+    host.appendChild(field(
+      'WEATHER CYCLES',
+      checkbox('Enabled', s.custom?.weatherCycles?.enabled ?? true, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.weatherCycles = { ...(sp.custom?.weatherCycles ?? {}), enabled: v };
+      }),
+      'Seeded day/night + weather cycle per map (night damage, rain fog, storm lightning). Off = the authored static look.',
+    ));
+    host.appendChild(field(
+      'FORCE WEATHER (test)',
+      select(['auto', 'clear', 'rain', 'fog', 'storm'], s.custom?.weatherCycles?.forced ?? 'auto', (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.weatherCycles = { ...(sp.custom?.weatherCycles ?? {}), forced: v as 'auto' | Weather };
+      }, true),
+      'Pin one weather for testing — the day/night phase cycle keeps running underneath.',
     ));
   }
 

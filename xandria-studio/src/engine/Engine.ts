@@ -31,6 +31,7 @@ import { MapEntityRegistry } from './world/MapEntities';
 import { InteractionRegistry } from './game/Interaction';
 import { PortalMapCache, TerrainMapContext } from './world/MapCache';
 import { ORIGIN, stampOriginMap, type MapCoord } from './world/MapGraph';
+import { deriveWorldTier } from './world/worldTiers';
 import { portalsEnabled } from '@spec';
 import { cameraFarForWorldSize, cameraNearForWorldSize, FAR_TERRAIN_MIN_SIZE } from './gfx/FarField';
 import { HUD, type RunStats } from './game/HUD';
@@ -40,20 +41,37 @@ import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
 import { TouchControls, isTouchDevice } from './game/TouchControls';
 import type { QuestManager } from './game/quests';
+import type { Wallet } from './game/economy';
+import type { AchievementManager } from './game/achievements';
 import { showIntroCard } from '../blueprints/campaign';
 import type { PlayerAvatar } from '../blueprints/common';
 import {
   applyLoadout,
-  dailySeed,
   loadProfile,
   purchaseModifier,
   recordRun,
   saveProfile,
   setLoadout,
-  todayLocalDate,
   MODIFIERS,
   type ProfileData,
 } from './game/Profile';
+/**
+ * UPGRADE LOOP (difficulty-modes): DifficultyId/isDifficultyId are a pure
+ * import — no cycle (difficulty.ts imports nothing).
+ */
+import { isDifficultyId, type DifficultyId } from './game/difficulty';
+import {
+  CHALLENGE_BOARD_DAYS,
+  ChallengeGoalTracker,
+  challengeBoard,
+  challengeProfile,
+  generateDailyChallenge,
+  goalLabel,
+  loadoutLabel,
+  recordDailyResult,
+  todayUtcDate,
+  type DailyChallenge,
+} from './game/dailyChallenges';
 
 export type EngineState = 'loading' | 'ready' | 'title' | 'playing' | 'paused' | 'won' | 'lost';
 
@@ -117,6 +135,8 @@ export class Engine {
   frame = 0;
   score = 0;
   elapsed = 0; // gameplay seconds (excludes pause)
+  /** cumulative player damage taken this run (daily-challenge scoring) */
+  damageTaken = 0;
 
   private updateHooks: Array<(dt: number) => void> = [];
   private last = 0;
@@ -161,11 +181,36 @@ export class Engine {
    */
   questManager: QuestManager | null = null;
   /**
+   * Vendor-economy wave: the player-scoped currency wallet. Set by the
+   * blueprint; null when the economy is off. Deliberately NOT part of
+   * portalEntities — the balance is player-scoped, not map-local, so it
+   * survives portal travel by construction (the snapshot carries it for
+   * rebuild paths). Read by PortalManager.portalParts.
+   */
+  wallet: Wallet | null = null;
+  /**
+   * Achievements wave: the player-scoped achievement manager. Set by the
+   * blueprint; null otherwise. Deliberately NOT part of portalEntities —
+   * unlocks and progress counters are player-scoped, not map-local, so
+   * they survive portal travel by construction (see
+   * engine/game/achievements.ts). Cross-run persistence rides the Profile.
+   */
+  achievementManager: AchievementManager | null = null;
+  /**
    * PORTALS-D: visited-map LRU (world/MapCache.ts). Wired by the portal
    * transition flow (workstream B/C). Null = portals disabled; transitions
    * throw rather than silently rebuild without a cache.
    */
   portalCache: PortalMapCache | null = null;
+  /**
+   * WORLD-TIERS (upgrade loop): the live map's world tier, 1..MAX_WORLD_TIER.
+   * A pure function of (mapSeed, map depth): deriveWorldTier(mapSeed,
+   * |mx| + |my|). Set at boot (origin) and on every portal arrival
+   * (swapTerrainForPortal / transitionToMapSeed), before map entities
+   * spawn — EnemyAI and loot read it at spawn/roll time. 1 on single-map
+   * games: the identity tier, byte-identical behavior to pre-tier builds.
+   */
+  worldTier = 1;
   /** hooks that survive restart() (runtime bootstrap); blueprint hooks are torn down */
   private persistentHooks = new Set<(dt: number) => void>();
   private pauseReason: 'menu' | 'modal' | null = null;
@@ -180,8 +225,16 @@ export class Engine {
   private streamTmp = new THREE.Vector3();
   /** the spec's original seed — daily runs temporarily override spec.meta.seed */
   private baseSeed: number;
-  /** YYYY-MM-DD while a daily-challenge run is active; null otherwise */
+  /** YYYY-MM-DD (UTC) while a daily-challenge run is active; null otherwise */
   private dailyDate: string | null = null;
+  /**
+   * The active daily challenge tuple (seed/loadout/goal for dailyDate).
+   * Null outside challenge runs. resetRun()/beginPlay() apply the challenge's
+   * FIXED loadout (not the profile's) while this is set.
+   */
+  private challenge: DailyChallenge | null = null;
+  /** goal tracker for the active challenge run; null outside challenge runs */
+  private challengeTracker: ChallengeGoalTracker | null = null;
   /** terrain construction options, kept so terrain can be rebuilt from a new seed (R2-M1) */
   private terrainOpts: { flatCenters?: THREE.Vector3[]; flatRadius?: number; noTerrain?: boolean };
   /** the seed the live terrain was generated from */
@@ -285,6 +338,12 @@ export class Engine {
     // and back" would land on a different map than the boot map. A spec that
     // already carries a portalMap (pre-stamped) is left alone.
     if (portalsEnabled(spec) && !spec.custom?.portalMap) stampOriginMap(spec, spec.meta.seed);
+    // WORLD-TIERS: derive the boot map's tier from the (possibly pre-stamped)
+    // portalMap identity. The origin map is always tier 1.
+    {
+      const pm = spec.custom?.portalMap;
+      this.applyWorldTier(spec.meta.seed, pm?.mx ?? 0, pm?.my ?? 0);
+    }
     if (!opts.noTerrain) {
       this.terrain = new Terrain(spec, this.physics, this.mats, this.scene, {
         flatCenters: opts.flatCenters,
@@ -351,6 +410,11 @@ export class Engine {
       this.hooks.tap('onWin', ({ stats }) => this.recordRunResult(true, stats));
       this.hooks.tap('onLose', ({ stats }) => this.recordRunResult(false, stats));
     }
+    // daily-challenge scoring: accumulate actual player damage taken. One
+    // integer add per hit, untapped in the normal flow — zero behavior change.
+    this.hooks.tap('onPlayerDamage', ({ amount }) => {
+      this.damageTaken += amount;
+    });
   }
 
   onUpdate(fn: (dt: number) => void) { this.updateHooks.push(fn); return () => { this.updateHooks = this.updateHooks.filter((f) => f !== fn); }; }
@@ -441,6 +505,8 @@ export class Engine {
     if (portal) {
       this.spec.custom = this.spec.custom ?? {};
       this.spec.custom.portalMap = { ...portal };
+      // WORLD-TIERS: keep the tier consistent on direct/external map jumps.
+      this.applyWorldTier(mapSeed, portal.mx, portal.my);
     }
     const prevFlat = this.terrainOpts.flatCenters;
     this.terrainOpts.flatCenters = [arrival.clone()];
@@ -492,10 +558,27 @@ export class Engine {
         worldSeed: this.spec.custom?.portalMap?.worldSeed ?? this.baseSeed,
       },
     };
+    // WORLD-TIERS: the arrival map's tier, derived BEFORE map entities
+    // spawn (PortalTransition.finish calls spawnForMap next) so enemy
+    // bands and loot rolls see the new map's tier. The HUD chip updates
+    // here too — event-driven, zero per-frame cost.
+    this.applyWorldTier(mapSeed, coord.mx, coord.my);
     this.syncFarTerrain();
     // keep the opt-in asset packs grounded on the live terrain (same
     // private-field pattern as syncTerrainToSeed)
     (this.assetBridge as unknown as { terrain?: Terrain }).terrain = next;
+  }
+
+  /**
+   * WORLD-TIERS (upgrade loop): derive + publish the live map's world tier.
+   * Called at boot, on every portal arrival, and on direct map jumps —
+   * always BEFORE map entities spawn for the new map. Drives the HUD tier
+   * chip (event-driven: no per-frame polling) and the onWorldTier hook.
+   */
+  private applyWorldTier(mapSeed: number, mx: number, my: number): void {
+    this.worldTier = deriveWorldTier(mapSeed, Math.abs(mx) + Math.abs(my));
+    this.hud.setTier(this.worldTier);
+    this.hooks.emit('onWorldTier', { tier: this.worldTier, coord: { mx, my } });
   }
 
   /**
@@ -596,6 +679,58 @@ export class Engine {
     this.postfx.resize(w, h);
   }
 
+  /**
+   * UPGRADE LOOP (difficulty-modes): the player's current difficulty mode,
+   * read from the profile (player-scoped, persisted). 'normal' when the
+   * profile is missing/corrupt. Blueprints wire this into EnemyManager via
+   * `difficulty: () => engine.getDifficultyMode()`.
+   */
+  getDifficultyMode(): DifficultyId {
+    try {
+      const d = loadProfile().difficulty;
+      return isDifficultyId(d) ? d : 'normal';
+    } catch {
+      return 'normal';
+    }
+  }
+
+  /**
+   * UPGRADE LOOP (difficulty-modes): true when any live enemy is hostile
+   * (chasing/attacking). Duck-typed off portalEntities so Engine never
+   * imports EnemyAI (EnemyAI already imports Engine — a value import would
+   * be a module cycle).
+   */
+  inCombat(): boolean {
+    try {
+      const sys = this.portalEntities.byId('enemies') as
+        | { anyHostile?: unknown }
+        | undefined;
+      return typeof sys?.anyHostile === 'function' && (sys.anyHostile as () => boolean)();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * UPGRADE LOOP (difficulty-modes): change the player's difficulty mode.
+   * Refused (ok: false) while any enemy is hostile — difficulty may only
+   * change outside combat. A change applies to enemies spawned after it;
+   * already-spawned enemies keep their spawn-time stats. Persisted to the
+   * profile immediately.
+   */
+  setDifficultyMode(id: DifficultyId): { ok: boolean; reason?: string } {
+    if (!isDifficultyId(id)) return { ok: false, reason: 'unknown difficulty' };
+    if (this.inCombat()) return { ok: false, reason: 'cannot change difficulty in combat' };
+    try {
+      const p = loadProfile();
+      p.difficulty = id;
+      saveProfile(p);
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: 'profile unavailable' };
+    }
+  }
+
   start() {
     if (this.started) return;
     this.started = true;
@@ -639,8 +774,9 @@ export class Engine {
     const profileLine = played > 0
       ? `${played} run${played === 1 ? '' : 's'} · ${won} won · best ${best.toLocaleString()}`
       : 'first run — good luck';
-    const today = todayLocalDate();
-    const dailyBest = profile.dailyBest[today] ?? null;
+    const today = todayUtcDate();
+    const challenge = generateDailyChallenge(today);
+    const dailyResult = profile.dailyResults[today] ?? null;
     const equipped = new Set(profile.loadout);
     this.hud.showTitle({
       name: this.spec.meta.name,
@@ -659,8 +795,12 @@ export class Engine {
       })),
       onToggleModifier: (id) => this.toggleModifier(id),
       onBuyModifier: (id) => this.buyModifier(id),
-      dailyLabel: `DAILY ${today}`,
-      dailyBest,
+      dailyLabel: dailyResult
+        ? `PLAYED — ${dailyResult.score.toLocaleString('en-US')} PTS`
+        : `DAILY ${today} — ${goalLabel(challenge.goal)}`,
+      dailyPlayed: !!dailyResult,
+      dailyChallengeLine: `${goalLabel(challenge.goal)} · ${loadoutLabel(challenge.loadout)}`,
+      dailyBoard: challengeBoard(profile, today),
       onDaily: () => this.startDailyRun(),
     });
   }
@@ -716,6 +856,9 @@ export class Engine {
   startRun() {
     if (this.state !== 'title') return;
     this.dailyDate = null;
+    this.challenge = null;
+    this.challengeTracker?.disarm();
+    this.challengeTracker = null;
     this.spec.meta.seed = this.baseSeed;
     // PORTALS (merge): a fresh run restarts at the origin map — re-stamp
     // before the terrain sync, then re-seed the LRU the sync cleared.
@@ -726,18 +869,30 @@ export class Engine {
   }
 
   /**
-   * Daily challenge: the seed is derived deterministically from the calendar
-   * date, so everyone gets the same run today. Local best tracked per day.
+   * Daily challenge: the day's tuple (seed / fixed loadout / goal) is
+   * generated deterministically from the UTC calendar date, so everyone
+   * gets the same run today. Local best + attempt history tracked per day.
    *
    * R2-M1: the seed must drive the WORLD, not just the spawns. The terrain is
    * rebuilt from the daily seed and the run itself is rebuilt too (via
    * resetRun), so attempt 1 and every in-place restart play the identical
    * world: same seed → same terrain + same spawns, every time.
+   *
+   * One attempt per UTC date per profile: when the profile already holds a
+   * completed result for the date, the button is locked and this is a no-op.
+   * The optional dateStr pins the challenge date (UTC YYYY-MM-DD) — used by
+   * tests/e2e for determinism checks; players always get todayUtcDate().
    */
-  startDailyRun() {
+  startDailyRun(dateStr: string = todayUtcDate()) {
     if (this.state !== 'title') return;
-    this.dailyDate = todayLocalDate();
-    this.spec.meta.seed = dailySeed(this.dailyDate);
+    if (!this.testMode && loadProfile().dailyResults[dateStr]) return; // attempt used
+    const challenge = generateDailyChallenge(dateStr);
+    this.dailyDate = dateStr;
+    this.challenge = challenge;
+    this.challengeTracker?.disarm();
+    this.challengeTracker = new ChallengeGoalTracker(this, challenge);
+    this.challengeTracker.arm();
+    this.spec.meta.seed = challenge.seed;
     // PORTALS (merge): the daily seed is the run's world seed — re-stamp the
     // origin from it before the terrain sync, then re-seed the LRU.
     this.reseedPortalOrigin(this.spec.meta.seed);
@@ -754,8 +909,9 @@ export class Engine {
     // cross-run progression: the equipped modifier loadout applies from the
     // very first run, not just after an in-place restart (M1). applyLoadout()
     // is idempotent (restores pristine base values before re-applying), so
-    // the resetRun() call below stays valid.
-    applyLoadout(this.spec, loadProfile());
+    // the resetRun() call below stays valid. A daily challenge run uses its
+    // FIXED challenge loadout instead (everyone plays the identical build).
+    applyLoadout(this.spec, this.challenge ? challengeProfile(this.challenge) : loadProfile());
     // R5-M1: the avatar snapshots loadout values at construction (boot), but
     // the player may have bought/equipped modifiers in the title shop after
     // that. Re-sync its construction-time copies now that the spec carries
@@ -775,6 +931,9 @@ export class Engine {
   toTitle() {
     // leave any daily run behind: the title background is always the base game
     this.dailyDate = null;
+    this.challenge = null;
+    this.challengeTracker?.disarm();
+    this.challengeTracker = null;
     this.spec.meta.seed = this.baseSeed;
     // PORTALS (merge): the title background is the origin map — re-stamp
     // before the terrain sync, then re-seed the LRU the sync cleared.
@@ -802,6 +961,23 @@ export class Engine {
         timeSeconds: this.elapsed,
         daily: this.dailyDate ?? undefined,
       });
+      // daily challenge: score the attempt (time, kills, damage taken).
+      // First completed attempt per date wins — later completions are kept
+      // out of dailyResults. The attempt is consumed either way: disarm the
+      // goal tracker.
+      if (this.dailyDate && this.challenge) {
+        recordDailyResult(p, this.dailyDate, {
+          score: Math.round(this.score),
+          kills: this.challengeTracker?.kills ?? stats.kills ?? 0,
+          timeSeconds: this.elapsed,
+          damageTaken: Math.round(this.damageTaken),
+          won,
+          goal: this.challenge.goal,
+          genre: this.spec.meta.genre,
+          seed: this.challenge.seed,
+        });
+        this.challengeTracker?.disarm();
+      }
       saveProfile(p);
     } catch {
       /* profile is best-effort — a storage failure must never break the game */
@@ -1046,6 +1222,7 @@ export class Engine {
     this.time = 0;
     this.elapsed = 0;
     this.score = 0;
+    this.damageTaken = 0;
     this.frame = 0;
     // Workstream E: a rebuilt run starts a fresh measurement window — the old
     // run's frame times must not leak into the new run's rolling variance.
@@ -1053,8 +1230,10 @@ export class Engine {
     this.pauseReason = null;
     this.last = performance.now();
     // cross-run progression: apply the equipped modifier loadout to this
-    // run's config (never to the seed — determinism is preserved)
-    applyLoadout(this.spec, loadProfile());
+    // run's config (never to the seed — determinism is preserved). A daily
+    // challenge run uses its FIXED challenge loadout instead (everyone
+    // plays the identical build).
+    applyLoadout(this.spec, this.challenge ? challengeProfile(this.challenge) : loadProfile());
     // rebuild the run from the same spec+seed
     const blueprint = this.runBuilder!(this);
     if (typeof window !== 'undefined') {

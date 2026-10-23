@@ -39,6 +39,8 @@ import type { PlayerAvatar } from '../../blueprints/common';
 /** Payloads delivered to each hook tap. */
 export interface HookPayloads {
   onKill: { enemy: Enemy };
+  /** the player took damage (amount actually subtracted from health) */
+  onPlayerDamage: { amount: number };
   onPickup: { pickup: Pickup };
   onStageComplete: { index: number; stage: ObjectiveStage };
   onPhase: { enemy: Enemy; phase: number };
@@ -46,6 +48,8 @@ export interface HookPayloads {
   onWin: { stats: Partial<RunStats> };
   onLose: { reason: string; stats: Partial<RunStats> };
   onTick: { dt: number; t: number };
+  /** WORLD-TIERS (upgrade loop): fired when the live map's world tier is (re)derived — boot, portal arrival, direct map jump. */
+  onWorldTier: { tier: number; coord: { mx: number; my: number } };
 }
 
 export type HookName = keyof HookPayloads;

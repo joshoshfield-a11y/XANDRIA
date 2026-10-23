@@ -86,6 +86,9 @@ export class PlayerAvatar {
     if (this.iframes > 0 || this.engine.state !== 'playing') return;
     this.health -= amount;
     this.iframes = 0.8;
+    // daily-challenge scoring: report actual damage taken on the hook bus.
+    // Additive — no behavior change; zero taps in the normal flow.
+    this.engine.hooks.emit('onPlayerDamage', { amount });
     this.engine.hud.damageFlash();
     this.engine.hud.setHealth(this.health / this.maxHealth);
     this.engine.audio.play('hurt');

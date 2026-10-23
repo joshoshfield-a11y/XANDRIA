@@ -53,6 +53,19 @@ export interface NpcManagerOpts {
   specs?: NpcSpec[];
   wanderRadius?: number;
   speed?: number;
+  /**
+   * vendor-economy wave: MapLocalEntitySystem id override (default
+   * 'npcs'). A second manager (the vendor roster) registers under its
+   * own id so portalEntities keeps both.
+   */
+  id?: string;
+  /**
+   * vendor-economy wave: roster stream salt, forwarded to
+   * spawnNpcsForMap (default NPC_SALT). The vendor roster uses
+   * VENDOR_SALT so its spawns/identities never collide with the
+   * villager roster on the same map.
+   */
+  salt?: number;
 }
 
 /** Salt for the POI-anchor stream — keeps it off the roster stream. */
@@ -65,13 +78,14 @@ function poiXZ(p: THREE.Vector3 | NpcPoi): { x: number; z: number; r: number } {
 }
 
 export class NpcManager implements MapLocalEntitySystem {
-  readonly id = 'npcs';
+  readonly id: string;
   private readonly opts: NpcManagerOpts;
   private readonly cache: NpcRigCache;
   private readonly instancer: NpcInstancer;
   private list: Npc[] = [];
 
   constructor(private readonly engine: Engine, opts: NpcManagerOpts = {}) {
+    this.id = opts.id ?? 'npcs';
     this.opts = opts;
     this.cache = NpcRigCache.for(engine);
     // Instancing pass: one InstancedMesh per (geometry, material-role)
@@ -103,6 +117,11 @@ export class NpcManager implements MapLocalEntitySystem {
       pois: anchors,
       wanderRadius: this.opts.wanderRadius,
       speed: this.opts.speed,
+      // vendor-economy wave: the vendor roster spawns off its own salted
+      // stream (VENDOR_SALT) — distinct positions/identities from the
+      // villager roster on the same map; undefined keeps the historical
+      // NPC_SALT stream byte-identical.
+      salt: this.opts.salt,
     });
     this.list = roster;
     for (const n of roster) this.instancer.register(n);
@@ -147,7 +166,9 @@ export class NpcManager implements MapLocalEntitySystem {
   private resolveAnchors(mapSeed: number): THREE.Vector3[] {
     const raw = this.opts.pois;
     if (!raw?.length) return [];
-    const rng = new Rng((mapSeed ^ NPC_SALT ^ POI_SALT) >>> 0);
+    // vendor-economy wave: salt the anchor stream like the roster stream
+    // (undefined = the historical NPC_SALT ^ POI_SALT, byte-identical).
+    const rng = new Rng((mapSeed ^ (this.opts.salt ?? NPC_SALT) ^ POI_SALT) >>> 0);
     return raw.map((p) => {
       const { x, z, r } = poiXZ(p);
       const a = rng.range(0, Math.PI * 2);

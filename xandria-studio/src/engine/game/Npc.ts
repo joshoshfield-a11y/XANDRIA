@@ -78,6 +78,14 @@ export interface SpawnNpcsOpts {
   count?: number;
   /** 0..1 scales the default count (default 1) */
   density?: number;
+  /**
+   * vendor-economy wave: roster stream salt (default NPC_SALT). The
+   * per-NPC seeds derive from (mapSeed ^ salt), so a salted roster gets
+   * distinct positions AND identities from the default roster on the
+   * same map — no name/palette collisions. Undefined keeps the
+   * historical (mapSeed ^ imul) seeds byte-identical.
+   */
+  salt?: number;
   /** roster specs, cycled across spawns */
   specs?: NpcSpec[];
   /** points of interest to spawn near (empty = spawn at origin cluster) */
@@ -99,6 +107,15 @@ export class Npc {
   readonly greeting: string;
   readonly palette: NpcPalette;
   readonly role: string;
+  /** vendor-economy wave: vendor id from NpcSpec.vendorId (undefined for villagers) */
+  readonly vendorId: string | undefined;
+  /**
+   * vendor-economy wave: the seeded spawn seed this NPC was built from.
+   * Vendors derive their per-map shop stock from it
+   * (Rng(spawnSeed ^ VENDOR_SALT ^ hash(vendorId))) — same mapSeed +
+   * roster index -> identical stock, no blueprint seed plumbing.
+   */
+  readonly spawnSeed: number;
   readonly home: THREE.Vector3;
   readonly interactable: Interactable;
   private rng: Rng;
@@ -136,6 +153,8 @@ export class Npc {
     this.greeting = generateNpcGreeting(this.rng);
     this.palette = buildPalette(this.rng, spec);
     this.role = spec.role ?? 'villager';
+    this.vendorId = spec.vendorId;
+    this.spawnSeed = seed >>> 0;
     this.wanderRadius = spec.wanderRadius ?? 6;
     this.speed = spec.speed ?? 1.2;
     this.animT = this.rng.range(0, 10);
@@ -199,7 +218,8 @@ export class Npc {
       position: this.home.clone(),
       radius: 3,
       enabled: true,
-      prompt: `Talk to ${this.name}`,
+      // vendor-economy wave: vendors trade, villagers talk
+      prompt: this.vendorId ? `Trade with ${this.name}` : `Talk to ${this.name}`,
     };
     this.pickWanderTarget();
     this.state = 'idle';
@@ -374,7 +394,14 @@ export class Npc {
  * @returns the spawned NPCs (caller owns them and must dispose())
  */
 export function spawnNpcsForMap(engine: Engine, mapSeed: number, opts: SpawnNpcsOpts = {}): Npc[] {
-  const rng = new Rng((mapSeed ^ NPC_SALT) >>> 0);
+  // vendor-economy wave: a salted roster gets its own stream AND its own
+  // per-NPC identity seeds (distinct positions AND identities from the
+  // default roster on the same map — no name/palette collisions). The
+  // unsalted path is byte-identical to the historical behavior.
+  const salted = opts.salt !== undefined;
+  const streamSeed = salted ? ((mapSeed ^ opts.salt!) >>> 0) : ((mapSeed ^ NPC_SALT) >>> 0);
+  const idBase = salted ? ((mapSeed ^ opts.salt!) >>> 0) : (mapSeed >>> 0);
+  const rng = new Rng(streamSeed);
   const count = opts.count ?? Math.max(1, Math.round(DEFAULT_NPC_COUNT * (opts.density ?? 1)));
   const specs = opts.specs?.length ? opts.specs : [{ role: 'villager' } as NpcSpec];
   const pois = opts.pois?.length ? opts.pois : [new THREE.Vector3(0, 0, 0)];
@@ -386,7 +413,7 @@ export function spawnNpcsForMap(engine: Engine, mapSeed: number, opts: SpawnNpcs
     const d = 2 + rng.range(0, 10);
     const y = engine.terrain ? (engine.terrain.heightAt(poi.x, poi.z) ?? poi.y) : poi.y;
     const spawn = new THREE.Vector3(poi.x + Math.cos(a) * d, y, poi.z + Math.sin(a) * d);
-    const seed = (mapSeed ^ Math.imul(i + 1, 0x9e3779b9)) >>> 0;
+    const seed = (idBase ^ Math.imul(i + 1, 0x9e3779b9)) >>> 0;
     out.push(new Npc(engine, spec, spawn, seed));
   }
   return out;

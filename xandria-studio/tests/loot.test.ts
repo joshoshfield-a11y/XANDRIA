@@ -53,6 +53,7 @@ import {
   lootTier2OutputDefs,
   type LootDrop,
 } from '../src/engine/game/loot';
+import { setGearDefs } from '../src/engine/game/setBonuses';
 
 const KINDS = ['walker', 'brute', 'drone', 'flyer', 'turret'];
 
@@ -205,7 +206,10 @@ describe('rarity ladder', () => {
   });
 
   it('every dropped id has a registered def', () => {
-    const all = lootItemDefs();
+    // Gear sets wave: set pieces roll off the same tables — the def
+    // registry must include them (blueprints merge them via
+    // ensureSetItemDefs).
+    const all = { ...lootItemDefs(), ...setGearDefs() };
     for (const kind of KINDS) {
       const rng = buildLootRng(31337);
       for (let i = 0; i < 300; i++) {

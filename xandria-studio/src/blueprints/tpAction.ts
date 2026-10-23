@@ -53,9 +53,26 @@ import { QuestTracker } from '../engine/ui/QuestTracker';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
+import { ensureSetItemDefs } from '../engine/game/setBonuses';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
+import {
+  Wallet,
+  CURRENCY_NAME,
+  DEFAULT_SELL_MULT,
+  VENDOR_SALT,
+  resolveVendorDefs,
+  buildVendorNpcSpecs,
+} from '../engine/game/economy';
+import { ShopPanel } from '../engine/ui/ShopPanel';
+import { DynamicEventManager, EventInteractionSession, EVENT_DEFS, EVENT_SALT, planDynamicEvents, buildMerchantStock, resolveEventsEnabled } from '../engine/game/dynamicEvents';
+import { TradePanel } from '../engine/ui/TradePanel';
+import { AchievementsPanel } from '../engine/ui/AchievementsPanel';
+import { AchievementManager } from '../engine/game/achievements';
+import { BestiaryPanel } from '../engine/ui/BestiaryPanel';
+import { WeatherCycleManager } from '../engine/game/weatherCycles';
 import { resolveGatheringDensity } from '../engine/game/crafting';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
@@ -87,6 +104,19 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const skills = new SkillSystem(engine, {
     onRankUp: (def, rank) => {
       engine.hud.toast(`${def.name} rank ${rank}!`);
+    },
+  });
+  // bestiary wave: enemy codex kill tracker. Blueprint-owned like skills —
+  // rides the live object across portal transitions (NOT a portal entity).
+  // Taps the existing onKill hook (observe-only); no enemy contract change.
+  // Panel is assigned below (after skillsPanel) so unlock toasts refresh it.
+  let bestiaryPanel: BestiaryPanel | null = null;
+  const bestiary = new BestiaryManager(engine, {
+    onUnlocked: (def, tier, kills) => {
+      engine.hud.toast(
+        `\u{1F4D6} Bestiary: ${def.name} \u2014 ${BESTIARY_TIER_NAMES[tier]} (${kills} kill${kills === 1 ? '' : 's'})`,
+      );
+      bestiaryPanel?.refresh();
     },
   });
   let notifyLevelUp: (gain?: LevelGain) => void = () => {};
@@ -130,6 +160,29 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   });
   engine.portalEntities.register(npcManager);
   npcManager.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  // vendor-economy wave: the player-scoped currency wallet (survives
+  // portals by construction — never in portalEntities; the PortalState
+  // snapshot carries the balance for rebuild paths). engine.wallet exposes
+  // it to PortalManager.portalParts().
+  const wallet = new Wallet();
+  engine.wallet = wallet;
+  wallet.onChange = () => engine.hud.setCurrency(wallet.balance);
+  // vendor-economy wave: merchant NPCs get their OWN map-local roster
+  // (id 'vendors', VENDOR_SALT stream) — one NpcManager each, so the
+  // villager roster's seeded spawns stay byte-identical to before this
+  // wave. Vendors register in engine.npcInteractions like any
+  // interactable; the QuestTalkSession dispatches their [E] activation
+  // to the shop panel instead of the quest dialogue.
+  const vendorDefs = resolveVendorDefs(spec);
+  const vendorManager = new NpcManager(engine, {
+    id: 'vendors',
+    salt: VENDOR_SALT,
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    specs: buildVendorNpcSpecs(vendorDefs),
+    count: vendorDefs.length,
+  });
+  engine.portalEntities.register(vendorManager);
+  vendorManager.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
 
   scatterAmberGlow(scene, rng.fork(0xe9a1), {
     mats: engine.mats,
@@ -148,13 +201,19 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // --- combat systems
   const projectiles = new Projectiles(engine, spec.theme.palette.accent);
   let avatar: PlayerAvatar;
+  // UPGRADE LOOP (weather-cycles): the manager is constructed later (it
+  // needs the avatar + camera rig), but the enemy onPlayerHit closure below
+  // reads it lazily — hoisted so night damage can apply additively.
+  let weather: WeatherCycleManager | null = null;
 
   // FIX 5: combat music intensity — pulsed up by combat events, decays to baseline
   let combatT = 0;
   const combatPulse = () => { combatT = 1; };
 
   const enemies = new EnemyManager(engine, projectiles, {
-    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    // UPGRADE LOOP (weather-cycles): night makes the heavy kinds hit
+    // harder — additive multiplier read lazily off the weather manager.
+    onPlayerHit: (dmg, from, kind) => { avatar.damage(dmg * (weather?.enemyDamageMult(kind) ?? 1), from); camRig.shake(0.55); combatPulse(); },
     onDeath: (e) => {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
@@ -183,6 +242,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // scales every spec count on the portal-arrival path.
     // UPGRADE LOOP (enemy-scaling): live player level feeds the spawn stat band.
     playerLevel: () => prog.level,
+    // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
+    difficulty: () => engine.getDifficultyMode(),
+
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
   engine.portalEntities.register(enemies);
@@ -202,7 +264,15 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // outputs). Merges only when custom.items exists — never activates the
   // item system on its own (preserves wireItems' null contract).
   ensureLootItemDefs(spec);
-  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
+  // Gear sets wave: set-piece item defs (additive, idempotent).
+  ensureSetItemDefs(spec);
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar, {
+    // inventory-qol wave: sell-junk hooks ride the vendor-economy wallet
+    // (DEFAULT_SELL_MULT — the same rate the shop panel pays). The wallet
+    // is player-scoped, so sell credits land in the same balance the shop
+    // and kill-drops use.
+    sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
+  });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
   // walks over to collect. Independent of the CRAFTING toggle (loot is an
@@ -214,6 +284,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         kit.itemWorld.drop(drop.itemId, pos.clone().add(new THREE.Vector3(0, 0.8, 0)), undefined, drop.count);
         const def = spec.custom?.items?.defs?.[drop.itemId];
         engine.hud.toast(`Loot: ${drop.count > 1 ? `${drop.count}\u00d7 ` : ''}${def?.name ?? drop.itemId}`);
+      },
+      // vendor-economy wave: seeded scrap payouts ride the separate
+      // currency stream (EnemyAI); the wallet is player-scoped, so kills
+      // bank scrap that survives portal travel.
+      onCurrency: (amount, _pos) => {
+        wallet.add(amount);
+        engine.hud.toast(`+${amount} ${CURRENCY_NAME}`);
       },
     };
   }
@@ -270,6 +347,26 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       })
     : null;
   engine.questManager = quests;
+  // achievements wave: player-scoped achievement manager (observe-only).
+  // Built here so the station session's onCrafted chain below can feed it
+  // crafts; the codex panel is constructed after the modal sessions.
+  const achievements = new AchievementManager({
+    hooks: engine.hooks,
+    toast: (m, s) => engine.hud.toast(m, s),
+    progression: () => prog,
+    quests: () => quests,
+    portalHooks: () => engine.portalManager?.hooks ?? null,
+    avatarPos: () => engine.portalsPlayerAvatar?.ctrl.position ?? null,
+    addScore: (n) => {
+      engine.score += n;
+      engine.hud.setScore(engine.score);
+    },
+    // progression-curve: reward XP that levels the player opens the
+    // level-up flow, like every other XP source (lazy — notifyLevelUp is
+    // assigned below, same as QuestManager's onLevelUp).
+    onLevelUp: (gain) => notifyLevelUp(gain),
+  });
+  engine.achievementManager = achievements;
   const gathering = new GatheringManager(engine, {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
     inventory: itemKit?.inventory ?? null,
@@ -317,6 +414,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
           grantCraftXp(prog, notifyLevelUp);
           // quest wave: crafts feed craft objectives
           quests?.onCraft(recipe.id);
+          // achievements wave: crafts feed craft achievements (observe-only)
+          achievements.onCraft(recipe);
         },
         toast: (m) => engine.hud.toast(m),
         // quest wave: the quest dialogue owns E while open so the panel
@@ -324,16 +423,91 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         isModalOpen: () => talkSession?.isDialogueOpen ?? false,
       })
     : null;
+  // vendor-economy wave: the shop panel (buy/sell tabs, seeded per-map
+  // stock). Vendors are NPCs in the villager roster — the QuestTalkSession
+  // dispatches their [E] activation here instead of the quest dialogue
+  // (see the openVendor opt below). The panel never opens while the
+  // crafting panel or a dialogue owns input, and vice versa (isModalOpen
+  // chains on both sides).
+  const shopPanel = new ShopPanel({
+    container: engine.container,
+    inventory: () => itemKit?.inventory ?? null,
+    wallet: () => wallet,
+    defs: () => spec.custom?.items?.defs ?? {},
+    vendorDefs: () => vendorDefs,
+    toast: (m) => engine.hud.toast(m),
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+  });
+  // keep an open shop live-synced with wallet/inventory changes
+  wallet.onChange = () => {
+    engine.hud.setCurrency(wallet.balance);
+    shopPanel.refresh();
+  };
+  const invForShop = itemKit?.inventory ?? null;
+  if (invForShop) {
+    const prevOnChange = invForShop.onChange;
+    invForShop.onChange = () => { prevOnChange?.(); shopPanel.refresh(); };
+  }
   // quest wave: the [E] Talk prompt + quest dialogue for villagers. The
   // session is manager-based (per-frame refresh), so portal respawns need
   // no special handling; it stamps requires/produces onto the NPC
   // interactables (see engine/game/questTalk.ts). Assigned (not declared)
   // here — the binding was hoisted above the QuestManager construction.
+  // vendor-economy wave: openVendor routes vendor NPCs ([E] "Trade with")
+  // to the shop panel; villagers keep the quest dialogue. The session
+  // covers both rosters (villagers + vendors) with one prompt pill.
   talkSession = questsEnabled && quests
-    ? new QuestTalkSession(engine, npcManager, quests)
+    ? new QuestTalkSession(engine, [npcManager, vendorManager], quests, {
+        openVendor: (npc) => shopPanel.openForVendor({
+          vendorId: npc.vendorId!,
+          spawnSeed: npc.spawnSeed,
+          keeperName: npc.name,
+        }),
+      })
     : null;
   const gatheringSession = new GatheringInteractionSession(engine, gathering, {
-    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false) || shopPanel.isOpen,
+  });
+  // dynamic-events wave: seeded world events (ambushes, wandering
+  // merchants, supply caches, elite patrols), map-local lifecycle via
+  // engine.portalEntities ({ id: 'events' }) so portal transitions
+  // despawn/respawn the event roster deterministically per map seed —
+  // the same contract as the gathering nodes.
+  const tradePanel = new TradePanel(engine.container);
+  const events = new DynamicEventManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    enemyManager: enemies,
+    lootHooks: enemies.lootHooks,
+    inventory: itemKit?.inventory ?? null,
+    defs: () => spec.custom?.items?.defs ?? {},
+    toast: (m) => engine.hud.toast(m),
+    getPlayerPos: () => avatar.ctrl.position,
+  });
+  engine.portalEntities.register(events);
+  events.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  const eventSession = new EventInteractionSession(engine, events, {
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false)
+      || (talkSession?.isDialogueOpen ?? false) || tradePanel.isOpen,
+    openTrade: (defId, index) => {
+      const ev = events.events.find((e) => e.plan.defId === defId && e.plan.index === index);
+      if (!ev?.merchant || !ev.def.merchant || !itemKit?.inventory) return;
+      const inv = itemKit.inventory;
+      const defs = spec.custom?.items?.defs ?? {};
+      const good = defs[ev.def.merchant.tradeGoodId];
+      tradePanel.show(
+        ev.merchant.name, defId, index, ev.stock,
+        ev.def.merchant.tradeGoodId, good?.name ?? ev.def.merchant.tradeGoodId,
+        defs,
+        {
+          count: (id) => inv.count(id),
+          listItems: () => [...new Set(inv.getBackpack().filter((s) => s).map((s) => s!.itemId))],
+        },
+        {
+          onBuy: (itemId) => events.merchantBuy(defId, index, itemId),
+          onSell: (itemId) => events.merchantSell(defId, index, itemId),
+        },
+      );
+    },
   });
   // skills wave: the skills panel (K key / SKILLS chip toggle). Never
   // opens while the crafting panel owns input. Not built when skills
@@ -350,6 +524,23 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         isModalOpen: () => stationSession?.isPanelOpen ?? false,
       })
     : null;
+  // achievements wave: the achievement codex panel (J key / trophy chip).
+  // Never opens while the crafting panel (or quest dialogue, where one
+  // exists) owns input.
+  const achievementsPanel = new AchievementsPanel({
+    container: engine.container,
+    achievements: () => achievements,
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+  });
+  // bestiary wave: the codex panel (B key / BESTIARY chip toggle). Never
+  // opens while the crafting panel or the skills panel owns input.
+  bestiaryPanel = new BestiaryPanel({
+    container: engine.container,
+    bestiary: () => bestiary,
+    defs: () => spec.custom?.items?.defs ?? {},
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+    otherOpen: () => skillsPanel?.isOpen ?? false,
+  });
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
@@ -469,6 +660,20 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const camRig = makeCameraRig(spec.player.camera, engine.camera, engine.input, (x, z) => engine.terrain.heightAt(x, z),
     { physics: engine.physics, skipBody: avatar.ctrl.body });
 
+  // UPGRADE LOOP (weather-cycles): seeded day/night + weather cycles with
+  // additive gameplay hooks (night damage, rain fog, storm lightning).
+  // Map-local lifecycle like the other ambient systems: despawned on portal
+  // departure (sky baseline restored), rebuilt from the derived map seed on
+  // arrival. Constructed here (after avatar + camRig) — the enemies'
+  // onPlayerHit closure above reads it lazily.
+  weather = new WeatherCycleManager(engine, spec, {
+    playerPos: () => avatar.ctrl.position,
+    damagePlayer: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    toast: (m) => engine.hud.toast(m),
+  });
+  engine.portalEntities.register(weather);
+  weather.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+
   // --- boss aura
   const bossAura = spec.objective.type === 'boss'
     ? new THREE.PointLight(new THREE.Color(spec.theme.palette.accent), 2, 30)
@@ -485,9 +690,17 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     avatar.update(dt, t);
     itemKit?.update(dt);
     gatheringSession.update(dt); // crafting wave (B): [E] Harvest prompt + registration refresh
+    eventSession.update(); // dynamic-events wave: [E] Open cache / Trade prompt
     stationSession?.update(dt); // crafting wave (C): [E] Use prompt + crafting panel
     talkSession?.update(dt); // quest wave: [E] Talk prompt + quest dialogue + requires/produces refresh
     quests?.update(dt); // quest wave: explore objectives read the portal transition counter
+    // vendor-economy wave: shop stock is map-local (seeded per map), so a
+    // portal arrival ALWAYS closes the shop — unconditional (not
+    // order-dependent on the vendor roster respawn), mirroring the
+    // QuestTalkSession dialogue-close rule for departed NPCs.
+    if (shopPanel.isOpen) {
+      shopPanel.hide();
+    }
 
     // attack input (melee damage scales with the damage upgrade multiplier)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
@@ -514,8 +727,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     inst.beginFrame(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
+    vendorManager.update(dt); // vendor-economy wave: merchants tick (same instancer frame)
     gathering.update(dt); // crafting wave (B): static node submits into the shared instancer frame
     stations.update(dt); // crafting wave (C): static station submits into the shared instancer frame
+    events.update(dt); // dynamic-events wave: merchant/cache submits into the shared instancer frame
     inst.endFrame();
     variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
@@ -561,10 +776,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // boss-fights wave: arena tether + telegraphed attacks + boss bar
     // (the encounter no-ops when the spec's boss flag is off)
     bosses.update(dt, avatar.ctrl.position);
+    // UPGRADE LOOP (weather-cycles): advance the cycle clock (lights, fog,
+    // particles, lightning). Owns the sky blend while active.
+    weather?.update(dt);
 
     // camera
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, npcs: npcManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather };
 }

@@ -50,6 +50,17 @@ import {
   mapDistanceFromSpec,
   applyEnemyScaling,
 } from '../engine/game/enemyScaling';
+/**
+ * UPGRADE LOOP (difficulty-modes): pure difficulty functions for the e2e
+ * table assertions (same shipped code the spawn path uses).
+ */
+import {
+  DIFFICULTY_TABLE,
+  DIFFICULTY_IDS,
+  difficultyById,
+  isDifficultyId,
+  applyDifficultyScaling,
+} from '../engine/game/difficulty';
 import {
   GatheringManager,
   GatheringInteractionSession,
@@ -85,6 +96,33 @@ import {
   ensureLootItemDefs,
   lootItemDefs,
 } from '../engine/game/loot';
+import {
+  VENDOR_SALT,
+  CURRENCY_SALT,
+  CURRENCY_NAME,
+  DEFAULT_BUY_MULT,
+  DEFAULT_SELL_MULT,
+  VENDOR_CATALOG,
+  Wallet,
+  resolveVendorDefs,
+  buildVendorNpcSpecs,
+  buildVendorStock,
+  unitSellPrice,
+  isSellable,
+  hashStr32,
+  buildCurrencyRng,
+  rollCurrencyDrops,
+} from '../engine/game/economy';
+import {
+  GEAR_SETS,
+  SET_PIECE_IDS,
+  SET_DROP_ADDONS,
+  SET_CATALOG_RECIPES,
+  setGearDefs,
+  computeSetBonuses,
+  buildSetUiReport,
+  ensureSetItemDefs,
+} from '../engine/game/setBonuses';
 import {
   QuestManager,
   buildQuestPool,
@@ -127,6 +165,34 @@ import {
   resolveSkillsXpMultiplier,
 } from '../engine/game/skills';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
+import * as THREE from 'three';
+import {
+  deriveWorldTier,
+  MAX_WORLD_TIER,
+  TIER_SALT,
+  clampTier,
+} from '../engine/world/worldTiers';
+import { deriveMapSeed, type MapCoord } from '../engine/world/MapGraph';
+import { PortalTransition } from '../engine/world/PortalState';
+import {
+  EVENT_DEFS,
+  EVENT_SALT,
+  planDynamicEvents,
+  buildMerchantStock,
+  resolveEventsEnabled,
+  DynamicEventManager,
+  EventInteractionSession,
+} from '../engine/game/dynamicEvents';
+import { TradePanel } from '../engine/ui/TradePanel';
+import {
+  WEATHER_SALT,
+  WEATHER_TUNING,
+  planWeatherCycle,
+  segmentAt,
+  resolveWeatherCyclesEnabled,
+  resolveForcedWeather,
+  WeatherCycleManager,
+} from '../engine/game/weatherCycles';
 
 declare global {
   interface Window {
@@ -289,6 +355,11 @@ function boot() {
   // upholds this for rebuilds; this upholds it for the first build.
   // applyLoadout is idempotent (restores pristine base values first).
   applyLoadout(spec, loadProfile());
+  // UPGRADE LOOP (weather-cycles): the static authored weather is the
+  // particle default — set BEFORE the blueprint builds, so a blueprint with
+  // a weather-cycle manager (tpAction) overrides it with the cycle's opening
+  // segment on spawnForMap instead of being stomped by this line.
+  engine.particles.setWeather(spec.theme.weather, spec.meta.seed, engine.effectiveQuality(), spec.meta.genre);
   const blueprint = build(engine, spec);
   // Preserve the pre-boot modding API when publishing the booted state.
   window.__XANDRIA__ = { ...window.__XANDRIA__, engine, spec, blueprint, errors: window.__XANDRIA_ERRORS };
@@ -334,6 +405,17 @@ function boot() {
         bandIndexForLevel,
         mapDistanceFromSpec,
         applyEnemyScaling,
+      },
+      // UPGRADE LOOP (difficulty-modes): pure difficulty table + apply fn
+      // for the e2e per-table stat assertions (same shipped code the spawn
+      // path uses). Live engine.getDifficultyMode()/setDifficultyMode()
+      // are methods on X.engine.
+      difficulty: {
+        DIFFICULTY_TABLE,
+        DIFFICULTY_IDS,
+        difficultyById,
+        isDifficultyId,
+        applyDifficultyScaling,
       },
       /** Test seam: submit never-ticked enemies once (instances persist). */
       submitStaticEnemies: (enemies: Enemy[]) => {
@@ -443,14 +525,91 @@ function boot() {
       /** Test seam: the live player inventory. */
       liveInventory: (): {
         count: (id: string) => number;
+        add: (id: string, count?: number) => number;
         equip: (id: string) => unknown;
+        unequip: (slot: string) => boolean;
         getEquipped: (slot: string) => string | null;
+        equippedStats: () => Record<string, number>;
+        setBonusStats: () => Record<string, number>;
+        effectiveStats: () => Record<string, number>;
       } | null =>
         (blueprint as { itemKit?: { inventory?: {
           count: (id: string) => number;
+          add: (id: string, count?: number) => number;
           equip: (id: string) => unknown;
+          unequip: (slot: string) => boolean;
           getEquipped: (slot: string) => string | null;
+          equippedStats: () => Record<string, number>;
+          setBonusStats: () => Record<string, number>;
+          effectiveStats: () => Record<string, number>;
         } } | null }).itemKit?.inventory ?? null,
+      /** Test seam: the live inventory HUD (inventory-qol wave). */
+      liveInventoryHud: (): {
+        open: () => void;
+        close: () => void;
+        isOpen: () => boolean;
+      } | null =>
+        (blueprint as { itemKit?: { hud?: {
+          open: () => void;
+          close: () => void;
+          isOpen: () => boolean;
+        } } | null }).itemKit?.hud ?? null,
+    };
+    // Vendor-economy wave: test-mode seam for the economy e2e harness —
+    // salts, catalog, pure builders, the Wallet class, and the live
+    // blueprint handles (wallet, NPC manager, shop panel).
+    (window.__XANDRIA__ as Record<string, unknown>).economyTest = {
+      VENDOR_SALT,
+      CURRENCY_SALT,
+      CURRENCY_NAME,
+      DEFAULT_BUY_MULT,
+      DEFAULT_SELL_MULT,
+      VENDOR_CATALOG,
+      Wallet,
+      resolveVendorDefs,
+      buildVendorNpcSpecs,
+      buildVendorStock,
+      unitSellPrice,
+      isSellable,
+      hashStr32,
+      buildCurrencyRng,
+      rollCurrencyDrops,
+      /** Test seam: the live player wallet from the blueprint build. */
+      liveWallet: (): Wallet | null =>
+        (blueprint as { wallet?: Wallet }).wallet ?? null,
+      /** Test seam: the live vendor manager (owns the merchant roster). */
+      liveNpcManager: (): { npcs: readonly { vendorId?: string; spawnSeed: number; name: string; interactable: { id: string } }[] } | null =>
+        (blueprint as { vendors?: { npcs: readonly { vendorId?: string; spawnSeed: number; name: string; interactable: { id: string } }[] } }).vendors ?? null,
+      /** Test seam: the live shop panel. */
+      liveShopPanel: (): {
+        isOpen: boolean;
+        openForVendor: (v: { vendorId: string; spawnSeed: number; keeperName: string }) => boolean;
+        stockFor: (vendorId: string, spawnSeed: number) => { itemId: string; price: number; stock: number }[];
+        buy: (line: { itemId: string; price: number; stock: number }) => void;
+        sell: (itemId: string, unitPrice: number) => void;
+        hide: () => void;
+      } | null =>
+        (blueprint as { shopPanel?: {
+          isOpen: boolean;
+          openForVendor: (v: { vendorId: string; spawnSeed: number; keeperName: string }) => boolean;
+          stockFor: (vendorId: string, spawnSeed: number) => { itemId: string; price: number; stock: number }[];
+          buy: (line: { itemId: string; price: number; stock: number }) => void;
+          sell: (itemId: string, unitPrice: number) => void;
+          hide: () => void;
+        } }).shopPanel ?? null,
+    };
+    // Gear sets wave: test-mode seam for the set-bonus e2e + unit
+    // harnesses — the tuning table, def builders, the pure compute
+    // function, the additive drop tables, and the UI report builder.
+    (window.__XANDRIA__ as Record<string, unknown>).setTest = {
+      GEAR_SETS,
+      SET_PIECE_IDS,
+      SET_DROP_ADDONS,
+      SET_CATALOG_RECIPES,
+      setGearDefs,
+      computeSetBonuses,
+      buildSetUiReport,
+      ensureSetItemDefs,
     };
     // Quest wave: test-mode seam for the quest e2e harness — the pool
     // builder, salts, manager class and the live blueprint handles.
@@ -539,6 +698,74 @@ function boot() {
       livePanel: (): SkillsPanel | null =>
         (blueprint as { skillsPanel?: SkillsPanel | null }).skillsPanel ?? null,
     };
+    // WORLD-TIERS (upgrade loop): test-mode seam for the tier e2e — the
+    // pure derivation, the shipped constants, and a production-path
+    // arrival driver. arriveViaTransition runs the REAL PortalTransition
+    // (begin -> finish) the portal flow uses, minus the overlay/player
+    // placement half of beginTransition, which is tier-irrelevant.
+    (window.__XANDRIA__ as Record<string, unknown>).worldTierTest = {
+      deriveWorldTier,
+      MAX_WORLD_TIER,
+      TIER_SALT,
+      clampTier,
+      deriveMapSeed,
+      tierForCoord: (worldSeed: number, mx: number, my: number): number =>
+        deriveWorldTier(deriveMapSeed(worldSeed, mx, my), Math.abs(mx) + Math.abs(my)),
+      /** Test seam: run the full PortalTransition.begin/finish for a coordinate. */
+      arriveViaTransition: (mx: number, my: number): { tier: number; mapSeed: number } => {
+        const pm = engine.portalManager;
+        if (!pm) throw new Error('[worldTierTest] portals not enabled for this spec');
+        const worldSeed = pm.getWorldSeed();
+        const mapSeed = deriveMapSeed(worldSeed, mx, my);
+        const transition = new PortalTransition(engine);
+        const parts = {
+          avatar: engine.portalsPlayerAvatar,
+          inventory: null, progression: null, quests: null, skills: null,
+          getBuff: () => null, setBuff: () => {},
+        };
+        const snap = transition.begin(parts as never);
+        const coord: MapCoord = { mx, my };
+        transition.finish(parts as never, snap, coord, mapSeed, new THREE.Vector3(0, 0, 0),
+          (c, ms) => engine.buildTerrainForPortal(c, ms, new THREE.Vector3(0, 0, 0)));
+        return { tier: engine.worldTier, mapSeed };
+      },
+    };
+    // Dynamic-events wave: test-mode seam for the events e2e harness —
+    // the defs table, scheduler, stock builder, and the live blueprint
+    // handles (manager, session, trade panel).
+    (window.__XANDRIA__ as Record<string, unknown>).eventsTest = {
+      EVENT_DEFS,
+      EVENT_SALT,
+      planDynamicEvents,
+      buildMerchantStock,
+      resolveEventsEnabled,
+      DynamicEventManager,
+      EventInteractionSession,
+      /** Test seam: the live DynamicEventManager from the blueprint build (null when absent). */
+      liveManager: (): DynamicEventManager | null =>
+        (blueprint as { events?: DynamicEventManager }).events ?? null,
+      /** Test seam: the live event interaction session (null when UI absent). */
+      liveSession: (): EventInteractionSession | null =>
+        (blueprint as { eventSession?: EventInteractionSession }).eventSession ?? null,
+      /** Test seam: the live trade panel. */
+      liveTradePanel: (): TradePanel | null =>
+        (blueprint as { tradePanel?: TradePanel }).tradePanel ?? null,
+    };
+    // UPGRADE LOOP (weather-cycles): test-mode seam for the weather e2e
+    // harness — the salt, the tuning table, the pure scheduler, the
+    // resolvers, and the live blueprint handle.
+    (window.__XANDRIA__ as Record<string, unknown>).weatherTest = {
+      WEATHER_SALT,
+      WEATHER_TUNING,
+      planWeatherCycle,
+      segmentAt,
+      resolveWeatherCyclesEnabled,
+      resolveForcedWeather,
+      WeatherCycleManager,
+      /** Test seam: the live WeatherCycleManager from the blueprint build (null when absent). */
+      liveWeather: (): WeatherCycleManager | null =>
+        (blueprint as { weather?: WeatherCycleManager | null }).weather ?? null,
+    };
   }
   document.body.dataset.genre = spec.meta.genre;
   document.body.dataset.state = engine.state;
@@ -547,7 +774,6 @@ function boot() {
   // staged first-stage description via makeCampaignObjectives (R2-M2: never
   // overwrite it here with the legacy objective text).
   engine.hud.toast(spec.meta.name.toUpperCase(), 3);
-  engine.particles.setWeather(spec.theme.weather, spec.meta.seed, engine.effectiveQuality(), spec.meta.genre);
   engine.onUpdatePersistent(() => engine.particles.updateWeather(engine.camera.position, 1 / 60));
   // register the blueprint builder: enables in-place restart()
   engine.setRunBuilder((e) => build(e, spec));

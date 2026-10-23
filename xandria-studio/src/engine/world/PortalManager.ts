@@ -172,6 +172,10 @@ export class PortalManager {
       // transitions even if a future flow ever rebuilds the blueprint.
       quests: this.engine.questManager,
       skills: null,
+      // vendor-economy wave: the blueprint's player-scoped currency wallet
+      // (null = economy off) — snapshot/restore keeps the balance across
+      // blueprint rebuilds; live transitions never touch the object.
+      wallet: this.engine.wallet ?? null,
       getBuff: () => null,
       setBuff: () => {},
     };

@@ -56,6 +56,7 @@ import type { Inventory } from '../game/items/Inventory';
 import type { Progression } from '../game/Progression';
 import type { QuestManager, QuestPortalSnapshot } from '../game/quests';
 import type { SkillSystem } from '../game/skills';
+import type { Wallet } from '../game/economy';
 import type { Terrain } from './Terrain';
 import { TerrainMapContext, type CachedMap } from './MapCache';
 
@@ -104,6 +105,13 @@ export interface PlayerStateSnapshot {
   /** spec.custom.weaponMods.rateOfFire after 'firerate' upgrades; null = untouched. */
   weaponRateOfFire: number | null;
   buff: PortalBuffState | null;
+  /**
+   * vendor-economy wave: the player-scoped currency wallet balance. The
+   * wallet object itself is never map-local, so live transitions preserve
+   * it by construction; the snapshot covers blueprint-rebuild paths.
+   * Absent (pre-economy snapshots) = 0.
+   */
+  currency: number;
 }
 
 /**
@@ -119,6 +127,13 @@ export interface PortalParts {
   quests?: QuestManager | null;
   /** the blueprint's SkillSystem (skills wave); null/undefined when absent */
   skills?: SkillSystem | null;
+  /**
+   * vendor-economy wave: the blueprint's player-scoped currency wallet
+   * (null/undefined = economy off). Snapshot/restore keeps the balance
+   * across blueprint rebuilds; live portal transitions never touch the
+   * object at all (it's never in engine.portalEntities).
+   */
+  wallet?: Wallet | null;
   /** current timed buff, or null when the blueprint has none / none active */
   getBuff(): PortalBuffState | null;
   /** install a restored buff, or clear when null */
@@ -154,6 +169,10 @@ export function capturePlayerState(engine: Engine, parts: PortalParts): PlayerSt
     skills: parts.skills ? parts.skills.portalSnapshot() : null,
     weaponRateOfFire: readWeaponRateOfFire(engine),
     buff: buff ? { until: buff.until, mult: buff.mult } : null,
+    // vendor-economy: the wallet is player-scoped (never map-local), so
+    // the live object survives transitions by itself; the snapshot carries
+    // the balance for blueprint-rebuild paths.
+    currency: parts.wallet ? parts.wallet.balance : 0,
   };
 }
 
@@ -185,6 +204,8 @@ export function applyPlayerState(engine: Engine, parts: PortalParts, snap: Playe
   if (parts.progression && snap.progression) parts.progression.portalRestore(snap.progression);
   if (parts.quests && snap.quests) parts.quests.portalRestore(snap.quests);
   if (parts.skills && snap.skills) parts.skills.portalRestore(snap.skills);
+  // vendor-economy: pre-economy snapshots carry no currency field — default 0.
+  if (parts.wallet) parts.wallet.portalRestore({ balance: snap.currency ?? 0 });
   writeWeaponRateOfFire(engine, snap.weaponRateOfFire);
   parts.setBuff(snap.buff ? { until: snap.buff.until, mult: snap.buff.mult } : null);
 }

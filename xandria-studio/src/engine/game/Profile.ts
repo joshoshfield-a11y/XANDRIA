@@ -6,6 +6,7 @@
  *   - lifetime totals: kills, playtime
  *   - merit balance + purchased modifiers + equipped loadout
  *   - local daily-challenge bests (YYYY-MM-DD -> score)
+ *   - local daily-challenge attempt results (UTC date -> result, first attempt wins)
  *
  * Merit economy (documented, intentionally simple):
  *   - finishing a run earns (won ? 10 : 2) merit, plus +1 per level reached.
@@ -24,6 +25,12 @@
 
 import type { GameSpec } from '@spec';
 import { invalidateProgressionSpeedAnchor } from './Progression';
+/**
+ * UPGRADE LOOP (difficulty-modes): the player's difficulty mode lives in
+ * the profile (player-scoped, persisted). isDifficultyId is a pure guard —
+ * no import cycle (difficulty.ts imports nothing).
+ */
+import { isDifficultyId, type DifficultyId } from './difficulty';
 
 export const PROFILE_KEY = 'xandria.profile.v1';
 /** Bump when the stored shape changes; migrateProfile() handles old versions. */
@@ -62,6 +69,22 @@ export interface RunResult {
   daily?: string;
 }
 
+/** Local daily-challenge attempt result (one per UTC date — first attempt wins). */
+export interface DailyChallengeResult {
+  score: number;
+  kills: number;
+  /** run length in seconds */
+  timeSeconds: number;
+  /** total player damage taken during the run */
+  damageTaken: number;
+  won: boolean;
+  goalKind: string;
+  goalTarget: number;
+  genre: string;
+  /** world seed the attempt played on */
+  seed: number;
+}
+
 export interface ProfileData {
   version: number;
   /** spendable currency earned from runs */
@@ -79,6 +102,21 @@ export interface ProfileData {
   totalPlaytime: number;
   /** local daily-challenge bests: YYYY-MM-DD -> score */
   dailyBest: Record<string, number>;
+  /**
+   * achievements wave: unlocked achievement ids (cross-run unlock store).
+   * Additive field — missing keys default to [] via ...base, no version bump.
+   */
+  achievements: string[];
+  /**
+   * UPGRADE LOOP (difficulty-modes): the player's selected difficulty mode.
+   * Player-scoped, persisted, survives portal travel and save/reload.
+   * 'normal' is the identity mode (all multipliers 1.0).
+   */
+  difficulty: DifficultyId;
+  /** bestiary codex: enemy entry id -> lifetime kill count */
+  bestiaryKills: Record<string, number>;
+  /** local daily-challenge attempts: UTC YYYY-MM-DD -> result (first wins) */
+  dailyResults: Record<string, DailyChallengeResult>;
 }
 
 /** Merit earned for finishing a run. Wins pay more; every level adds a bonus. */
@@ -99,6 +137,10 @@ export function defaultProfile(): ProfileData {
     totalKills: 0,
     totalPlaytime: 0,
     dailyBest: {},
+    achievements: [],
+    difficulty: 'normal',
+    bestiaryKills: {},
+    dailyResults: {},
   };
 }
 
@@ -181,7 +223,38 @@ export function migrateProfile(raw: unknown): ProfileData {
     totalKills: Math.max(0, Math.floor(num(r.totalKills))),
     totalPlaytime: Math.max(0, num(r.totalPlaytime)),
     dailyBest: numRec(r.dailyBest),
+    // achievements wave: keep only ids from the live def table (stale ids
+    // from retired achievements are dropped, like owned/loadout above).
+    // The manager re-filters against ACHIEVEMENT_IDS on load as well.
+    achievements: strArr(r.achievements),
+    difficulty: isDifficultyId(r.difficulty) ? r.difficulty : 'normal',
+    bestiaryKills: numRec(r.bestiaryKills),
+    dailyResults: dailyResultsRec(r.dailyResults),
   };
+}
+
+/** Validate the daily-results record; drop malformed entries, never throw. */
+function dailyResultsRec(v: unknown): Record<string, DailyChallengeResult> {
+  const out: Record<string, DailyChallengeResult> = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  const num = (x: unknown, d = 0) =>
+    typeof x === 'number' && isFinite(x) ? x : d;
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !x || typeof x !== 'object') continue;
+    const e = x as Record<string, unknown>;
+    out[k] = {
+      score: Math.max(0, Math.floor(num(e.score))),
+      kills: Math.max(0, Math.floor(num(e.kills))),
+      timeSeconds: Math.max(0, num(e.timeSeconds)),
+      damageTaken: Math.max(0, Math.floor(num(e.damageTaken))),
+      won: e.won === true,
+      goalKind: typeof e.goalKind === 'string' ? e.goalKind : '',
+      goalTarget: Math.max(0, Math.floor(num(e.goalTarget))),
+      genre: typeof e.genre === 'string' ? e.genre : '',
+      seed: Math.max(0, Math.floor(num(e.seed))) >>> 0,
+    };
+  }
+  return out;
 }
 
 export function loadProfile(): ProfileData {

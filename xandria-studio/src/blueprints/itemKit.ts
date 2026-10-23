@@ -10,7 +10,8 @@ import * as THREE from 'three';
 import type { Engine } from '../engine/Engine';
 import { EQUIP_SLOTS, type EquipSlot, type GameSpec, type ItemDef } from '@spec';
 import { Inventory } from '../engine/game/items/Inventory';
-import { InventoryHUD } from '../engine/ui/InventoryHUD';
+import { InventoryHUD, type InventorySellHooks } from '../engine/ui/InventoryHUD';
+import { buildSetUiReport } from '../engine/game/setBonuses';
 import { wireItems } from '../engine/game/items/wireItems';
 import { type ItemWorld } from '../engine/game/items/ItemWorld';
 import { ItemModelForge } from '../engine/gfx/ItemModels';
@@ -30,7 +31,7 @@ export class BlueprintItemKit {
   private buffUntil = 0;
   private buffMult = 1;
 
-  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar) {
+  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar, opts?: { sell?: InventorySellHooks | null }) {
     this.engine = engine;
     this.spec = spec;
     this.avatar = avatar;
@@ -39,7 +40,14 @@ export class BlueprintItemKit {
     const world = wireItems(engine, spec, this.inventory, ItemModelForge);
     if (!world) throw new Error('[itemKit] wireItems returned null despite custom.items');
     this.itemWorld = world;
-    this.hud = new InventoryHUD(engine.container, this.inventory, { input: engine.input });
+    // Gear sets wave: the inventory HUD's SET BONUSES section reads live
+    // set state from the inventory (owned + equipped pieces, active
+    // thresholds) — recomputed on every refresh().
+    this.hud = new InventoryHUD(engine.container, this.inventory, {
+      input: engine.input,
+      sell: opts?.sell ?? null,
+      setReport: () => buildSetUiReport(this.inventory),
+    });
 
     // single loot path: drops → magnet → onPickup → inventory.add (no double-count)
     const basePickup = world.onPickup;
@@ -52,10 +60,11 @@ export class BlueprintItemKit {
 
     this.inventory.onUseEffect = (def) => this.applyBehavior(def);
 
-    // defense: equipped defense rating reduces incoming damage, capped at 60%
+    // defense: equipped defense rating reduces incoming damage, capped at 60%.
+    // Gear sets wave: effectiveStats() = equipped + active set bonuses.
     const baseDamage = avatar.damage.bind(avatar);
     avatar.damage = (amount: number, from?: THREE.Vector3) => {
-      const reduction = Math.min(0.6, (this.inventory.equippedStats().defense ?? 0) / 200);
+      const reduction = Math.min(0.6, (this.inventory.effectiveStats().defense ?? 0) / 200);
       baseDamage(amount * (1 - reduction), from);
     };
 
@@ -79,9 +88,9 @@ export class BlueprintItemKit {
     (engine as unknown as Record<string, unknown>).itemWorld = world;
   }
 
-  /** Outgoing damage multiplier from equipped damage stat + active buffs. */
+  /** Outgoing damage multiplier from equipped damage stat + active set bonuses + active buffs. */
   damageMult(): number {
-    const dmg = this.inventory.equippedStats().damage ?? 0;
+    const dmg = this.inventory.effectiveStats().damage ?? 0;
     const buff = this.engine.time < this.buffUntil ? this.buffMult : 1;
     return (1 + dmg / 100) * buff;
   }
@@ -132,7 +141,12 @@ export class BlueprintItemKit {
 }
 
 /** Build the kit, or null when the spec has no `custom.items`. */
-export function buildItemKit(engine: Engine, spec: GameSpec, avatar: PlayerAvatar): BlueprintItemKit | null {
+export function buildItemKit(
+  engine: Engine,
+  spec: GameSpec,
+  avatar: PlayerAvatar,
+  opts?: { sell?: InventorySellHooks | null },
+): BlueprintItemKit | null {
   if (!spec.custom?.items) return null;
-  return new BlueprintItemKit(engine, spec, avatar);
+  return new BlueprintItemKit(engine, spec, avatar, opts);
 }

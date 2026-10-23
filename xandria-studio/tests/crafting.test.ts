@@ -90,14 +90,16 @@ describe('recipe pool determinism', () => {
   });
 
   it('poolSize config is honored for the seeded subset; master recipes (minSkillRank 3) always join', () => {
-    // 5 rank-3 masters (4 new + Alloy Greaves) ride along with every
-    // seeded subset, deduped — so exact pool length is seed-dependent.
+    // 6 rank-3 masters (4 new + Alloy Greaves + the gear-sets wave's
+    // Masterforged crown) ride along with every seeded subset, deduped —
+    // so exact pool length is seed-dependent.
     const MASTERS = [
       'recipe_alloy_greaves',
       'recipe_starfall_warbrand',
       'recipe_dragonscale_aegis',
       'recipe_primordial_draught',
       'recipe_wildheart_regalia',
+      'recipe_masterforged_crown',
     ];
     const expectPool = (rawSize: number, seededLen: number) => {
       const pool = buildRecipePool(specWithCrafting(7, { recipes: { poolSize: rawSize } }));
