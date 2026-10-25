@@ -72,6 +72,7 @@ describe('baked texture registry', () => {
       'ground-litter', 'ground-snow', 'ground-wetsand', 'item-brushed',
       'item-energy', 'item-wood', 'pants-denim', 'skin-matte',
       'spike-ground', 'spike-shirt',
+      'surf-concrete', 'surf-metal', 'surf-panel', 'surf-rock', 'surf-wood',
     ]);
     expect(hasBakedTexture('spike-shirt')).toBe(true);
     expect(hasBakedTexture('nope')).toBe(false);
@@ -137,9 +138,13 @@ describe('materials baked ground path', () => {
       { kind: 'ground', base: '#ffffff', alt: '#ffffff', roughness: 0.95, baked: 'spike-ground' },
       { repeat: 3 },
     );
-    expect(m.map).toBe(bakedTexture('spike-ground'));
-    expect(m.normalMap).toBe(bakedNormalTexture('spike-ground'));
+    // Pass D: a repeat gets its own texture instance, never the shared one.
+    expect(m.map).not.toBe(bakedTexture('spike-ground'));
+    expect((m.map as THREE.Texture).repeat.x).toBe(3);
+    expect((m.normalMap as THREE.Texture).repeat.x).toBe(3);
     expect(m.roughness).toBe(0.95);
+    // ...and the shared texture keeps its default repeat.
+    expect(bakedTexture('spike-ground')!.repeat.x).toBe(1);
   });
 
   it('unknown baked id falls back to the canvas texture', () => {
@@ -228,7 +233,11 @@ describe('Pass A: full-overhaul baked wiring', () => {
       expect(biome.ground.baked, biome.id).toBeTruthy();
       expect(hasBakedTexture(biome.ground.baked!)).toBe(true);
       const mat = mats.biomeGroundDef(biome.ground, { repeat: 2 });
-      expect(mat.map).toBe(bakedTexture(biome.ground.baked!));
+      // Pass D: per-repeat instance, shared texture untouched.
+      expect(mat.map).not.toBe(bakedTexture(biome.ground.baked!));
+      expect((mat.map as THREE.Texture).repeat.x).toBe(2);
+      expect((mat.normalMap as THREE.Texture).repeat.x).toBe(2);
+      expect(bakedTexture(biome.ground.baked!)!.repeat.x).toBe(1);
     }
   });
 

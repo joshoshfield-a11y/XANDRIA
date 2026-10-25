@@ -5,11 +5,27 @@
 import * as THREE from 'three';
 import type { GameSpec, Palette, Environment } from '@spec';
 import { Noise2D, Rng } from '../core/Rng';
-import { bakedTexture, bakedNormalTexture } from './BakedTextures';
+import { bakedTextureInstance, bakedNormalTextureInstance } from './BakedTextures';
 
 export type TexKind = 'ground' | 'rock' | 'metal' | 'brick' | 'wood' | 'grid' | 'sand' | 'snow' | 'lava' | 'asphalt' | 'concrete' | 'crystal' | 'panel'
   /** env-art pass: cracked desert earth, glittering snow, ember-cracked basalt, darkened wet sand */
   | 'cracked' | 'snowdrift' | 'emberrock' | 'wetsand';
+
+/**
+ * Pass D: TexKind → baked surface id for the props/structures path
+ * (standard()). Only kinds with real standard() callers are mapped;
+ * unmapped kinds keep the canvas path. Baked tiles are luminance-first,
+ * so the material color carries the hex tint (the canvas path bakes the
+ * hex into pixels instead). Unknown baked id → canvas fallback, never
+ * a throw — same contract as the ground path.
+ */
+export const SURFACE_BAKED: Partial<Record<TexKind, string>> = {
+  rock: 'surf-rock',
+  metal: 'surf-metal',
+  wood: 'surf-wood',
+  panel: 'surf-panel',
+  concrete: 'surf-concrete',
+};
 
 /**
  * Graphics wave 2, workstream A — shared uniforms for the ground detail
@@ -94,10 +110,30 @@ export class MaterialLibrary {
     this.pixelated = spec.theme.retroFilter;
   }
 
+  /**
+   * Pass D: per-repeat canvas texture instance. The base canvas texture
+   * is cached with no repeat; a requested repeat returns a cached clone
+   * (shared canvas image, own repeat) instead of mutating the base —
+   * the canvas form of the Pass A shared-repeat wart. Clones are safe
+   * here because the canvas image is synchronously available, unlike
+   * async-loaded baked images (see bakedTextureInstance).
+   */
+  private repeatInstance(key: string, base: THREE.Texture, repeat?: number): THREE.Texture {
+    if (!repeat || repeat === 1) return base;
+    const ckey = `${key}:rep${repeat}`;
+    const hit = this.cache.get(ckey);
+    if (hit) return hit;
+    const clone = base.clone();
+    clone.repeat.set(repeat, repeat);
+    clone.needsUpdate = true;
+    this.cache.set(ckey, clone);
+    return clone;
+  }
+
   texture(kind: TexKind, baseHex: string, opts: { size?: number; alt?: string; repeat?: number } = {}): THREE.Texture {
     const key = `${kind}:${baseHex}:${opts.alt ?? ''}:${opts.size ?? 256}`;
     const hit = this.cache.get(key);
-    if (hit) return hit;
+    if (hit) return this.repeatInstance(key, hit, opts.repeat);
     const size = opts.size ?? 256;
     const canvas = document.createElement('canvas');
     canvas.width = size; canvas.height = size;
@@ -228,7 +264,6 @@ export class MaterialLibrary {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 4;
     if (this.pixelated) { tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipMapNearestFilter; }
-    if (opts.repeat) tex.repeat.set(opts.repeat, opts.repeat);
     this.cache.set(key, tex);
 
     // T1-3: tangent-space normal map from the height field via a Sobel
@@ -261,10 +296,9 @@ export class MaterialLibrary {
       nrm.wrapS = nrm.wrapT = THREE.RepeatWrapping;
       nrm.anisotropy = 4;
       if (this.pixelated) { nrm.magFilter = THREE.NearestFilter; nrm.minFilter = THREE.NearestMipMapNearestFilter; }
-      if (opts.repeat) nrm.repeat.set(opts.repeat, opts.repeat);
       this.cache.set(nrmKey, nrm);
     }
-    return tex;
+    return this.repeatInstance(key, tex, opts.repeat);
   }
 
   /**
@@ -274,7 +308,7 @@ export class MaterialLibrary {
   normalMap(kind: TexKind, baseHex: string, opts: { size?: number; alt?: string; repeat?: number } = {}): THREE.Texture {
     const key = `nrm:${kind}:${baseHex}:${opts.alt ?? ''}:${opts.size ?? 256}`;
     this.texture(kind, baseHex, opts); // ensures the normal twin is built
-    return this.cache.get(key)!;
+    return this.repeatInstance(key, this.cache.get(key)!, opts.repeat);
   }
 
   /**
@@ -286,7 +320,7 @@ export class MaterialLibrary {
     const size = opts.size ?? 256;
     const key = `em:${kind}:${opts.glowHex ?? '#ff7a1a'}:${size}`;
     const hit = this.cache.get(key);
-    if (hit) return hit;
+    if (hit) return this.repeatInstance(key, hit, opts.repeat);
     const canvas = document.createElement('canvas');
     canvas.width = size; canvas.height = size;
     const ctx = canvas.getContext('2d')!;
@@ -313,9 +347,8 @@ export class MaterialLibrary {
     // emissive maps stay linear — never sRGB
     tex.anisotropy = 4;
     if (this.pixelated) { tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestMipMapNearestFilter; }
-    if (opts.repeat) tex.repeat.set(opts.repeat, opts.repeat);
     this.cache.set(key, tex);
-    return tex;
+    return this.repeatInstance(key, tex, opts.repeat);
   }
 
   /**
@@ -385,11 +418,9 @@ export class MaterialLibrary {
     // texture + normal twin with the baked pair. Unknown id → canvas path
     // below (the fallback is the branch, not a throw).
     if (g.baked) {
-      const bmap = bakedTexture(g.baked);
+      const bmap = bakedTextureInstance(g.baked, opts.repeat);
       if (bmap) {
-        if (opts.repeat) { bmap.repeat.set(opts.repeat, opts.repeat); }
-        const bnrm = bakedNormalTexture(g.baked);
-        if (bnrm && opts.repeat) { bnrm.repeat.set(opts.repeat, opts.repeat); }
+        const bnrm = bakedNormalTextureInstance(g.baked, opts.repeat);
         const bm = new THREE.MeshStandardMaterial({
           map: bmap, normalMap: bnrm ?? undefined, roughness: g.roughness,
         });
@@ -423,6 +454,22 @@ export class MaterialLibrary {
     const key = `std:${kind}:${hex}:${JSON.stringify(opts)}`;
     const hit = this.matCache.get(key);
     if (hit) return hit as THREE.MeshStandardMaterial;
+    const bakedId = SURFACE_BAKED[kind];
+    if (bakedId) {
+      const bmap = bakedTextureInstance(bakedId, opts.repeat);
+      if (bmap) {
+        const m = new THREE.MeshStandardMaterial({
+          color: hex,
+          map: bmap,
+          normalMap: bakedNormalTextureInstance(bakedId, opts.repeat) ?? undefined,
+          roughness: opts.roughness ?? (kind === 'metal' || kind === 'panel' ? 0.45 : 0.9),
+          metalness: opts.metalness ?? (kind === 'metal' || kind === 'panel' ? 0.5 : 0),
+        });
+        if (opts.emissive) { m.emissive = new THREE.Color(opts.emissive); m.emissiveIntensity = opts.emissiveIntensity ?? 1; }
+        this.matCache.set(key, m);
+        return m;
+      }
+    }
     const m = new THREE.MeshStandardMaterial({
       map: this.texture(kind, hex, { alt: opts.alt, repeat: opts.repeat }),
       normalMap: this.normalMap(kind, hex, { alt: opts.alt, repeat: opts.repeat }),

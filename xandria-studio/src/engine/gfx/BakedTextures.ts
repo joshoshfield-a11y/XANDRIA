@@ -45,6 +45,16 @@ import groundCaverockNormal from '../../assets/baked/ground-caverock-normal.webp
 import itemBrushedMap from '../../assets/baked/item-brushed.webp';
 import itemWoodMap from '../../assets/baked/item-wood.webp';
 import itemEnergyMap from '../../assets/baked/item-energy.webp';
+import surfRockMap from '../../assets/baked/surf-rock.webp';
+import surfRockNormal from '../../assets/baked/surf-rock-normal.webp';
+import surfMetalMap from '../../assets/baked/surf-metal.webp';
+import surfMetalNormal from '../../assets/baked/surf-metal-normal.webp';
+import surfWoodMap from '../../assets/baked/surf-wood.webp';
+import surfWoodNormal from '../../assets/baked/surf-wood-normal.webp';
+import surfPanelMap from '../../assets/baked/surf-panel.webp';
+import surfPanelNormal from '../../assets/baked/surf-panel-normal.webp';
+import surfConcreteMap from '../../assets/baked/surf-concrete.webp';
+import surfConcreteNormal from '../../assets/baked/surf-concrete-normal.webp';
 
 
 export interface BakedTextureDef {
@@ -81,6 +91,13 @@ export const BAKED_TEXTURES: Record<string, BakedTextureDef> = {
   'item-brushed': { map: itemBrushedMap },
   'item-wood': { map: itemWoodMap },
   'item-energy': { map: itemEnergyMap },
+  // Pass D: structure/prop surfaces (atlas-sliced, mirrored repeat like
+  // grounds — the tiles are not seamlessly tileable at their edges).
+  'surf-rock': { mirror: true, map: surfRockMap, normal: surfRockNormal },
+  'surf-metal': { mirror: true, map: surfMetalMap, normal: surfMetalNormal },
+  'surf-wood': { mirror: true, map: surfWoodMap, normal: surfWoodNormal },
+  'surf-panel': { mirror: true, map: surfPanelMap, normal: surfPanelNormal },
+  'surf-concrete': { mirror: true, map: surfConcreteMap, normal: surfConcreteNormal },
 };
 
 export function hasBakedTexture(id: string): boolean {
@@ -90,8 +107,8 @@ export function hasBakedTexture(id: string): boolean {
 const loader = new THREE.TextureLoader();
 const cache = new Map<string, THREE.Texture>();
 
-function loadCached(url: string, srgb: boolean, mirror = false): THREE.Texture {
-  const key = `${srgb ? 'srgb' : 'lin'}:${mirror ? 'mir' : 'rep'}:${url}`;
+function loadCached(url: string, srgb: boolean, mirror = false, variant = ''): THREE.Texture {
+  const key = `${srgb ? 'srgb' : 'lin'}:${mirror ? 'mir' : 'rep'}:${variant}:${url}`;
   const hit = cache.get(key);
   if (hit) return hit;
   let tex: THREE.Texture;
@@ -123,4 +140,33 @@ export function bakedNormalTexture(id: string): THREE.Texture | null {
   const def = BAKED_TEXTURES[id];
   if (!def?.normal) return null;
   return loadCached(def.normal, false, def.mirror ?? false);
+}
+
+/**
+ * Pass D: per-repeat baked texture instance. The shared texture from
+ * bakedTexture() must never have its repeat mutated — that was the Pass A
+ * wart: two materials with different repeats shared one texture, so the
+ * last repeat written won for both. A fresh load per repeat is used
+ * instead of Texture.clone() because a clone taken before the async
+ * image load completes never receives the image and renders black;
+ * data-URI loads keep the loader lifecycle (onLoad → needsUpdate)
+ * correct. Repeat 1 or absent returns the shared texture unchanged.
+ */
+export function bakedTextureInstance(id: string, repeat?: number): THREE.Texture | null {
+  const def = BAKED_TEXTURES[id];
+  if (!def) return null;
+  if (!repeat || repeat === 1) return loadCached(def.map, true, def.mirror ?? false);
+  const tex = loadCached(def.map, true, def.mirror ?? false, `rep${repeat}`);
+  tex.repeat.set(repeat, repeat);
+  return tex;
+}
+
+/** Per-repeat normal-map twin (same contract as bakedTextureInstance). */
+export function bakedNormalTextureInstance(id: string, repeat?: number): THREE.Texture | null {
+  const def = BAKED_TEXTURES[id];
+  if (!def?.normal) return null;
+  if (!repeat || repeat === 1) return loadCached(def.normal, false, def.mirror ?? false);
+  const tex = loadCached(def.normal, false, def.mirror ?? false, `rep${repeat}`);
+  tex.repeat.set(repeat, repeat);
+  return tex;
 }
