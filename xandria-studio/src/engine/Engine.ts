@@ -35,11 +35,14 @@ import { deriveWorldTier } from './world/worldTiers';
 import { portalsEnabled } from '@spec';
 import { cameraFarForWorldSize, cameraNearForWorldSize, FAR_TERRAIN_MIN_SIZE } from './gfx/FarField';
 import { HUD, type RunStats } from './game/HUD';
+/** UPGRADE LOOP (minimap-fog): observe-only minimap with seeded fog-of-war. */
+import { Minimap } from './ui/Minimap';
 import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
 import { TouchControls, isTouchDevice } from './game/TouchControls';
+import { TutorialManager } from './game/Tutorial';
 import type { QuestManager } from './game/quests';
 import type { Wallet } from './game/economy';
 import type { AchievementManager } from './game/achievements';
@@ -47,19 +50,40 @@ import { showIntroCard } from '../blueprints/campaign';
 import type { PlayerAvatar } from '../blueprints/common';
 import {
   applyLoadout,
+  createSlot,
+  deleteSlot,
   loadProfile,
+  MAX_SLOTS,
   purchaseModifier,
+  recordJournalEntry,
   recordRun,
+  renameSlot,
   saveProfile,
+  setActiveSlotId,
   setLoadout,
+  slotSummaries,
   MODIFIERS,
   type ProfileData,
+  type RunJournalEntry,
 } from './game/Profile';
+import type { Progression } from './game/Progression';
+import { JournalPanel } from './ui/JournalPanel';
 /**
  * UPGRADE LOOP (difficulty-modes): DifficultyId/isDifficultyId are a pure
  * import — no cycle (difficulty.ts imports nothing).
  */
 import { isDifficultyId, type DifficultyId } from './game/difficulty';
+/**
+ * UPGRADE LOOP (accessibility-pass): settings bundle + palette/beacon
+ * plumbing. accessibility.ts imports nothing, so no cycle.
+ */
+import {
+  clampTextScale, defaultAccessibilitySettings, setCurrentPalette,
+  validateAccessibilitySettings, validateKeybinds,
+  type AccessibilitySettings,
+} from './game/accessibility';
+import { setCameraReducedMotion } from './game/Cameras';
+import { recolorAllEventBeacons } from './game/dynamicEvents';
 import {
   CHALLENGE_BOARD_DAYS,
   ChallengeGoalTracker,
@@ -72,6 +96,18 @@ import {
   todayUtcDate,
   type DailyChallenge,
 } from './game/dailyChallenges';
+import {
+  GauntletDirector,
+  gauntletBoard,
+  gauntletLine,
+  gauntletSeedForDate,
+  gauntletSupported,
+  generateGauntlet,
+  recordGauntletResult,
+  type Gauntlet,
+} from './game/gauntlet';
+import type { BossEncounter } from './game/bosses';
+import type { EnemyManager } from './game/EnemyAI';
 
 export type EngineState = 'loading' | 'ready' | 'title' | 'playing' | 'paused' | 'won' | 'lost';
 
@@ -101,12 +137,25 @@ export class Engine {
   readonly audio: AudioEngine;
   readonly particles: Particles;
   readonly hud: HUD;
+  /**
+   * UPGRADE LOOP (minimap-fog): observe-only minimap (terrain shape, player
+   * marker, discovered landmarks, event beacons, portal exits) with seeded
+   * fog-of-war. Created once at construction like the HUD; fog state is
+   * per-map and cleared by resetRun(). Never affects gameplay.
+   */
+  readonly minimap: Minimap;
   readonly rng: Rng;
   readonly postfx: PostFX;
   readonly settings: Settings;
   readonly juice: Juice;
   /** modding surface: hook taps + custom enemy/upgrade registries (additive) */
   readonly hooks: Modding;
+  /**
+   * Tutorial wave: the data-driven first-run tutorial manager. Observes
+   * only (hook taps + public state reads); never mutates gameplay.
+   * Constructed after the HUD so the card surface exists.
+   */
+  readonly tutorial: TutorialManager;
   /**
    * Workstream E: thin perf instrumentation for the future PerformanceManager
    * (W3.3). Read-only counters — frame time + rolling variance, renderer.info
@@ -137,6 +186,14 @@ export class Engine {
   elapsed = 0; // gameplay seconds (excludes pause)
   /** cumulative player damage taken this run (daily-challenge scoring) */
   damageTaken = 0;
+  /**
+   * Boss-fights wiring handles, stashed by wireBossFights on every combat-
+   * blueprint build (encounter + enemy manager). Null on blueprints without
+   * boss wiring (platformer/racing) — gauntlet mode is gated on this.
+   */
+  bossWiring: { encounter: BossEncounter; manager: EnemyManager } | null = null;
+  /** the active gauntlet director; null outside gauntlet runs */
+  gauntlet: GauntletDirector | null = null;
 
   private updateHooks: Array<(dt: number) => void> = [];
   private last = 0;
@@ -197,6 +254,24 @@ export class Engine {
    */
   achievementManager: AchievementManager | null = null;
   /**
+   * UPGRADE LOOP (run-journal): blueprints publish their Progression here so
+   * the run journal can read the run's total XP at run end (mirrors
+   * achievementManager). Null when the genre has no XP side.
+   */
+  progression: Progression | null = null;
+  /** UPGRADE LOOP (run-journal): the journal panel (title screen entry). */
+  readonly journalPanel: JournalPanel;
+  // Run-journal observe-only counters. Taps on the existing hook bus only —
+  // they never influence gameplay. Reset per run by resetJournalRun().
+  private journalKills = 0;
+  private journalDeaths = 0;
+  private journalPortals = 0;
+  private journalBosses = 0;
+  /** ISO 8601 UTC, captured once at run start (never mid-run). */
+  private journalStartUtc = '';
+  /** world seed of the live run (daily runs: the challenge seed). */
+  private journalSeed = 0;
+  /**
    * PORTALS-D: visited-map LRU (world/MapCache.ts). Wired by the portal
    * transition flow (workstream B/C). Null = portals disabled; transitions
    * throw rather than silently rebuild without a cache.
@@ -235,6 +310,18 @@ export class Engine {
   private challenge: DailyChallenge | null = null;
   /** goal tracker for the active challenge run; null outside challenge runs */
   private challengeTracker: ChallengeGoalTracker | null = null;
+  /** UTC YYYY-MM-DD key while a gauntlet run is active; null otherwise */
+  private gauntletDate: string | null = null;
+  /**
+   * Base-spec snapshot taken by startGauntletRun (objective, enemies,
+   * custom) — the gauntlet overrides the run's spec for the mode and
+   * toTitle()/startRun() restore it from here.
+   */
+  private gauntletBaseSpec: {
+    objective: GameSpec['objective'];
+    enemies: GameSpec['enemies'];
+    custom: GameSpec['custom'];
+  } | null = null;
   /** terrain construction options, kept so terrain can be rebuilt from a new seed (R2-M1) */
   private terrainOpts: { flatCenters?: THREE.Vector3[]; flatRadius?: number; noTerrain?: boolean };
   /** the seed the live terrain was generated from */
@@ -306,6 +393,18 @@ export class Engine {
     this.hooks = new Modding(this);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
+    // UPGRADE LOOP (minimap-fog): the minimap observes avatar/terrain/portal
+    // entities via the engine — construction is side-effect-free beyond DOM.
+    this.minimap = new Minimap(container, this);
+    // Tutorial wave: observe-only first-run guide (profile-gated, Studio
+    // force/skip via custom.tutorial.mode). Taps engine.hooks, which
+    // survive restart(), so mid-run restarts keep tutorial progress.
+    this.tutorial = new TutorialManager(this);
+    // ACCESSIBILITY PASS: apply profile settings (keybinds, palette,
+    // reduced motion, text scale) before the first frame. Blueprints build
+    // camera rigs later; they read the module-level camera flag, so this
+    // boot-time apply covers them too.
+    this.applyAccessibility();
     this.touch = new TouchControls(container, this.input, spec.meta.genre);
     this.hud.setTouchMode(this.touch.active);
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec, {
@@ -414,6 +513,40 @@ export class Engine {
     // integer add per hit, untapped in the normal flow — zero behavior change.
     this.hooks.tap('onPlayerDamage', ({ amount }) => {
       this.damageTaken += amount;
+    });
+    // run-journal: observe-only per-run counters. One integer add per event,
+    // untapped in the normal flow — zero behavior change (same discipline as
+    // damageTaken above). The entry is written by recordRunResult.
+    this.hooks.tap('onKill', ({ enemy }) => {
+      this.journalKills++;
+      if (enemy?.isBoss === true) this.journalBosses++;
+    });
+    this.hooks.tap('onPlayerDeath', () => {
+      this.journalDeaths++;
+    });
+    // run-journal: count portal traversals via the portal seam. Defensive
+    // chaining — the achievements manager chains the same seam after us, and
+    // both wrappers call the previous hook, so both counts stay exact.
+    const pm = this.portalManager;
+    if (pm) {
+      const prevTransition = pm.hooks.onAfterTransition;
+      const eng = this;
+      pm.hooks.onAfterTransition = function (ctx) {
+        const r = prevTransition?.(ctx);
+        if (r && typeof (r as Promise<void>).then === 'function') {
+          return (r as Promise<void>).then(() => {
+            eng.journalPortals++;
+          });
+        }
+        eng.journalPortals++;
+        return r;
+      };
+    }
+    // run-journal: the journal panel (title-screen entry point). Reads the
+    // profile fresh on every open, so it always lists finished runs.
+    this.journalPanel = new JournalPanel({
+      container: this.container,
+      journal: () => loadProfile().journal,
     });
   }
 
@@ -567,6 +700,10 @@ export class Engine {
     // keep the opt-in asset packs grounded on the live terrain (same
     // private-field pattern as syncTerrainToSeed)
     (this.assetBridge as unknown as { terrain?: Terrain }).terrain = next;
+    // Tutorial wave: every portal transition funnels through here (LRU hit
+    // or fresh build), so this is the single portal-arrival seam. Additive:
+    // with no taps the emit is a no-op.
+    this.hooks.emit('onPortalArrive', { mapSeed });
   }
 
   /**
@@ -670,6 +807,71 @@ export class Engine {
     this.resize();
   }
 
+  /**
+   * UPGRADE LOOP (accessibility-pass): the profile's accessibility
+   * settings, validated (corrupt fields fall back to defaults, never
+   * throw). HUD settings UI reads this; applyAccessibilitySettings writes it.
+   */
+  getAccessibilitySettings(): AccessibilitySettings {
+    try {
+      return validateAccessibilitySettings(loadProfile().accessibility);
+    } catch {
+      return defaultAccessibilitySettings();
+    }
+  }
+
+  /**
+   * UPGRADE LOOP (accessibility-pass): merge a patch into the profile's
+   * accessibility settings, persist, and apply live. Keybind patches
+   * replace the whole keybinds record (the UI passes the full validated
+   * overrides); palette/text-scale values are clamped/validated, never
+   * trusted blind. Returns the applied settings, or null when the profile
+   * could not be saved (callers treat null as "rejected").
+   */
+  applyAccessibilitySettings(patch: Partial<AccessibilitySettings>): AccessibilitySettings | null {
+    try {
+      const profile = loadProfile();
+      const cur = validateAccessibilitySettings(profile.accessibility);
+      const next: AccessibilitySettings = {
+        keybinds: patch.keybinds !== undefined ? validateKeybinds(patch.keybinds) : cur.keybinds,
+        colorblind: patch.colorblind !== undefined
+          ? validateAccessibilitySettings({ colorblind: patch.colorblind }).colorblind
+          : cur.colorblind,
+        reducedMotion: patch.reducedMotion !== undefined ? patch.reducedMotion === true : cur.reducedMotion,
+        hudTextScale: patch.hudTextScale !== undefined ? clampTextScale(patch.hudTextScale) : cur.hudTextScale,
+      };
+      profile.accessibility = next;
+      saveProfile(profile);
+      this.applyAccessibility(next);
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * UPGRADE LOOP (accessibility-pass): push settings into every live
+   * consumer — input keymap, juice + particle + camera-rig motion gates,
+   * HUD palette/text scale, live event beacons. Engine-level state only
+   * (nothing map-local), so settings survive portal travel by
+   * construction; a fresh boot re-applies from storage. Never throws:
+   * a broken settings apply must not take down the run.
+   */
+  applyAccessibility(settings?: AccessibilitySettings): void {
+    try {
+      const s = settings ?? this.getAccessibilitySettings();
+      setCurrentPalette(s.colorblind);
+      this.input.setKeybinds(s.keybinds);
+      this.juice.reducedMotion = s.reducedMotion;
+      this.particles.reducedMotion = s.reducedMotion;
+      setCameraReducedMotion(s.reducedMotion);
+      this.hud.applyAccessibility(s.colorblind, s.hudTextScale);
+      recolorAllEventBeacons();
+    } catch {
+      /* settings apply is best-effort — the run continues on defaults */
+    }
+  }
+
   resize() {
     const w = this.container.clientWidth || innerWidth;
     const h = this.container.clientHeight || innerHeight;
@@ -731,6 +933,79 @@ export class Engine {
     }
   }
 
+  /**
+   * UPGRADE LOOP (new-game-plus): the player's prestige cycle, read from
+   * the profile (player-scoped, persisted). 0 when the profile is
+   * missing/corrupt. Blueprints wire this into EnemyManager via
+   * `ngPlus: () => engine.getNgPlusCycle()`.
+   */
+  getNgPlusCycle(): number {
+    try {
+      const c = loadProfile().ngPlusCycle;
+      return Number.isFinite(c) ? Math.max(0, Math.floor(c)) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * UPGRADE LOOP (new-game-plus): enter the next prestige cycle from the
+   * run-end screen (the HUD's NEW GAME+ button calls this). Only valid
+   * from a completed run ('won'/'lost') — the run-completion path is
+   * observed, never changed: recordRunResult already ran on the win/lose
+   * hook before the end screen showed.
+   *
+   * What it does, in order:
+   *   1. increments ONLY profile.ngPlusCycle and saves — gear (loadout /
+   *      owned), merit, achievements, difficulty, bestiary, daily results
+   *      and journal data are never written here;
+   *   2. resets MAP progress: the run restarts at the origin map on the
+   *      base seed (same reseed/terrain/cache sequence as startRun), so
+   *      the next cycle replays the maps from the start — now with the
+   *      cycle multiplier on spawns;
+   *   3. resets the world tier to the origin derivation (cycle and tier
+   *      are orthogonal — NG+ must not inherit a deep-map tier);
+   *   4. rebuilds the run (same resetRun path as RESTART, which
+   *      re-applies the preserved loadout) and syncs the HUD chips.
+   * Determinism: the seed is unchanged, so same (seed, cycle) -> identical
+   * encounters; only the cycle input moves.
+   */
+  enterNgPlus(): { ok: boolean; cycle?: number; reason?: string } {
+    if (this.state !== 'won' && this.state !== 'lost') {
+      return { ok: false, reason: 'no completed run' };
+    }
+    try {
+      const p = loadProfile();
+      const next = Math.max(0, Math.floor(p.ngPlusCycle ?? 0)) + 1;
+      p.ngPlusCycle = next;
+      saveProfile(p);
+      // Map progress reset (mirrors startRun's origin reset).
+      this.spec.meta.seed = this.baseSeed;
+      this.reseedPortalOrigin(this.baseSeed);
+      this.syncTerrainToSeed();
+      this.reseedPortalCache();
+      this.worldTier = deriveWorldTier(this.baseSeed, 0);
+      if (this.runBuilder) {
+        this.resetRun();
+        this.state = 'playing';
+        this.last = performance.now();
+      } else {
+        // No blueprint builder (runtime bootstrap skipped it): fall back
+        // to the title screen with the new cycle stored — the next
+        // startRun picks it up. Same fallback shape as restart().
+        this.state = 'title';
+        this.showTitle();
+      }
+      // Chips after the rebuild: resetRun -> hud.resetRun() re-hides the
+      // tier chip, so both chips are (re)synced here, not before.
+      this.hud.setTier(this.worldTier);
+      this.hud.setNgPlus(next);
+      return { ok: true, cycle: next };
+    } catch {
+      return { ok: false, reason: 'profile unavailable' };
+    }
+  }
+
   start() {
     if (this.started) return;
     this.started = true;
@@ -750,6 +1025,10 @@ export class Engine {
     } else {
       this.showTitle();
     }
+    // UPGRADE LOOP (new-game-plus): sync the NG+ chip at boot (covers the
+    // autostart path, which never passes through beginPlay). Event-driven
+    // and cached — a repeat call with the same cycle is a no-op.
+    this.hud.setNgPlus(this.getNgPlusCycle());
   }
 
   private showTitle() {
@@ -774,16 +1053,34 @@ export class Engine {
     const profileLine = played > 0
       ? `${played} run${played === 1 ? '' : 's'} · ${won} won · best ${best.toLocaleString()}`
       : 'first run — good luck';
+    // UPGRADE LOOP (new-game-plus): the title line names the live cycle
+    // once the player has prestiged (cycle 0 = base game, no suffix).
+    const titleLine = profile.ngPlusCycle > 0 ? `${profileLine} · NG+ ${profile.ngPlusCycle}` : profileLine;
     const today = todayUtcDate();
     const challenge = generateDailyChallenge(today);
     const dailyResult = profile.dailyResults[today] ?? null;
     const equipped = new Set(profile.loadout);
+    // gauntlet mode (combat blueprints only): today's pinned gauntlet tuple
+    // (pure — same for every player), the boss order line, and the board.
+    const gauntletOK = gauntletSupported(g);
+    const gauntlet = gauntletOK ? generateGauntlet(gauntletSeedForDate(today)) : null;
+    const gauntletBest = profile.gauntletBest ?? 0;
+    // UPGRADE LOOP (save-slots): slot picker on the title screen. Slot
+    // switches also reload settings — each slot owns its own settings.
+    const summaries = slotSummaries();
+    const afterSlotSwitch = () => { this.settings.reload(); this.applySettings(); };
     this.hud.showTitle({
       name: this.spec.meta.name,
       premise: nar?.premise ?? this.spec.objective.description,
       controls,
       onStart: () => this.startRun(),
-      profileLine,
+      profileLine: titleLine,
+      slots: summaries,
+      canNewSlot: summaries.length < MAX_SLOTS,
+      onSelectSlot: (id) => { if (setActiveSlotId(id)) afterSlotSwitch(); this.showTitle(); },
+      onRenameSlot: (id, name) => { renameSlot(id, name); this.showTitle(); },
+      onDeleteSlot: (id) => { deleteSlot(id); afterSlotSwitch(); this.showTitle(); },
+      onNewSlot: () => { createSlot(); afterSlotSwitch(); this.showTitle(); },
       merit: profile.merit,
       modifiers: MODIFIERS.map((m) => ({
         id: m.id,
@@ -802,6 +1099,13 @@ export class Engine {
       dailyChallengeLine: `${goalLabel(challenge.goal)} · ${loadoutLabel(challenge.loadout)}`,
       dailyBoard: challengeBoard(profile, today),
       onDaily: () => this.startDailyRun(),
+      gauntletLabel: gauntlet ? `GAUNTLET ${today}` : undefined,
+      gauntletLine: gauntlet
+        ? `${gauntletLine(gauntlet)}${gauntletBest > 0 ? ` · best ${gauntletBest.toLocaleString('en-US')}` : ''}`
+        : undefined,
+      gauntletBoard: gauntletOK ? gauntletBoard(profile, today) : undefined,
+      onGauntlet: () => this.startGauntletRun(),
+      onJournal: () => this.journalPanel.show(),
     });
   }
 
@@ -855,6 +1159,11 @@ export class Engine {
 
   startRun() {
     if (this.state !== 'title') return;
+    // leave any gauntlet run behind: the title background is always the base game
+    this.gauntlet?.disarm();
+    this.gauntlet = null;
+    this.gauntletDate = null;
+    this.restoreBaseSpec();
     this.dailyDate = null;
     this.challenge = null;
     this.challengeTracker?.disarm();
@@ -902,6 +1211,65 @@ export class Engine {
     this.beginPlay();
   }
 
+
+  /**
+   * Gauntlet mode: a seeded 5-boss run. The gauntlet seed — pinned to the
+   * UTC date (GAUNTLET_SALT ^ yyyymmdd, like daily-challenges), or an
+   * explicit seed for tests/e2e — drives the world (the R2-M1 path:
+   * terrain rebuilt from the seed, run rebuilt via resetRun, so every
+   * player gets the identical run). The run's spec is overridden for the
+   * mode (a {type:'boss',count:5} objective, no ambient enemies, the boss
+   * flag re-pointed per round by the director); toTitle()/startRun()
+   * restore the base spec from the snapshot below.
+   *
+   * Combat blueprints only — the boss encounter lives in the boss-fights
+   * wiring (engine.bossWiring); the title screen gates the button on
+   * gauntletSupported(), this is defense in depth.
+   */
+  startGauntletRun(dateStr: string = todayUtcDate()) {
+    if (this.state !== 'title') return;
+    if (!gauntletSupported(this.spec.meta.genre)) return;
+    const gauntlet: Gauntlet = generateGauntlet(gauntletSeedForDate(dateStr));
+    // snapshot the base spec so toTitle()/startRun() can restore it
+    this.gauntletBaseSpec = {
+      objective: this.spec.objective,
+      enemies: this.spec.enemies,
+      custom: this.spec.custom,
+    };
+    this.spec.objective = {
+      type: 'boss',
+      count: gauntlet.rounds,
+      timeLimit: 0,
+      description: `GAUNTLET — defeat ${gauntlet.rounds} bosses`,
+    };
+    // no ambient enemies in gauntlet mode: the director spawns exactly one
+    // boss brute per round, so the encounter always binds the round's boss
+    this.spec.enemies = [];
+    this.spec.meta.seed = gauntlet.seed;
+    this.dailyDate = null;
+    this.gauntletDate = dateStr;
+    // PORTALS (merge): the gauntlet seed is the run's world seed — re-stamp
+    // the origin from it before the terrain sync, then re-seed the LRU.
+    this.reseedPortalOrigin(this.spec.meta.seed);
+    this.syncTerrainToSeed();
+    this.reseedPortalCache();
+    if (this.runBuilder) this.resetRun();
+    this.gauntlet?.disarm();
+    this.gauntlet = new GauntletDirector(this, gauntlet);
+    this.beginPlay();
+    this.gauntlet.start();
+  }
+
+  /** Restore the base spec snapshotted by startGauntletRun (no-op otherwise). */
+  private restoreBaseSpec(): void {
+    const b = this.gauntletBaseSpec;
+    if (!b) return;
+    this.spec.objective = b.objective;
+    this.spec.enemies = b.enemies;
+    this.spec.custom = b.custom;
+    this.gauntletBaseSpec = null;
+  }
+
   private beginPlay() {
     this.hud.clearOverlays();
     this.audio.unlock();
@@ -912,6 +1280,11 @@ export class Engine {
     // the resetRun() call below stays valid. A daily challenge run uses its
     // FIXED challenge loadout instead (everyone plays the identical build).
     applyLoadout(this.spec, this.challenge ? challengeProfile(this.challenge) : loadProfile());
+    // UPGRADE LOOP (new-game-plus): sync the NG+ chip on every fresh run
+    // start (startRun / startDailyRun). A daily run uses the base cycle
+    // chip unchanged — the cycle is a profile property, not a challenge
+    // property — and the chip is cached, so this is a no-op when idle.
+    this.hud.setNgPlus(this.getNgPlusCycle());
     // R5-M1: the avatar snapshots loadout values at construction (boot), but
     // the player may have bought/equipped modifiers in the title shop after
     // that. Re-sync its construction-time copies now that the spec carries
@@ -923,14 +1296,58 @@ export class Engine {
     // without beginPlay) showed it. Now it shows on every fresh run start
     // and never on restarts.
     showIntroCard(this, this.spec);
+    this.resetJournalRun();
     this.state = 'playing';
     this.last = performance.now();
+  }
+
+  /**
+   * Run-journal: reset the observe-only per-run counters for a fresh run.
+   * The wall-clock date is captured once here — at run start — never mid-run
+   * and never for gameplay (determinism rule).
+   */
+  private resetJournalRun(): void {
+    this.journalKills = 0;
+    this.journalDeaths = 0;
+    this.journalPortals = 0;
+    this.journalBosses = 0;
+    this.journalStartUtc = new Date().toISOString();
+    // startRun()/startDailyRun() set spec.meta.seed before beginPlay(), so
+    // this captures the real run seed (daily runs: the challenge seed).
+    this.journalSeed = this.spec.meta.seed >>> 0;
+  }
+
+  /**
+   * Run-journal: build this run's journal record from the observe-only
+   * counters. Pure — safe to call in testMode (no profile write here).
+   */
+  private buildJournalEntry(won: boolean): RunJournalEntry {
+    return {
+      startUtc: this.journalStartUtc || new Date().toISOString(),
+      seed: this.journalSeed,
+      genre: this.spec.meta.genre,
+      duration: Math.max(0, Math.round(this.elapsed)),
+      kills: this.journalKills,
+      deaths: this.journalDeaths,
+      portals: this.journalPortals,
+      // runs start at 0 XP (fresh Progression per blueprint build; portal
+      // travel keeps the same object), so the live total IS the run's gain.
+      xpGained: Math.max(0, Math.floor(this.progression?.xp ?? 0)),
+      bossesKilled: this.journalBosses,
+      result: won ? 'won' : 'lost',
+    };
   }
 
   /** Back to the title screen, with a fresh run waiting underneath. */
   toTitle() {
     // leave any daily run behind: the title background is always the base game
     this.dailyDate = null;
+    // leave any gauntlet run behind: disarm the director (before resetRun,
+    // so its onRunRebuilt doesn't re-drive a round) and restore the base spec
+    this.gauntlet?.disarm();
+    this.gauntlet = null;
+    this.gauntletDate = null;
+    this.restoreBaseSpec();
     this.challenge = null;
     this.challengeTracker?.disarm();
     this.challengeTracker = null;
@@ -978,6 +1395,26 @@ export class Engine {
         });
         this.challengeTracker?.disarm();
       }
+      // gauntlet mode: score the run (rounds cleared + time + damage taken).
+      // Best score per date wins. The director's counters are read here,
+      // before any disarm — the constructor's onWin/onLose taps run before
+      // a director disarm tap could.
+      if (this.gauntlet && this.gauntletDate) {
+        const d = this.gauntlet;
+        recordGauntletResult(p, this.gauntletDate, {
+          roundsCleared: d.roundsCleared,
+          kills: d.kills,
+          timeSeconds: this.elapsed,
+          damageTaken: Math.round(this.damageTaken),
+          won,
+          genre: this.spec.meta.genre,
+          seed: d.gauntlet.seed,
+        });
+      }
+      // run-journal: append the per-run record (observe-only — the
+      // aggregate stats above are untouched). recordJournalEntry re-validates
+      // and caps; a corrupt profile can never break the run-completion path.
+      recordJournalEntry(p, this.buildJournalEntry(won));
       saveProfile(p);
     } catch {
       /* profile is best-effort — a storage failure must never break the game */
@@ -1126,14 +1563,22 @@ export class Engine {
     this.audio.pauseMusic(); // combat music must not play under the victory screen (M3)
     this.audio.play('win');
     this.hooks.emit('onWin', { stats });
+    // run-journal: the recap shows the same observed counts the journal
+    // entry records (caller-provided stats still win on explicit overlap).
+    const wonJournal = this.buildJournalEntry(true);
     this.hud.showEnd(true, {
       score: this.score,
       time: this.elapsed,
-      kills: 0,
+      kills: wonJournal.kills,
       level: 1,
       stagesCleared: 0,
+      deaths: wonJournal.deaths,
+      portals: wonJournal.portals,
+      xpGained: wonJournal.xpGained,
+      bossesKilled: wonJournal.bossesKilled,
+      seed: wonJournal.seed,
       ...stats,
-    }, winText);
+    }, winText, { targetCycle: this.getNgPlusCycle() + 1, onEnter: () => this.enterNgPlus() });
   }
 
   lose(reason = '', stats: Partial<RunStats> = {}) {
@@ -1143,15 +1588,21 @@ export class Engine {
     this.audio.pauseMusic(); // combat music must not play under the defeat screen (M3)
     this.audio.play('lose');
     this.hooks.emit('onLose', { reason, stats });
+    const lostJournal = this.buildJournalEntry(false);
     this.hud.showEnd(false, {
       score: this.score,
       time: this.elapsed,
-      kills: 0,
+      kills: lostJournal.kills,
       level: 1,
       stagesCleared: 0,
       reason,
+      deaths: lostJournal.deaths,
+      portals: lostJournal.portals,
+      xpGained: lostJournal.xpGained,
+      bossesKilled: lostJournal.bossesKilled,
+      seed: lostJournal.seed,
       ...stats,
-    });
+    }, undefined, { targetCycle: this.getNgPlusCycle() + 1, onEnter: () => this.enterNgPlus() });
   }
 
   /**
@@ -1169,6 +1620,7 @@ export class Engine {
       return;
     }
     this.resetRun();
+    this.resetJournalRun();
     this.state = 'playing';
     this.last = performance.now();
   }
@@ -1179,6 +1631,10 @@ export class Engine {
    * particles cleared, physics/scene/hooks restored.
    */
   private resetRun() {
+    // run-journal: drop the stale Progression ref before the rebuild — the
+    // blueprint re-publishes engine.progression on build; genres without an
+    // XP side leave it null so no XP leaks across runs.
+    this.progression = null;
     // drop blueprint update hooks, keep persistent bootstrap hooks
     this.updateHooks = this.updateHooks.filter((h) => this.persistentHooks.has(h));
     // remove blueprint scene objects (dispose their geometries, plus
@@ -1212,6 +1668,9 @@ export class Engine {
     this.particles.setWeather(this.spec.theme.weather, this.spec.meta.seed, this.effectiveQuality(), this.spec.meta.genre);
     // HUD / juice / input
     this.hud.resetRun();
+    // UPGRADE LOOP (minimap-fog): a fresh run replays the identical
+    // exploration, so every map's fog + landmark discovery state is dropped.
+    this.minimap.resetRun();
     this.juice.reset();
     this.input.reset();
     // audio
@@ -1247,6 +1706,11 @@ export class Engine {
         if (r.failed.length) console.warn(`[xandria] asset packs failed (procedural fallback kept): ${r.failed.join(', ')}`);
       });
     }
+    // Gauntlet mode: an in-place rebuild starts the world boss-less — the
+    // director re-drives the current round (fresh arena + boss) so the run
+    // continues. No-op outside gauntlet runs (and on the initial build,
+    // where the director doesn't exist yet).
+    this.gauntlet?.onRunRebuilt();
   }
 
   dispose() {
@@ -1257,6 +1721,9 @@ export class Engine {
     this.input.dispose();
     this.touch.dispose();
     this.audio.dispose();
+    // UPGRADE LOOP (minimap-fog): remove the minimap DOM + key listener + hook tap.
+    this.minimap.dispose();
+    this.journalPanel.dispose();
     this.assetBridge.dispose();
     // PORTALS-B: tear down the portal overlay + update hook.
     this.portalManager?.dispose();

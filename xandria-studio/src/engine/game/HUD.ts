@@ -6,6 +6,20 @@ import type { GameSpec, NarrativeSpec } from '@spec';
 import type { Engine } from '../Engine';
 import type { UpgradeDef } from './Progression';
 import type { DailyBoardRow } from './dailyChallenges';
+import type { GauntletBoardRow } from './gauntlet';
+/** UPGRADE LOOP (save-slots): title-screen slot picker rows. */
+import type { SlotSummary } from './Profile';
+/**
+ * ACCESSIBILITY PASS: palette table + keybind helpers for the settings UI.
+ * HUD chips read palette colors through CSS variables (see CSS above);
+ * text scale sets inline font sizes on the primary readouts.
+ */
+import {
+  COLORBLIND_PALETTES, THEME_TABLE, UI_REMAPPABLE_ACTIONS, keyDisplayName,
+  themeVar, tryRemap, validateKeybinds,
+  type AccessibilitySettings, type ColorblindPalette, type KeybindOverrides,
+  type RemappableAction, type ThemeRole,
+} from './accessibility';
 
 /** End-of-run stats shown on the victory/defeat screen. */
 export interface RunStats {
@@ -17,6 +31,15 @@ export interface RunStats {
   stagesCleared: number;
   /** defeat reason (ignored on victory) */
   reason?: string;
+  /**
+   * Run-journal wave: observed per-run counts (optional). When present,
+   * showEnd renders a RUN RECAP block with them.
+   */
+  deaths?: number;
+  portals?: number;
+  xpGained?: number;
+  bossesKilled?: number;
+  seed?: number;
 }
 
 const CSS = `
@@ -31,18 +54,19 @@ const CSS = `
 .xhud .objective { top:16px; left:16px; max-width:320px; }
 .xhud .objective .title { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .xhud .objective .desc { font-size:12px; opacity:.8; margin-top:3px; }
-.xhud .objective .progress { font-size:15px; font-weight:700; color:#ffd23f; margin-top:4px; }
+.xhud .objective .progress { font-size:15px; font-weight:700; color:var(--a11y-accent, #ffd23f); margin-top:4px; }
 .xhud .score { top:16px; right:16px; text-align:right; }
-.xhud .score .val { font-size:22px; font-weight:800; color:#ffd23f; }
+.xhud .score .val { font-size:22px; font-weight:800; color:var(--a11y-accent, #ffd23f); }
 .xhud .score .lbl { font-size:10px; letter-spacing:.18em; opacity:.7; }
 /* vendor-economy wave: the scrap (currency) readout under the score */
-.xhud .score .coinval { font-size:15px; font-weight:800; color:#8fe3a8; margin-top:4px; }
+.xhud .score .coinval { font-size:15px; font-weight:800; color:var(--a11y-coin, #8fe3a8); margin-top:4px; }
 .xhud .timer { font-size:13px; opacity:.9; margin-top:4px; font-variant-numeric:tabular-nums; }
-.xhud .lives { font-size:13px; margin-top:2px; color:#ff8a9a; }
+.xhud .lives { font-size:13px; margin-top:2px; color:var(--a11y-lives, #ff8a9a); }
 /* WORLD-TIERS: map tier readout, hidden on tier 1 (origin / single-map games).
    Lives inside the score panel so it can't collide with the quest tracker
    (desktop tracker top is 136px; the panel stays ~123px tall with the chip). */
-.xhud .tier { font-size:13px; margin-top:2px; color:#7dd3fc; letter-spacing:.12em; font-weight:700; }
+.xhud .tier { font-size:13px; margin-top:2px; color:var(--a11y-info, #7dd3fc); letter-spacing:.12em; font-weight:700; }
+.xhud .ngplus { font-size:13px; margin-top:2px; color:#fbbf24; letter-spacing:.12em; font-weight:700; }
 .xhud .crosshair { position:absolute; left:50%; top:50%; width:14px; height:14px; transform:translate(-50%,-50%); }
 .xhud .crosshair::before, .xhud .crosshair::after { content:''; position:absolute; background:rgba(240,250,255,.9); }
 .xhud .crosshair::before { left:6px; top:0; width:2px; height:14px; }
@@ -53,32 +77,58 @@ const CSS = `
 /* HUD-polish: an empty hint is a visible padding-only pill — hide it so it
    can't collide with the bars on touch layouts. */
 .xhud .hint:empty { display:none; }
+/* Tutorial wave: the guided first-run card. Amber pulse ring is the HUD
+   highlight; the Skip button dismisses permanently (Profile.tutorialSeen). */
+.xhud .tutcard { position:absolute; left:50%; bottom:64px; transform:translateX(-50%); max-width:min(480px,92vw);
+  background:rgba(8,10,16,.92); border:1px solid #ffb545; border-radius:12px; padding:10px 14px 12px;
+  font-family:system-ui,-apple-system,sans-serif; color:#e8ecf4; text-align:center; z-index:9400;
+  pointer-events:none; /* only the Skip button takes clicks (button rule below) — the card body must never cover settings/pause buttons (MERGE: tutorial card used to intercept them) */
+  animation:tutpulse 1.6s ease-in-out infinite; }
+.xhud .tutcard .tutlabel { font-size:10px; letter-spacing:.18em; color:#ffb545; font-weight:700; margin-bottom:4px; }
+.xhud .tutcard .tutprompt { font-size:15px; font-weight:600; margin-bottom:8px; }
+.xhud .tutcard button { pointer-events:auto; font-size:11px; letter-spacing:.1em; color:#9aa4b8; background:transparent;
+  border:1px solid rgba(154,164,184,.4); border-radius:6px; padding:4px 10px; cursor:pointer; }
+.xhud .tutcard button:hover { color:#e8ecf4; border-color:#e8ecf4; }
+@keyframes tutpulse { 0%,100% { box-shadow:0 0 0 0 rgba(255,181,69,.45); } 50% { box-shadow:0 0 0 7px rgba(255,181,69,0); } }
+/* Optional per-step target highlight (TutorialStepDef.hudTarget). */
+.xhud .tuthl { animation:tutpulse 1.6s ease-in-out infinite; border-color:#ffb545 !important; }
 .xhud .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(6,8,14,.72); backdrop-filter:blur(6px); pointer-events:auto; }
 .xhud .overlay h1 { font-size:44px; letter-spacing:.14em; margin:0 0 8px; }
 .xhud .overlay .sub { font-size:15px; opacity:.85; margin-bottom:6px; }
 .xhud .overlay .stats { font-size:13px; opacity:.7; margin-bottom:26px; font-variant-numeric:tabular-nums; }
+/* run-journal wave: the recap block on the end screen, and the journal
+   button row on the title screen */
+.xhud .overlay .recap { border-top:1px solid rgba(140,180,220,.25); padding-top:12px; margin-top:-14px; font-size:12px; letter-spacing:.04em; }
+.xhud .title-screen .journal-row { margin-top:14px; }
+.xhud .title-screen .journal-btn { font-size:14px; padding:10px 26px; }
 .xhud .overlay button { pointer-events:auto; cursor:pointer; font-size:15px; font-weight:600; letter-spacing:.08em; padding:12px 34px; border-radius:10px; border:1px solid rgba(140,180,220,.4); background:linear-gradient(180deg,#2b3f57,#1a2536); color:#e8ecf1; margin:4px; }
 .xhud .overlay button:hover { background:linear-gradient(180deg,#3a5474,#223048); }
 .xhud .boss { position:absolute; left:50%; top:56px; transform:translateX(-50%); width:340px; text-align:center; }
 .xhud .boss .bar { height:10px; }
 .xhud .boss .name { font-size:12px; letter-spacing:.2em; opacity:.85; margin-bottom:4px; }
 .xhud .card { position:absolute; left:50%; top:13%; transform:translateX(-50%); max-width:440px; width:calc(100% - 48px); padding:18px 24px 20px; background:rgba(10,14,20,.9); border:1px solid rgba(255,210,63,.4); border-radius:12px; backdrop-filter:blur(6px); pointer-events:auto; text-align:center; animation:cardin .25s ease; cursor:pointer; }
-.xhud .card h2 { font-size:19px; letter-spacing:.14em; margin:0 0 8px; color:#ffd23f; }
+.xhud .card h2 { font-size:19px; letter-spacing:.14em; margin:0 0 8px; color:var(--a11y-accent, #ffd23f); }
 .xhud .card p { font-size:13.5px; opacity:.92; line-height:1.6; margin:0 0 14px; }
 .xhud .card .btn { display:inline-block; font-size:13px; font-weight:700; letter-spacing:.1em; padding:9px 26px; border-radius:8px; border:1px solid rgba(140,180,220,.4); background:linear-gradient(180deg,#2b3f57,#1a2536); color:#e8ecf1; cursor:pointer; }
 .xhud .lvlopts { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; justify-content:center; }
 .xhud .lvlopt { flex:1 1 150px; max-width:210px; padding:14px 12px; border-radius:10px; border:1px solid rgba(140,180,220,.35); background:linear-gradient(180deg,#223048,#141c2c); color:#e8ecf1; cursor:pointer; text-align:center; }
 .xhud .lvlopt:hover { border-color:#ffd23f; background:linear-gradient(180deg,#2e4258,#1a2438); }
-.xhud .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:#ffd23f; margin-bottom:6px; }
+.xhud .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:var(--a11y-accent, #ffd23f); margin-bottom:6px; }
 .xhud .lvlopt .ds { font-size:12px; opacity:.8; line-height:1.45; }
 .xhud .title-screen { background:rgba(4,6,10,.62); }
+/* MERGE (save-slots x gauntlet/journal): the merged title screen is taller
+ * than the viewport (boards + journal), and a centered flex column clips
+ * its TOP with no scroll — the slot picker sat above the viewport. Safe
+ * center falls back to top alignment on overflow, and the overlay scrolls
+ * so the bottom stays reachable. */
+.xhud .overlay.title-screen { overflow-y:auto; justify-content:safe center; }
 .xhud .title-screen .tag { font-size:13px; letter-spacing:.5em; opacity:.6; margin-bottom:10px; }
 .xhud .title-screen h1 { font-size:52px; }
 .xhud .title-screen .premise { max-width:520px; font-size:15px; line-height:1.65; opacity:.92; margin:0 24px 18px; text-align:center; }
 .xhud .title-screen .controls { display:flex; flex-wrap:wrap; gap:6px 18px; justify-content:center; max-width:520px; font-size:12px; opacity:.65; margin-bottom:26px; }
 .xhud .title-screen .start-btn { font-size:18px; padding:14px 44px; animation:pulse 1.6s ease-in-out infinite; }
 .xhud .title-screen .profile-line { font-size:12px; letter-spacing:.08em; opacity:.7; margin:-8px 0 14px; }
-.xhud .title-screen .merit-line { font-size:13px; letter-spacing:.08em; color:#ffd23f; margin-bottom:10px; }
+.xhud .title-screen .merit-line { font-size:13px; letter-spacing:.08em; color:var(--a11y-accent, #ffd23f); margin-bottom:10px; }
 .xhud .title-screen .mods { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; max-width:560px; margin-bottom:14px; }
 .xhud .title-screen .mod { pointer-events:auto; border:1px solid rgba(140,180,220,.35); border-radius:8px; padding:8px 10px; font-size:11px; text-align:center; min-width:110px; max-width:130px; background:rgba(20,28,44,.7); cursor:pointer; }
 .xhud .title-screen .mod .mn { font-weight:700; letter-spacing:.05em; margin-bottom:3px; }
@@ -90,6 +140,19 @@ const CSS = `
 .xhud .title-screen .mod.denied { border-color:#ff6a7a; animation:deny-shake .45s ease; }
 @keyframes deny-shake { 0%,100% { transform:translateX(0); } 20% { transform:translateX(-6px); } 40% { transform:translateX(5px); } 60% { transform:translateX(-4px); } 80% { transform:translateX(3px); } }
 .xhud .title-screen .daily-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:14px; flex-wrap:wrap; }
+/* gauntlet mode: same row/board language as the daily challenge */
+.xhud .title-screen .gauntlet-row { display:flex; gap:12px; align-items:center; justify-content:center; margin-bottom:14px; flex-wrap:wrap; }
+.xhud .title-screen .gauntlet-btn { font-size:14px; padding:10px 26px; border-color:rgba(255,120,60,.55); }
+.xhud .title-screen .gauntlet-line { font-size:12px; opacity:.75; letter-spacing:.06em; }
+.xhud .title-screen .gauntlet-board { margin:0 auto 18px; max-width:560px; width:min(94%,560px); border:1px solid rgba(255,150,80,.25); border-radius:10px; padding:10px 14px; background:rgba(26,14,8,.55); font-size:12px; }
+.xhud .title-screen .gauntlet-board-head { font-size:11px; letter-spacing:.22em; opacity:.65; margin-bottom:8px; text-align:center; }
+.xhud .title-screen .gauntlet-board-row { display:flex; gap:10px; align-items:baseline; padding:3px 0; border-top:1px solid rgba(255,150,80,.12); }
+.xhud .title-screen .gauntlet-board-row:first-of-type { border-top:none; }
+.xhud .title-screen .gauntlet-board-row.today .gbr-date { color:#ffd23f; font-weight:700; }
+.xhud .title-screen .gbr-date { width:64px; flex:none; opacity:.8; letter-spacing:.08em; }
+.xhud .title-screen .gbr-bosses { flex:1; opacity:.85; }
+.xhud .title-screen .gbr-result { flex:none; opacity:.9; text-align:right; }
+
 .xhud .title-screen .daily-btn { font-size:14px; padding:10px 26px; }
 .xhud .title-screen .daily-btn.played { opacity:.55; cursor:default; }
 .xhud .title-screen .daily-challenge-line { font-size:12px; opacity:.75; letter-spacing:.06em; }
@@ -97,10 +160,26 @@ const CSS = `
 .xhud .title-screen .daily-board-head { font-size:11px; letter-spacing:.22em; opacity:.65; margin-bottom:8px; text-align:center; }
 .xhud .title-screen .daily-board-row { display:flex; gap:10px; align-items:baseline; padding:3px 0; border-top:1px solid rgba(140,180,220,.12); }
 .xhud .title-screen .daily-board-row:first-of-type { border-top:none; }
-.xhud .title-screen .daily-board-row.today .dbr-date { color:#ffd23f; font-weight:700; }
+.xhud .title-screen .daily-board-row.today .dbr-date { color:var(--a11y-accent, #ffd23f); font-weight:700; }
 .xhud .title-screen .dbr-date { width:64px; flex:none; opacity:.8; letter-spacing:.08em; }
 .xhud .title-screen .dbr-goal { flex:1; opacity:.85; }
 .xhud .title-screen .dbr-result { flex:none; opacity:.9; text-align:right; }
+/* UPGRADE LOOP (save-slots): title-screen slot picker. All interactive
+   targets >= 28px (skills-wave touch precedent); the picker must fit 360px. */
+.xhud .title-screen .slots { width:min(92%,460px); box-sizing:border-box; margin:0 auto 14px; border:1px solid rgba(140,180,220,.25); border-radius:10px; padding:10px 12px; background:rgba(10,16,26,.55); }
+.xhud .title-screen .slots-head { font-size:11px; letter-spacing:.22em; opacity:.65; margin-bottom:8px; text-align:center; }
+.xhud .title-screen .slot-row { display:flex; gap:6px; align-items:stretch; margin-bottom:6px; }
+.xhud .title-screen .slot-row:last-of-type { margin-bottom:2px; }
+.xhud .title-screen .slot-pick { flex:1; min-width:0; display:flex; align-items:center; gap:10px; min-height:36px; padding:6px 12px; border-radius:8px; border:1px solid rgba(140,180,220,.3); background:rgba(20,28,44,.7); color:#e8ecf1; cursor:pointer; text-align:left; font-size:13px; margin:0; }
+.xhud .title-screen .slot-pick .slot-name { font-weight:700; letter-spacing:.04em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.xhud .title-screen .slot-pick .slot-meta { font-size:11px; opacity:.7; overflow-wrap:anywhere; }
+.xhud .title-screen .slot-row.active .slot-pick { border-color:#ffd23f; background:rgba(60,48,16,.6); }
+.xhud .title-screen .slot-row.active .slot-name::before { content:'▸ '; color:#ffd23f; }
+.xhud .title-screen .slot-btn { min-width:36px; min-height:36px; padding:4px 8px; border-radius:8px; border:1px solid rgba(140,180,220,.3); background:rgba(20,28,44,.7); color:#e8ecf1; cursor:pointer; font-size:14px; margin:0; }
+.xhud .title-screen .slot-btn:disabled { opacity:.35; cursor:default; }
+.xhud .title-screen .slot-btn.armed { border-color:#ff6a7a; color:#ff8a9a; }
+.xhud .title-screen .slot-rename-input { flex:1; min-height:36px; min-width:0; background:#141c2c; color:#e8ecf1; border:1px solid #ffd23f; border-radius:8px; padding:6px 10px; font-size:14px; }
+.xhud .title-screen .slot-new { width:100%; min-height:36px; margin:4px 0 0; border-radius:8px; border:1px dashed rgba(140,180,220,.4); background:transparent; color:#9fb4d0; cursor:pointer; font-size:13px; letter-spacing:.1em; padding:6px 12px; }
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
 .xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
 .xhud .settings-row { display:flex; align-items:center; gap:14px; font-size:13px; letter-spacing:.1em; }
@@ -159,7 +238,7 @@ const MODAL_CSS = `
 .xhud-modals .lvlopts { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; justify-content:center; }
 .xhud-modals .lvlopt { flex:1 1 150px; max-width:210px; padding:14px 12px; border-radius:10px; border:1px solid rgba(140,180,220,.35); background:linear-gradient(180deg,#223048,#141c2c); color:#e8ecf1; cursor:pointer; text-align:center; font-family:inherit; }
 .xhud-modals .lvlopt:hover { border-color:#ffd23f; background:linear-gradient(180deg,#2e4258,#1a2438); }
-.xhud-modals .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:#ffd23f; margin-bottom:6px; }
+.xhud-modals .lvlopt .nm { font-size:14px; font-weight:700; letter-spacing:.06em; color:var(--a11y-accent, #ffd23f); margin-bottom:6px; }
 .xhud-modals .lvlopt .ds { font-size:12px; opacity:.8; line-height:1.45; }
 @media (max-width:760px) {
   .xhud-modals .overlay h1 { font-size:32px; }
@@ -199,6 +278,9 @@ export class HUD {
   private livesEl: HTMLDivElement;
   private vignette: HTMLDivElement;
   private toastEl: HTMLDivElement;
+  /** Tutorial wave: the live tutorial card + highlighted target (if any). */
+  private tutCard: HTMLDivElement | null = null;
+  private tutHl: HTMLElement | null = null;
   private crosshair: HTMLDivElement;
   private overlay: HTMLDivElement | null = null;
   /** live story card from showCard (tracked so restarts can dismiss it) */
@@ -239,6 +321,16 @@ export class HUD {
    * arrival) — zero per-frame cost; update() never touches it.
    */
   private tierEl: HTMLDivElement;
+  /**
+   * UPGRADE LOOP (new-game-plus): NG+ cycle chip in the score panel.
+   * Hidden at cycle 0 (the base game) so the common case renders exactly
+   * as before. Updated ONLY via setNgPlus (engine calls it on run start
+   * and on NG+ entry) — zero per-frame cost; update() never touches it.
+   * The last value is cached so repeat calls with the same cycle are a
+   * no-op, not even a style write.
+   */
+  private ngplusEl: HTMLDivElement;
+  private lastNgPlus = -1;
 
   constructor(private container: HTMLElement, private spec: GameSpec) {
     const style = document.createElement('style');
@@ -267,6 +359,7 @@ export class HUD {
         <div class="timer"></div>
         <div class="lives"></div>
         <div class="tier" style="display:none"></div>
+        <div class="ngplus" style="display:none"></div>
       </div>
       <div class="vignette"></div>
       <div class="toast"></div>
@@ -298,6 +391,7 @@ export class HUD {
     this.bossName = this.root.querySelector('.boss .name')!;
     this.bossFill = this.root.querySelector('.boss .bar > div')!;
     this.tierEl = this.root.querySelector('.score .tier')!;
+    this.ngplusEl = this.root.querySelector('.score .ngplus')!;
     this.crosshair = document.createElement('div');
     this.crosshair.className = 'crosshair';
     this.crosshair.style.display = 'none';
@@ -310,6 +404,35 @@ export class HUD {
   setObjective(title: string, desc: string) {
     this.objTitle.textContent = title;
     this.objDesc.textContent = desc;
+  }
+
+  /**
+   * ACCESSIBILITY PASS: apply palette + text scale. Palette colors land
+   * as CSS variables on the HUD root (chips read them via var() with the
+   * shipped hex as fallback, so pre-apply rendering is unchanged); text
+   * scale sets inline font sizes on the primary readouts (base px sizes
+   * from the stylesheet × scale, rounded to 0.1px). Inline sizes beat the
+   * small-screen media-query sizes — a deliberate tradeoff: a user who
+   * asked for bigger text gets it on every viewport. Panels owned by
+   * other UI classes (inventory, crafting, dialogue) are NOT scaled here.
+   */
+  applyAccessibility(palette: ColorblindPalette, textScale: number): void {
+    const table = THEME_TABLE[palette];
+    (Object.keys(table) as ThemeRole[]).forEach((role) => {
+      this.root.style.setProperty(themeVar(role), table[role]);
+    });
+    const px = (base: number) => `${Math.round(base * textScale * 10) / 10}px`;
+    this.objTitle.style.fontSize = px(13);
+    this.objDesc.style.fontSize = px(12);
+    this.objProg.style.fontSize = px(15);
+    this.scoreVal.style.fontSize = px(22);
+    this.coinVal.style.fontSize = px(15);
+    this.timerEl.style.fontSize = px(13);
+    this.livesEl.style.fontSize = px(13);
+    this.tierEl.style.fontSize = px(13);
+    this.toastEl.style.fontSize = px(20);
+    this.hintEl.style.fontSize = px(11.5);
+    this.bossName.style.fontSize = px(12);
   }
   setProgress(text: string) { this.objProg.textContent = text; }
   setScore(v: number) { this.scoreVal.textContent = String(Math.round(v)); }
@@ -339,6 +462,23 @@ export class HUD {
     } else {
       this.tierEl.style.display = '';
       this.tierEl.textContent = `TIER ${t}`;
+    }
+  }
+  /**
+   * UPGRADE LOOP (new-game-plus): set the NG+ cycle chip. Cycle <= 0
+   * hides the chip (the base game). Called by the engine on run start
+   * and on NG+ entry only — never per frame; same-cycle calls no-op.
+   */
+  setNgPlus(cycle: number) {
+    const c = Number.isFinite(cycle) ? Math.max(0, Math.floor(cycle)) : 0;
+    if (c === this.lastNgPlus) return;
+    this.lastNgPlus = c;
+    if (c <= 0) {
+      this.ngplusEl.style.display = 'none';
+      this.ngplusEl.textContent = '';
+    } else {
+      this.ngplusEl.style.display = '';
+      this.ngplusEl.textContent = `NG+ ${c}`;
     }
   }
   setCrosshair(show: boolean) { this.crosshair.style.display = show ? '' : 'none'; }
@@ -630,6 +770,50 @@ export class HUD {
     this.toastT = seconds;
   }
 
+  /**
+   * Tutorial wave: show the guided first-run card (label like
+   * "STEP 2/7 — LOOK", the step prompt, and a Skip button). `target` is an
+   * optional HUD selector to pulse-highlight while the step is active.
+   * Re-showing replaces the previous card; hideTutorialCard() removes it.
+   */
+  showTutorialCard(label: string, prompt: string, target: string | null, onSkip: () => void) {
+    this.hideTutorialCard();
+    // Headless/stub-DOM test harnesses fake `document` without ownerDocument:
+    // track the tutorial state in the manager, skip rendering the card here.
+    const doc = this.root?.ownerDocument;
+    if (!doc) return;
+    const card = doc.createElement('div');
+    card.className = 'tutcard';
+    const lab = doc.createElement('div');
+    lab.className = 'tutlabel';
+    lab.textContent = label;
+    const pr = doc.createElement('div');
+    pr.className = 'tutprompt';
+    pr.textContent = prompt;
+    const skip = doc.createElement('button');
+    skip.type = 'button';
+    skip.textContent = 'SKIP TUTORIAL';
+    skip.addEventListener('click', (e) => { e.stopPropagation(); onSkip(); });
+    card.append(lab, pr, skip);
+    this.root.appendChild(card);
+    this.tutCard = card;
+    if (target) {
+      const el = this.root.querySelector(target) as HTMLElement | null;
+      if (el) {
+        el.classList.add('tuthl');
+        this.tutHl = el;
+      }
+    }
+  }
+
+  /** Tutorial wave: remove the tutorial card and any target highlight. */
+  hideTutorialCard() {
+    this.tutCard?.remove();
+    this.tutCard = null;
+    this.tutHl?.classList.remove('tuthl');
+    this.tutHl = null;
+  }
+
   update(dt: number) {
     this.vignetteT = Math.max(0, this.vignetteT - dt);
     const dmg = Math.min(1, this.vignetteT * 3);
@@ -669,6 +853,23 @@ export class HUD {
     /** today + previous 7 days, newest first */
     dailyBoard?: DailyBoardRow[];
     onDaily?: () => void;
+    /** gauntlet mode (combat blueprints only): button label, e.g. "GAUNTLET 2026-10-23" */
+    gauntletLabel?: string;
+    /** boss order line under the gauntlet button, e.g. "WARDEN → TITAN → … · best 12,400" */
+    gauntletLine?: string;
+    /** today + previous 7 days of pinned gauntlets, newest first */
+    gauntletBoard?: GauntletBoardRow[];
+    onGauntlet?: () => void;
+    /** UPGRADE LOOP (save-slots): title-screen slot picker rows */
+    slots?: SlotSummary[];
+    /** show the "+ NEW SLOT" button (false at the slot cap) */
+    canNewSlot?: boolean;
+    onSelectSlot?: (id: string) => void;
+    onRenameSlot?: (id: string, name: string) => void;
+    onDeleteSlot?: (id: string) => void;
+    onNewSlot?: () => void;
+    /** run-journal wave: opens the run journal panel; renders the button */
+    onJournal?: () => void;
   }) {
     this.clearOverlays();
     const ov = document.createElement('div');
@@ -682,6 +883,110 @@ export class HUD {
     p.className = 'premise';
     p.textContent = opts.premise;
     ov.append(tag, h, p);
+
+    // UPGRADE LOOP (save-slots): slot picker. Every control stopPropagation()s:
+    // the overlay starts the run on any click, and touching a slot control is
+    // not starting a run. Delete is two-step (arm → confirm) — WebView-safe,
+    // no window.confirm. Rename is an inline input — no window.prompt.
+    if (opts.slots && opts.slots.length) {
+      const sw = document.createElement('div');
+      sw.className = 'slots';
+      const head = document.createElement('div');
+      head.className = 'slots-head';
+      head.textContent = 'SAVE SLOT';
+      sw.appendChild(head);
+
+      const startRename = (row: HTMLDivElement, s: SlotSummary, nm: HTMLSpanElement, renBtn: HTMLButtonElement) => {
+        if (row.querySelector('input.slot-rename-input')) return; // already renaming
+        const input = document.createElement('input');
+        input.className = 'slot-rename-input';
+        input.type = 'text';
+        input.maxLength = 24;
+        input.value = s.name;
+        input.setAttribute('aria-label', `Rename slot ${s.name}`);
+        input.addEventListener('click', (e) => e.stopPropagation());
+        const cleanup = () => { input.replaceWith(nm); ok.remove(); };
+        const commit = () => {
+          const v = input.value.trim();
+          cleanup();
+          if (v) opts.onRenameSlot?.(s.id, v);
+        };
+        input.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') commit();
+          else if (e.key === 'Escape') cleanup();
+        });
+        const ok = document.createElement('button');
+        ok.className = 'slot-btn slot-ok';
+        ok.textContent = '✓';
+        ok.setAttribute('aria-label', 'Confirm rename');
+        ok.addEventListener('click', (e) => { e.stopPropagation(); commit(); });
+        nm.replaceWith(input);
+        row.insertBefore(ok, renBtn);
+        input.focus();
+        input.select();
+      };
+
+      for (const s of opts.slots) {
+        const row = document.createElement('div');
+        row.className = 'slot-row' + (s.active ? ' active' : '');
+        row.setAttribute('data-slot-id', s.id);
+        const pick = document.createElement('button');
+        pick.className = 'slot-pick';
+        pick.setAttribute('aria-label', `Select save slot ${s.name}`);
+        const nm = document.createElement('span');
+        nm.className = 'slot-name';
+        nm.textContent = s.name;
+        const meta = document.createElement('span');
+        meta.className = 'slot-meta';
+        meta.textContent = s.runs > 0
+          ? `◆${s.merit} · ${s.runs} run${s.runs === 1 ? '' : 's'} · ${s.playtimeMin}m`
+          : 'empty';
+        pick.append(nm, meta);
+        pick.addEventListener('click', (e) => { e.stopPropagation(); opts.onSelectSlot?.(s.id); });
+        row.appendChild(pick);
+
+        const ren = document.createElement('button');
+        ren.className = 'slot-btn slot-rename';
+        ren.setAttribute('aria-label', `Rename save slot ${s.name}`);
+        ren.textContent = '✎';
+        ren.addEventListener('click', (e) => { e.stopPropagation(); startRename(row, s, nm, ren); });
+        row.appendChild(ren);
+
+        const del = document.createElement('button');
+        del.className = 'slot-btn slot-del';
+        del.setAttribute('aria-label', `Delete save slot ${s.name}`);
+        del.textContent = '🗑';
+        let disarm: ReturnType<typeof setTimeout> | undefined;
+        del.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!del.classList.contains('armed')) {
+            del.classList.add('armed');
+            del.textContent = '⁉';
+            clearTimeout(disarm);
+            // 10s confirm window: generous on slow devices (and under
+            // automation, where a single click's actionability checks can
+            // take ~1s); a second tap inside the window confirms.
+            disarm = setTimeout(() => { del.classList.remove('armed'); del.textContent = '🗑'; }, 10_000);
+            return;
+          }
+          clearTimeout(disarm);
+          opts.onDeleteSlot?.(s.id);
+        });
+        // the last slot can never be deleted — the delete button is inert
+        if (opts.slots.length <= 1) del.disabled = true;
+        row.appendChild(del);
+        sw.appendChild(row);
+      }
+      if (opts.canNewSlot) {
+        const nw = document.createElement('button');
+        nw.className = 'slot-new';
+        nw.textContent = '＋ NEW SLOT';
+        nw.addEventListener('click', (e) => { e.stopPropagation(); opts.onNewSlot?.(); });
+        sw.appendChild(nw);
+      }
+      ov.appendChild(sw);
+    }
 
     if (opts.profileLine) {
       const pl = document.createElement('div');
@@ -814,6 +1119,76 @@ export class HUD {
       }
     } else {
       ov.appendChild(b);
+    }
+
+
+    // Gauntlet mode: entry button + boss-order line + board. Local-only —
+    // the tuples recompute from each date, results come from the profile.
+    if (opts.onGauntlet && opts.gauntletLabel) {
+      const grow = document.createElement('div');
+      grow.className = 'gauntlet-row';
+      const gb = document.createElement('button');
+      gb.className = 'gauntlet-btn';
+      gb.textContent = opts.gauntletLabel;
+      gb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (started) return;
+        started = true;
+        opts.onGauntlet!();
+      });
+      grow.appendChild(gb);
+      if (opts.gauntletLine) {
+        const gline = document.createElement('div');
+        gline.className = 'gauntlet-line';
+        gline.textContent = opts.gauntletLine;
+        grow.appendChild(gline);
+      }
+      ov.appendChild(grow);
+
+      if (opts.gauntletBoard && opts.gauntletBoard.length) {
+        const board = document.createElement('div');
+        board.className = 'gauntlet-board';
+        const head = document.createElement('div');
+        head.className = 'gauntlet-board-head';
+        head.textContent = 'GAUNTLET BOARD';
+        board.appendChild(head);
+        for (const r of opts.gauntletBoard) {
+          const d = document.createElement('div');
+          d.className = 'gauntlet-board-row' + (r.today ? ' today' : '');
+          const dt = document.createElement('span');
+          dt.className = 'gbr-date';
+          dt.textContent = r.today ? 'TODAY' : r.date.slice(5);
+          const gl = document.createElement('span');
+          gl.className = 'gbr-bosses';
+          gl.textContent = r.bossesText;
+          const rs = document.createElement('span');
+          rs.className = 'gbr-result';
+          rs.textContent = r.result
+            ? `R${r.result.roundsCleared}/5 ${r.result.won ? 'WON' : ''} ${r.result.score.toLocaleString('en-US')}`.trim()
+            : '—';
+          d.append(dt, gl, rs);
+          board.appendChild(d);
+        }
+        ov.appendChild(board);
+      }
+    }
+
+    // run-journal wave: the journal entry point lives on the title
+    // screen. stopPropagation: the overlay's click-to-start handler must not
+    // fire when the player opens the journal.
+    if (opts.onJournal) {
+      const jr = document.createElement('div');
+      jr.className = 'journal-row';
+      const jb = document.createElement('button');
+      jb.className = 'journal-btn';
+      jb.id = 'xandria-journal-open';
+      jb.textContent = '\uD83D\uDCCF RUN JOURNAL';
+      jb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        opts.onJournal!();
+      });
+      jr.appendChild(jb);
+      ov.appendChild(jr);
     }
 
     ov.addEventListener('click', go);
@@ -969,15 +1344,165 @@ export class HUD {
     });
     mrow.append(mlab, mcb);
 
+    // ACCESSIBILITY PASS: colorblind palette, reduced motion, HUD text
+    // scale, keybinds — all persisted in the profile (see Engine.
+    // applyAccessibilitySettings) so they survive reload + portal travel.
+    const acc = typeof eng?.getAccessibilitySettings === 'function'
+      ? eng.getAccessibilitySettings()
+      : null;
+    const arow = document.createElement('div');
+    arow.className = 'settings-row';
+    const alab = document.createElement('span');
+    alab.textContent = 'COLORBLIND';
+    const asel = document.createElement('select');
+    asel.setAttribute('aria-label', 'Colorblind palette');
+    for (const p of COLORBLIND_PALETTES) {
+      const o = document.createElement('option');
+      o.value = p;
+      o.textContent = p.toUpperCase();
+      if (acc && p === acc.colorblind) o.selected = true;
+      asel.appendChild(o);
+    }
+    asel.addEventListener('change', () => {
+      eng?.applyAccessibilitySettings({ colorblind: asel.value as ColorblindPalette });
+      eng?.audio.play('click');
+    });
+    arow.append(alab, asel);
+
+    const rrow = document.createElement('div');
+    rrow.className = 'settings-row';
+    const rlab = document.createElement('span');
+    rlab.textContent = 'REDUCED MOTION';
+    const rcb = document.createElement('input');
+    rcb.type = 'checkbox';
+    rcb.checked = !!acc?.reducedMotion;
+    rcb.setAttribute('aria-label', 'Reduced motion');
+    rcb.addEventListener('change', () => {
+      eng?.applyAccessibilitySettings({ reducedMotion: rcb.checked });
+      eng?.audio.play('click');
+    });
+    rrow.append(rlab, rcb);
+
+    const xrow = document.createElement('div');
+    xrow.className = 'settings-row';
+    const xlab = document.createElement('span');
+    xlab.textContent = 'HUD TEXT SIZE';
+    const xsl = document.createElement('input');
+    xsl.type = 'range'; xsl.min = '85'; xsl.max = '150';
+    xsl.value = String(Math.round((acc?.hudTextScale ?? 1) * 100));
+    xsl.setAttribute('aria-label', 'HUD text size');
+    xsl.addEventListener('input', () => {
+      eng?.applyAccessibilitySettings({ hudTextScale: Number(xsl.value) / 100 });
+    });
+    xrow.append(xlab, xsl);
+
+    // Keybinds: one row per remappable action. Click a key button, then
+    // press the new key — capture-phase listener so the game input layer
+    // never sees the capture keystroke. Conflicts are rejected with a
+    // note (never silently applied); Escape cancels the capture.
+    const kbWrap = document.createElement('div');
+    kbWrap.className = 'settings';
+    const kbHead = document.createElement('div');
+    kbHead.className = 'settings-row';
+    const kbHeadLab = document.createElement('span');
+    kbHeadLab.textContent = 'KEYBINDS';
+    kbWrap.append(kbHead);
+    const kbNote = document.createElement('div');
+    kbNote.className = 'settings-note';
+    kbNote.textContent = '';
+    const curBinds: Record<string, string> = eng?.input
+      ? (eng.input.getKeybinds() as Record<string, string>)
+      : {};
+    const refreshKbNote = (msg: string) => { kbNote.textContent = msg; };
+    let capturing: { action: RemappableAction; btn: HTMLButtonElement } | null = null;
+    const stopCapture = () => {
+      if (!capturing) return;
+      capturing.btn.textContent = keyDisplayName(curBinds[capturing.action] ?? '');
+      capturing = null;
+    };
+    const onCaptureKey = (e: KeyboardEvent) => {
+      if (!capturing) return;
+      // Panel torn down without BACK (e.g. pause dismissed): drop the
+      // listener instead of swallowing a live game keystroke.
+      if (!kbWrap.isConnected) {
+        capturing = null;
+        if (typeof window !== 'undefined') window.removeEventListener('keydown', onCaptureKey, true);
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      const { action, btn } = capturing;
+      capturing = null;
+      if (e.code === 'Escape') {
+        btn.textContent = keyDisplayName(curBinds[action] ?? '');
+        return;
+      }
+      const cur: KeybindOverrides = eng?.getAccessibilitySettings
+        ? eng.getAccessibilitySettings().keybinds
+        : {};
+      const res = tryRemap(validateKeybinds(cur), action, e.code);
+      if (!res.ok) {
+        btn.textContent = keyDisplayName(curBinds[action] ?? '');
+        refreshKbNote(`KEY REJECTED: ${res.reason.toUpperCase()}`);
+        eng?.audio.play('alarm');
+        return;
+      }
+      const applied = eng?.applyAccessibilitySettings({ keybinds: res.overrides });
+      if (applied) {
+        curBinds[action] = e.code;
+        btn.textContent = keyDisplayName(e.code);
+        refreshKbNote('');
+        eng?.audio.play('click');
+      } else {
+        btn.textContent = keyDisplayName(curBinds[action] ?? '');
+        refreshKbNote('KEY REJECTED: ENGINE UNAVAILABLE');
+      }
+    };
+    // Headless/unit-test environments have no window — the capture
+    // listener is a browser-only concern.
+    if (typeof window !== 'undefined') window.addEventListener('keydown', onCaptureKey, true);
+    for (const action of UI_REMAPPABLE_ACTIONS) {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      const lab = document.createElement('span');
+      lab.textContent = action.toUpperCase();
+      const btn = document.createElement('button');
+      btn.textContent = keyDisplayName(curBinds[action] ?? '');
+      btn.setAttribute('aria-label', `Rebind ${action}`);
+      btn.addEventListener('click', () => {
+        if (capturing) stopCapture();
+        capturing = { action, btn };
+        btn.textContent = 'PRESS KEY…';
+        refreshKbNote('PRESS A KEY (ESC TO CANCEL)');
+      });
+      row.append(lab, btn);
+      kbWrap.append(row);
+    }
+    kbWrap.append(kbNote);
+
     const back = document.createElement('button');
     back.textContent = 'BACK';
-    back.addEventListener('click', () => { eng?.audio.play('click'); this.showPause(); });
-    wrap.append(vrow, qrow, trow, drow, mrow);
+    back.addEventListener('click', () => {
+      // Leaving settings drops the key-capture listener (see isConnected
+      // guard above for the dismiss-without-BACK path).
+      if (typeof window !== 'undefined') window.removeEventListener('keydown', onCaptureKey, true);
+      eng?.audio.play('click'); this.showPause();
+    });
+    wrap.append(vrow, qrow, trow, drow, mrow, arow, rrow, xrow, kbWrap);
     ov.append(h, wrap, back);
     this.overlay = ov;
   }
 
-  showEnd(won: boolean, stats: RunStats, winText?: string) {
+  /**
+   * UPGRADE LOOP (new-game-plus): the optional 4th argument offers NG+
+   * entry on the run-end screen. The button is appended to the same
+   * button row (after TITLE) ONLY when an offer is supplied — callers
+   * without an offer render exactly the old RESTART/TITLE row, so the
+   * existing showEnd button contract is unchanged. Offered on both
+   * victory and defeat: NG+ is an opt-in harder cycle, not a reward,
+   * and the run-completion path covers both endings.
+   */
+  showEnd(won: boolean, stats: RunStats, winText?: string, ngPlus?: { targetCycle: number; onEnter: () => void }) {
     this.clearOverlays();
     this.overlay = document.createElement('div');
     this.overlay.className = 'overlay';
@@ -1001,6 +1526,14 @@ export class HUD {
     statsEl.textContent =
       `SCORE ${Math.round(stats.score)} · TIME ${m}:${String(s).padStart(2, '0')}` +
       ` · KILLS ${stats.kills} · LEVEL ${stats.level}${stageBit}`;
+    // Run-journal wave: the run-recap screen — the run's observed stats,
+    // shown on the end screen before the player returns to the title.
+    const recapBits: string[] = [];
+    if (stats.deaths !== undefined) recapBits.push(`DEATHS ${stats.deaths}`);
+    if (stats.portals !== undefined) recapBits.push(`PORTALS ${stats.portals}`);
+    if (stats.bossesKilled !== undefined) recapBits.push(`BOSSES ${stats.bossesKilled}`);
+    if (stats.xpGained !== undefined) recapBits.push(`XP +${Math.round(stats.xpGained)}`);
+    if (stats.seed !== undefined) recapBits.push(`SEED ${stats.seed}`);
     const btnWrap = document.createElement('div');
     const again = document.createElement('button');
     again.textContent = 'RESTART';
@@ -1009,7 +1542,24 @@ export class HUD {
     title.textContent = 'TITLE';
     title.addEventListener('click', () => this.eng?.toTitle());
     btnWrap.append(again, title);
-    this.overlay.append(h, sub, statsEl, btnWrap);
+    if (ngPlus) {
+      const ng = document.createElement('button');
+      ng.className = 'ngplus-btn';
+      ng.setAttribute('data-cycle', String(ngPlus.targetCycle));
+      ng.textContent = `NEW GAME+ ${ngPlus.targetCycle}`;
+      ng.addEventListener('click', () => ngPlus.onEnter());
+      btnWrap.append(ng);
+    }
+    if (recapBits.length) {
+      const recap = document.createElement('div');
+      recap.className = 'stats recap';
+      recap.id = 'xandria-run-recap';
+      // textContent (not innerHTML): all values are numbers from the engine
+      recap.textContent = `RUN RECAP — ${recapBits.join(' · ')}`;
+      this.overlay.append(h, sub, statsEl, recap, btnWrap);
+    } else {
+      this.overlay.append(h, sub, statsEl, btnWrap);
+    }
     this.root.appendChild(this.overlay);
   }
 

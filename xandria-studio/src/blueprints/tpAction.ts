@@ -54,8 +54,11 @@ import { GatheringManager, GatheringInteractionSession } from '../engine/game/ga
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
 import { ensureSetItemDefs } from '../engine/game/setBonuses';
+import { ensureEnchantItemDefs } from '../engine/game/enchantments';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
+import { DeployablesManager } from '../engine/game/deployables';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
 import {
@@ -67,6 +70,8 @@ import {
   buildVendorNpcSpecs,
 } from '../engine/game/economy';
 import { ShopPanel } from '../engine/ui/ShopPanel';
+import { FactionStandings, localStorageFactionsAdapter, factionOfVendor } from '../engine/game/factions';
+import { StandingsPanel } from '../engine/ui/StandingsPanel';
 import { DynamicEventManager, EventInteractionSession, EVENT_DEFS, EVENT_SALT, planDynamicEvents, buildMerchantStock, resolveEventsEnabled } from '../engine/game/dynamicEvents';
 import { TradePanel } from '../engine/ui/TradePanel';
 import { AchievementsPanel } from '../engine/ui/AchievementsPanel';
@@ -167,6 +172,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const wallet = new Wallet();
   engine.wallet = wallet;
   wallet.onChange = () => engine.hud.setCurrency(wallet.balance);
+  // factions-reputation wave: player-scoped standings (never in
+  // portalEntities, so portal travel leaves them untouched by
+  // construction). Restored from guarded localStorage keyed by spec
+  // seed, so a full page reload keeps the standings for this spec.
+  // Constructed before enemies/quests/shop so every hook below can
+  // close over it; onChange is assigned after the panel exists.
+  const standings = new FactionStandings(localStorageFactionsAdapter(spec.meta.seed));
   // vendor-economy wave: merchant NPCs get their OWN map-local roster
   // (id 'vendors', VENDOR_SALT stream) — one NpcManager each, so the
   // villager roster's seeded spawns stay byte-identical to before this
@@ -223,6 +235,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       grantKillXp(prog, notifyLevelUp, e.xpMult);
       objectives.addProgress(1, 'kill'); // M5: kills only count toward kill stages
       quests?.onKill(e.spec.kind); // quest wave: kills feed kill objectives
+      // factions-reputation wave: observe-only kill hook (no enemy
+      // contract change) — faction mobs drop standing, bosses more.
+      standings.onKill(e.spec.kind, !!e.isBoss);
       combatPulse();
       const d = e.position.distanceTo(avatar.ctrl.position);
       if (d < 14) camRig.shake(0.6 * (1 - d / 14));
@@ -244,6 +259,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     playerLevel: () => prog.level,
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
+    ngPlus: () => engine.getNgPlusCycle(),
 
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
@@ -254,6 +270,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // --- player
   const spawnY = terrain.heightAt(0, 0);
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, spawnY + 2, 0), enemies, projectiles);
+  // COMBAT-ABILITIES: data-driven active abilities (dash-strike /
+  // shockwave-slam / mend) on the player-scoped manager. Blueprint-owned
+  // like SkillSystem, so cooldowns/energy survive portal travel. Aim uses
+  // the melee convention (ctrl.yaw + PI), matching avatar.melee().
+  const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
+    damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
+  });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
   // + recipe outputs) before wireItems, when the spec has crafting enabled
@@ -266,6 +289,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   ensureLootItemDefs(spec);
   // Gear sets wave: set-piece item defs (additive, idempotent).
   ensureSetItemDefs(spec);
+  // Enchantments wave: enchant-material item defs (additive, idempotent).
+  ensureEnchantItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar, {
     // inventory-qol wave: sell-junk hooks ride the vendor-economy wallet
     // (DEFAULT_SELL_MULT — the same rate the shop panel pays). The wallet
@@ -340,6 +365,11 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         getCurrentMap: () => engine.portalManager?.coord ?? null,
         worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
         onLevelUp: (gain) => notifyLevelUp(gain),
+        // factions-reputation wave: standing gate + turn-in reward.
+        // standingOf reads the live standings; onQuestTurnedIn feeds
+        // the def's reward (or the +20 freeholds default) back into it.
+        standingOf: (factionId) => standings.standingOf(factionId),
+        onQuestTurnedIn: (def) => standings.onQuestComplete(def),
         // quest wave: an open quest dialogue live-refreshes when its quest
         // completes underneath it (talk objective fired on open). The thunk
         // is lazy — talkSession is constructed just below.
@@ -367,6 +397,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     onLevelUp: (gain) => notifyLevelUp(gain),
   });
   engine.achievementManager = achievements;
+  // run-journal wave: publish Progression so the engine's run journal
+  // can read the run's total XP at run end (observe-only).
+  engine.progression = prog;
   const gathering = new GatheringManager(engine, {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
     inventory: itemKit?.inventory ?? null,
@@ -399,6 +432,23 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   });
   engine.portalEntities.register(stations);
   if (craftingEnabled) stations.spawnForMap(spec.meta.seed);
+  // UPGRADE LOOP (deployables): player-crafted field items (campfire /
+  // spike trap / lure totem), map-local lifecycle. Registers with
+  // engine.portalEntities ({ id: 'deployables' }) — portal departure
+  // despawns them, arrival does NOT regenerate them (player-placed and
+  // time-limited; the consumed kits are already gone from the inventory).
+  // The deployable item defs + recipes ride ensureCraftingItemDefs above
+  // (craftedItemDefs), so this manager only exists when crafting is on.
+  const deployables = new DeployablesManager(engine, {
+    getPlayerPos: () => avatar.ctrl.position,
+    getEnemies: () => enemies.enemies,
+    healPlayer: (n) => avatar.heal(n),
+    toast: (m) => engine.hud.toast(m),
+    inventory: () => itemKit?.inventory ?? null,
+    enabled: craftingEnabled,
+    mapSeed: spec.meta.seed,
+  });
+  engine.portalEntities.register(deployables);
   const stationSession = craftingEnabled
     ? new CraftingInteractionSession(engine, stations, {
         recipes: () => buildRecipePool(spec),
@@ -437,7 +487,25 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     vendorDefs: () => vendorDefs,
     toast: (m) => engine.hud.toast(m),
     isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+    // factions-reputation wave: vendor -> faction mapping for the
+    // standing price factor, and the trade hook for standing gains.
+    standingOf: (vendorId) => {
+      const f = factionOfVendor(vendorId);
+      return f ? standings.standingOf(f) : 0;
+    },
+    onTrade: (vendorId, kind) => standings.onTrade(vendorId, kind),
   });
+  // factions-reputation wave: the standings panel (event-driven) + the
+  // standings onChange fan-out: persist, re-render the panel, unlock
+  // newly-eligible gated quests, and re-price an open shop.
+  const standingsPanel = new StandingsPanel(engine.container);
+  standingsPanel.render(standings.rows());
+  standings.onChange = () => {
+    standings.save();
+    standingsPanel.render(standings.rows());
+    quests?.refreshStandingGates();
+    shopPanel.refresh();
+  };
   // keep an open shop live-synced with wallet/inventory changes
   wallet.onChange = () => {
     engine.hud.setCurrency(wallet.balance);
@@ -629,9 +697,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const tracerMat = assets.currentMaterial('weapon.projectile');
   if (tracerMat) projectiles.setTracerMaterial(tracerMat);
   // N1: touch-aware hint bar (title screen already detects touch)
+  // UPGRADE LOOP (deployables): the G deploy hotkey is part of the desktop hints.
   hud.setHint(isTouchDevice()
-    ? 'Left stick move · ATK attack · JUMP jump · DASH dash'
-    : 'WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · Esc pause');
+    ? 'Left stick move · ATK attack · JUMP jump · DASH dash · DEPLOY field item'
+    : 'WASD move · mouse look · LMB attack · Space jump · Shift dash/sprint · G deploy · Esc pause');
   // N7: crosshair belongs to guns, not melee
   hud.setCrosshair(spec.player.weapon !== 'none');
 
@@ -688,6 +757,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // (+sin,+cos): offset by PI so W walks away from the camera
     avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
+    // COMBAT-ABILITIES: tick after the controller's velocity write so the
+    // dash-strike velocity override survives the frame; poll hotkeys/touch.
+    abilities.update(dt);
+    abilities.poll(() => {
+      const y = avatar.ctrl.yaw + Math.PI;
+      return new THREE.Vector3(Math.sin(y), 0, Math.cos(y));
+    });
     itemKit?.update(dt);
     gatheringSession.update(dt); // crafting wave (B): [E] Harvest prompt + registration refresh
     eventSession.update(); // dynamic-events wave: [E] Open cache / Trade prompt
@@ -719,12 +795,26 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       avatar.shoot(dir);
     }
 
+    // UPGRADE LOOP (deployables): G / Digit3 / DEPLOY touch button —
+    // deploy the next owned field item (round-robin). Never while a
+    // modal owns input (crafting panel, quest dialogue, shop).
+    if (engine.input.justPressed('deploy') && engine.state === 'playing'
+      && !(stationSession?.isPanelOpen ?? false)
+      && !(talkSession?.isDialogueOpen ?? false)
+      && !shopPanel.isOpen) {
+      deployables.tryDeploy();
+    }
+
     // Enemies wave C: one shared instancer frame for the enemy + NPC
     // managers. Both submit into the same per-engine buckets; a single
     // begin/end per update keeps their instance counts accumulating
     // instead of the second manager's beginFrame zeroing the first's.
     const inst = NpcInstancer.for(engine);
     inst.beginFrame(dt);
+    // UPGRADE LOOP (deployables): FIRST in the frame — the manager ticks
+    // auras and assigns lure targets before EnemyManager.update reads
+    // them, and submits deployable instances into the same buckets.
+    deployables.update(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
     vendorManager.update(dt); // vendor-economy wave: merchants tick (same instancer frame)
@@ -784,5 +874,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather, deployables, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar };
 }

@@ -22,6 +22,7 @@ import {
   type ItemStatKey,
 } from '@spec';
 import { addItemStats, computeSetBonuses } from '../setBonuses';
+import { computeEnchantStats, enchantDef, ENCHANT_DEFS, type EnchantCost } from '../enchantments';
 
 /** Structural contract shared with the runtime crew's wireItems. */
 export interface InventoryLike {
@@ -48,6 +49,8 @@ export interface SerializedInventory {
   /** Acquisition order: [itemId, seq][] + the sequence counter (absent = none). */
   acq?: Array<[string, number]>;
   acqSeq?: number;
+  /** Enchantments wave: [itemId, enchantId][] (absent = none). */
+  ench?: Array<[string, string]>;
 }
 
 const isFiniteNum = (v: unknown): v is number =>
@@ -88,6 +91,13 @@ export class Inventory implements InventoryLike {
    */
   private acqSeq = 0;
   private acqOrder = new Map<string, number>();
+  /**
+   * Enchantments wave: per-item-id enchant state (itemId -> enchantId).
+   * Per-id, not per-unit — the same precedent as junk marks: Inventory
+   * models equipped gear as slot -> itemId with no per-unit instances.
+   * One enchant per item id; see engine/game/enchantments.ts.
+   */
+  private enchants = new Map<string, string>();
 
   constructor(private defs: Record<string, ItemDef>) {
     this.slots = Array.from({ length: BACKPACK_SIZE }, () => null);
@@ -446,14 +456,100 @@ export class Inventory implements InventoryLike {
     return computeSetBonuses(this.getAllEquipped()).bonusStats;
   }
 
+  // ------------------------------------------------------------ enchantments
+
+  /** Enchant id applied to an item id, or null (per-id state, see above). */
+  getEnchant(itemId: string): string | null {
+    return this.enchants.get(itemId) ?? null;
+  }
+
+  /** All enchanted item ids (in application order). */
+  enchantedItemIds(): string[] {
+    return [...this.enchants.keys()];
+  }
+
+  /**
+   * Enchantments wave: apply an enchant to an item id you own (backpack
+   * or equipped). Validation order: unknown item -> not equippable ->
+   * unknown enchant -> slot mismatch -> already enchanted -> missing
+   * materials. On success the material cost is consumed through
+   * remove() (the same consume primitive craft() uses) and the enchant
+   * recorded; nothing is consumed on failure. Returns { ok } plus a
+   * machine-readable reason on failure; never throws.
+   */
+  enchant(itemId: string, enchantId: string): { ok: boolean; reason?: string } {
+    const def = this.defs[itemId];
+    if (!def) {
+      this.warnUnknown(itemId);
+      return { ok: false, reason: 'unknown-item' };
+    }
+    if (!this.isEquippable(itemId) || !def.slot) return { ok: false, reason: 'not-equippable' };
+    const ench = enchantDef(enchantId);
+    if (!ench) return { ok: false, reason: 'unknown-enchant' };
+    if (!ench.slots.includes(def.slot)) return { ok: false, reason: 'slot-mismatch' };
+    if (this.enchants.has(itemId)) return { ok: false, reason: 'already-enchanted' };
+    // all materials present? (count() covers backpack + equipped; materials
+    // are never equipped, so this is effectively the backpack count.)
+    for (const c of ench.cost) {
+      if (this.count(c.itemId) < c.count) return { ok: false, reason: 'missing-materials' };
+    }
+    // consume (defensive rollback: remove() on a counted item cannot
+    // short-change, but never leave a half-consumed enchant behind).
+    const consumed: EnchantCost[] = [];
+    for (const c of ench.cost) {
+      const removed = this.remove(c.itemId, c.count);
+      consumed.push({ itemId: c.itemId, count: removed });
+      if (removed < c.count) {
+        for (const r of consumed) this.add(r.itemId, r.count);
+        return { ok: false, reason: 'missing-materials' };
+      }
+    }
+    this.enchants.set(itemId, enchantId);
+    this.emitChange();
+    return { ok: true };
+  }
+
+  /**
+   * Enchantments wave: remove the enchant from an item id and REFUND
+   * its full material cost through add() (restacking into existing
+   * stacks by construction). Returns the refunded cost lines; [] when
+   * the item is not enchanted (a no-op, nothing refunded).
+   */
+  removeEnchant(itemId: string): EnchantCost[] {
+    const enchantId = this.enchants.get(itemId);
+    if (!enchantId) return [];
+    const ench = enchantDef(enchantId);
+    this.enchants.delete(itemId);
+    if (!ench) {
+      this.emitChange();
+      return [];
+    }
+    for (const c of ench.cost) this.add(c.itemId, c.count);
+    this.emitChange();
+    return ench.cost.map((c) => ({ ...c }));
+  }
+
+  /**
+   * Enchantments wave: additive stat bonuses from the currently
+   * equipped enchanted gear. Pure function of (equipped slots, per-id
+   * enchant state) — recomputed fresh on every read by construction.
+   */
+  enchantStats(): ItemStats {
+    return computeEnchantStats(this.getAllEquipped(), this.enchants);
+  }
+
   /**
    * Gear set bonuses wave: the stat math the engine actually uses —
    * equipped item stats PLUS active set bonuses, additive (addItemStats
    * merges finite numbers only). Equip slot semantics and the loot ladder
    * are untouched; equippedStats() keeps its original contract.
+   *
+   * Enchantments wave: enchants apply LAST, after set bonuses —
+   * effectiveStats() = equipped + set bonuses + enchants (see
+   * engine/game/enchantments.ts for the disclosed order).
    */
   effectiveStats(): ItemStats {
-    return addItemStats(this.equippedStats(), this.setBonusStats());
+    return addItemStats(addItemStats(this.equippedStats(), this.setBonusStats()), this.enchantStats());
   }
 
   // ------------------------------------------------------------ save / load
@@ -467,6 +563,7 @@ export class Inventory implements InventoryLike {
       junk: [...this.junk],
       acq: [...this.acqOrder.entries()],
       acqSeq: this.acqSeq,
+      ench: [...this.enchants.entries()],
     };
     return JSON.stringify(data);
   }
@@ -492,6 +589,7 @@ export class Inventory implements InventoryLike {
     this.junk = fresh.junk;
     this.acqOrder = fresh.acqOrder;
     this.acqSeq = fresh.acqSeq;
+    this.enchants = fresh.enchants;
     this.emitChange();
   }
 
@@ -566,6 +664,24 @@ export class Inventory implements InventoryLike {
       );
     } else if (isFiniteNum(d.acqSeq)) {
       inv.acqSeq = Math.max(inv.acqSeq, Math.floor(d.acqSeq));
+    }
+    // enchantments: restore per-id enchant state (validated: known item
+    // def + known enchant id; anything else is warned about and skipped).
+    if (Array.isArray(d.ench)) {
+      const known = new Set(ENCHANT_DEFS.map((e) => e.id));
+      for (const pair of d.ench) {
+        if (!Array.isArray(pair) || pair.length !== 2) continue;
+        const [id, enchId] = pair as [unknown, unknown];
+        if (typeof id !== 'string' || !defs[id]) {
+          if (typeof id === 'string') inv.warnUnknown(id);
+          continue;
+        }
+        if (typeof enchId !== 'string' || !known.has(enchId)) {
+          console.warn(`[inventory] deserialize: unknown enchant "${String(enchId)}" for "${id}" — skipped`);
+          continue;
+        }
+        inv.enchants.set(id, enchId);
+      }
     }
     return inv;
   }

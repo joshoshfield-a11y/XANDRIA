@@ -66,6 +66,15 @@ function memStorage(): Map<string, string> {
   return m;
 }
 
+/**
+ * save-slots: profiles persist in the active slot of xandria.slots.v1.
+ * Reads the active slot's profile back out of the injected storage.
+ */
+function activeSlotProfile(store: Map<string, string>): Record<string, any> {
+  const st = JSON.parse(store.get('xandria.slots.v1')!);
+  return (st.slots.find((s: any) => s.id === st.activeSlotId) ?? st.slots[0]).profile;
+}
+
 // ---------------------------------------------------------------- registry
 
 describe('bestiary registry', () => {
@@ -206,9 +215,9 @@ describe('BestiaryManager', () => {
     m1.onKill(killOf('walker'));
     m1.onKill(killOf('walker'));
     m1.onKill(killOf('drone'));
-    const raw = store.get('xandria.profile.v1');
+    const raw = JSON.stringify(activeSlotProfile(store));
     expect(raw, 'profile written on unlock').toBeTruthy();
-    const saved = JSON.parse(raw!).bestiaryKills;
+    const saved = activeSlotProfile(store).bestiaryKills;
     expect(saved).toEqual({ walker: 2, drone: 1 });
 
     const m2 = new BestiaryManager(fakeEngine());
@@ -226,7 +235,7 @@ describe('BestiaryManager', () => {
     for (let k = 0; k < 4; k++) m1.onKill(killOf('walker'));
     expect(m1.countOf('walker')).toBe(4);
     expect(m1.tierOf('walker')).toBe(3);
-    const saved = JSON.parse(store.get('xandria.profile.v1')!).bestiaryKills;
+    const saved = activeSlotProfile(store).bestiaryKills;
     expect(saved).toEqual({ walker: 4 });
 
     const m2 = new BestiaryManager(fakeEngine({ tierThresholds: { studied: 2, mastered: 3 } }));

@@ -45,6 +45,7 @@ export interface InventorySellHooks {
   sellMult: number;
 }
 import type { SetUiReport } from '../game/setBonuses';
+import { ENCHANT_DEFS } from '../game/enchantments';
 
 export const RARITY_COLORS: Record<ItemRarity, string> = {
   common: '#9a9a9a',
@@ -87,6 +88,16 @@ const CSS = `
 .xinv .setrow .st { font-size:11px; margin-top:2px; opacity:.85; }
 .xinv .setrow .st.on { color:#7dffa8; font-weight:700; }
 .xinv .setrow .st.off { opacity:.45; }
+.xinv .enchs { margin-top:6px; }
+.xinv .enchrow { font-size:12px; padding:6px 8px; border:1px solid rgba(140,180,220,.22); border-radius:8px;
+  margin-bottom:6px; background:rgba(16,24,40,.55); }
+.xinv .enchrow .en { font-weight:700; color:#ffd23f; }
+.xinv .enchrow .es { opacity:.75; font-size:11px; margin-left:6px; }
+.xinv .enchrow .ea { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+.xinv .enchrow button { min-height:28px; background:rgba(30,42,64,.9); color:#e8ecf1;
+  border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 10px; cursor:pointer; }
+.xinv .enchrow button:hover { border-color:rgba(255,210,63,.7); }
+.xinv .enchrow button:disabled { opacity:.45; cursor:default; }
 .xinv .tip { position:fixed; z-index:30; max-width:260px; pointer-events:none;
   background:rgba(8,11,18,.96); border:1px solid rgba(140,180,220,.4); border-radius:8px;
   padding:10px 12px; font-size:12px; }
@@ -169,6 +180,9 @@ export class InventoryHUD {
   private setReport: (() => SetUiReport) | null = null;
   private setSection: HTMLDivElement;
   private setRows: HTMLDivElement;
+  // Enchantments wave: enchant-action section (reads live inventory state).
+  private enchSection: HTMLDivElement;
+  private enchRows: HTMLDivElement;
 
   constructor(
     private container: HTMLElement,
@@ -228,6 +242,20 @@ export class InventoryHUD {
     this.setRows = document.createElement('div');
     this.setSection.appendChild(this.setRows);
     this.panel.appendChild(this.setSection);
+
+    // Enchantments wave: per-equipped-gear enchant actions (apply from
+    // the table, remove with full material refund). One row per
+    // equipped equippable item; unenchanted rows offer every
+    // slot-applicable enchant, enchanted rows offer removal.
+    this.enchSection = document.createElement('div');
+    this.enchSection.className = 'enchs';
+    const enchSec = document.createElement('div');
+    enchSec.className = 'sec';
+    enchSec.textContent = 'ENCHANTMENTS';
+    this.enchSection.appendChild(enchSec);
+    this.enchRows = document.createElement('div');
+    this.enchSection.appendChild(this.enchRows);
+    this.panel.appendChild(this.enchSection);
 
     const packSec = document.createElement('div');
     packSec.className = 'sec';
@@ -608,6 +636,7 @@ export class InventoryHUD {
       cell.classList.toggle('cursor', this.openFlag && this.cursor.area === 'equip' && this.cursor.index === j);
     }
     this.renderSetRows();
+    this.renderEnchantRows();
   }
 
   /** Transient feedback line inside the panel. */
@@ -663,6 +692,93 @@ export class InventoryHUD {
         row.appendChild(div);
       }
       this.setRows.appendChild(row);
+    }
+  }
+
+  /**
+   * Enchantments wave: render the ENCHANTMENTS section. One row per
+   * equipped equippable item: its current enchant (or "unenchanted"),
+   * apply buttons for every slot-applicable enchant (with exact cost
+   * text, disabled when the materials are short), and a remove button
+   * that refunds the full cost. textContent everywhere. All buttons
+   * are >=28px touch targets (CSS above).
+   */
+  private renderEnchantRows(): void {
+    this.enchRows.innerHTML = '';
+    const equipped = this.inventory.getAllEquipped();
+    const rows: Array<{ slot: EquipSlot; itemId: string; def: ItemDef }> = [];
+    for (const slot of EQUIP_SLOTS) {
+      const itemId = equipped[slot];
+      if (!itemId) continue;
+      const def = this.inventory.getDef(itemId);
+      if (!def || !this.inventory.isEquippable(itemId)) continue;
+      rows.push({ slot, itemId, def });
+    }
+    if (rows.length === 0) {
+      this.enchSection.style.display = 'none';
+      return;
+    }
+    this.enchSection.style.display = '';
+    for (const { slot, itemId, def } of rows) {
+      const row = document.createElement('div');
+      row.className = 'enchrow';
+      row.dataset.slot = slot;
+      row.dataset.itemId = itemId;
+      const head = document.createElement('div');
+      const nm = document.createElement('span');
+      nm.className = 'en';
+      nm.textContent = def.name;
+      const st = document.createElement('span');
+      st.className = 'es';
+      const cur = this.inventory.getEnchant(itemId);
+      const curDef = cur ? ENCHANT_DEFS.find((e) => e.id === cur) : undefined;
+      st.textContent = curDef
+        ? `enchanted: ${curDef.name}`
+        : 'unenchanted';
+      if (curDef) row.dataset.enchantId = curDef.id;
+      head.append(nm, st);
+      row.appendChild(head);
+      const acts = document.createElement('div');
+      acts.className = 'ea';
+      if (curDef) {
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'ench-remove';
+        rm.dataset.slot = slot;
+        rm.dataset.itemId = itemId;
+        rm.textContent = `Remove ${curDef.name} (refund)`;
+        rm.addEventListener('click', () => {
+          const refunded = this.inventory.removeEnchant(itemId);
+          const desc = refunded.map((c) => `${c.count}× ${this.inventory.getDef(c.itemId)?.name ?? c.itemId}`).join(', ');
+          this.toast(refunded.length ? `Removed ${curDef.name} — refunded ${desc}` : `Removed ${curDef.name}`);
+          this.refresh();
+        });
+        acts.appendChild(rm);
+      } else {
+        for (const ench of ENCHANT_DEFS) {
+          if (!ench.slots.includes(slot)) continue;
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ench-apply';
+          b.dataset.slot = slot;
+          b.dataset.itemId = itemId;
+          b.dataset.enchantId = ench.id;
+          const costText = ench.cost.map((c) => `${c.count}× ${this.inventory.getDef(c.itemId)?.name ?? c.itemId}`).join(', ');
+          const short = ench.cost.some((c) => this.inventory.count(c.itemId) < c.count);
+          b.textContent = `${ench.name} (${costText})`;
+          b.disabled = short;
+          b.title = short ? 'Not enough materials' : `Apply ${ench.name}`;
+          b.addEventListener('click', () => {
+            const r = this.inventory.enchant(itemId, ench.id);
+            if (r.ok) this.toast(`Enchanted ${def.name} with ${ench.name}`);
+            else this.toast(`Cannot enchant: ${r.reason ?? 'failed'}`);
+            this.refresh();
+          });
+          acts.appendChild(b);
+        }
+      }
+      row.appendChild(acts);
+      this.enchRows.appendChild(row);
     }
   }
 

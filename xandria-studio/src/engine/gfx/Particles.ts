@@ -164,7 +164,17 @@ export class Particles {
     this.smkPool = new PointPool(scene, MAX_SMK, 'normal');
   }
 
+  /**
+   * ACCESSIBILITY PASS: reduced-motion gate. emit() is the single funnel
+   * for ALL pooled particle emission (burst + trail), so one flag silences
+   * every burst/spark/smoke/explosion. Weather columns use their own Points
+   * system and are deliberately NOT gated (ambient, not a burst). Set by
+   * Engine.applyAccessibility; cosmetic only, never read by simulation.
+   */
+  reducedMotion = false;
+
   private emit(pos: THREE.Vector3, vel: THREE.Vector3, life: number, size: number, color: THREE.Color, gravity = 0, drag = 0, blending: BlendMode = 'additive', grow = 0) {
+    if (this.reducedMotion) return;
     (blending === 'normal' ? this.smkPool : this.addPool).emit(pos, vel, life, size, color, gravity, drag, grow);
   }
 

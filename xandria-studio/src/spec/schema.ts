@@ -1102,7 +1102,7 @@ function validateStageGraph(
 
 // top-level GameSpec keys; anything else is reported as a warning, not an error
 const TOP_LEVEL_KEYS = ['meta', 'theme', 'world', 'player', 'enemies', 'objective', 'pickups', 'rules', 'audio', 'narrative', 'progression', 'custom'];
-const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult', 'armor', 'runner', 'towerDefense', 'survivor'];
+const CUSTOM_KEYS = ['biome', 'forge', 'enemyMods', 'weaponMods', 'quality', 'assets', 'characters', 'items', 'legacyOperators', 'profileDamageMult', 'armor', 'runner', 'towerDefense', 'survivor', 'tutorial'];
 
 /** Options for validateSpec. */
 export interface ValidateSpecOptions {

@@ -41,6 +41,9 @@ export interface HookPayloads {
   onKill: { enemy: Enemy };
   /** the player took damage (amount actually subtracted from health) */
   onPlayerDamage: { amount: number };
+  /** UPGRADE LOOP (run-journal): the player avatar died (one life consumed).
+   *  Additive — the die() path is unchanged; zero taps in the normal flow. */
+  onPlayerDeath: Record<string, never>;
   onPickup: { pickup: Pickup };
   onStageComplete: { index: number; stage: ObjectiveStage };
   onPhase: { enemy: Enemy; phase: number };
@@ -50,6 +53,23 @@ export interface HookPayloads {
   onTick: { dt: number; t: number };
   /** WORLD-TIERS (upgrade loop): fired when the live map's world tier is (re)derived — boot, portal arrival, direct map jump. */
   onWorldTier: { tier: number; coord: { mx: number; my: number } };
+  /**
+   * Tutorial wave: the player initiated an attack (melee swing or a ranged
+   * shot that actually fired). Additive — zero taps means zero behavior change.
+   */
+  onAttack: { kind: 'melee' | 'ranged' };
+  /**
+   * Tutorial wave: a craft() transaction completed and granted its output.
+   * Emitted by the crafting interaction session alongside the blueprint's
+   * onCrafted callback (which keeps its existing wiring untouched).
+   */
+  onCraftComplete: { recipeId: string };
+  /**
+   * Tutorial wave: the player arrived on a new map via portal travel.
+   * Emitted once per Engine.swapTerrainForPortal (the single funnel every
+   * portal transition goes through).
+   */
+  onPortalArrive: { mapSeed: number };
 }
 
 export type HookName = keyof HookPayloads;

@@ -35,6 +35,24 @@ export interface CameraCollisionOpts {
   mask?: number;
 }
 
+/**
+ * ACCESSIBILITY PASS: module-level reduced-motion flag (set by Engine.
+ * applyAccessibility). Rigs are blueprint-owned, so there is no Engine
+ * handle to thread this through — the flag is the seam. When set, rig
+ * shake() is a no-op and the speed FOV kick is skipped (the only zoom
+ * modulation in the game — the "zoom punch" of the brief). Camera
+ * collision and framing are untouched.
+ */
+let cameraReducedMotion = false;
+
+export function setCameraReducedMotion(v: boolean): void {
+  cameraReducedMotion = v;
+}
+
+export function getCameraReducedMotion(): boolean {
+  return cameraReducedMotion;
+}
+
 /** camera-to-wall safety margin (meters) */
 const COLL_MARGIN = 0.45;
 /** regrow speed of the boom after an occlusion clears (m/s of boom fraction) */
@@ -93,7 +111,10 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
     set yaw(v: number) { yaw = v; },
     get pitch() { return pitch; },
     set pitch(v: number) { pitch = v; },
-    shake(amount: number) { shakeAmp = Math.max(shakeAmp, amount); shakeT = 0.4; },
+    shake(amount: number) {
+      if (cameraReducedMotion) return;
+      shakeAmp = Math.max(shakeAmp, amount); shakeT = 0.4;
+    },
 
     update(dt, targetPos, targetVel, targetYaw) {
       // look input
@@ -159,19 +180,23 @@ export function makeCameraRig(kind: CameraKind, camera: THREE.PerspectiveCamera,
         camera.lookAt(look);
       }
 
-      // FOV kick with speed
+      // FOV kick with speed — skipped under reduced motion (zoom punch).
       const speedK = Math.min(1, targetVel.length() / 30);
-      camera.fov = fovBase + speedK * 9;
+      camera.fov = cameraReducedMotion ? fovBase : fovBase + speedK * 9;
       camera.updateProjectionMatrix();
 
-      // shake
+      // shake — a mid-shake reduced-motion toggle cancels it outright
+      // (no stale shakeT resuming when the toggle flips back off).
       if (shakeT > 0) {
         shakeT -= dt;
+        if (cameraReducedMotion) { shakeAmp = 0; shakeT = 0; }
+        else {
         const s = shakeAmp * (shakeT / 0.4);
         camera.position.x += (Math.random() - 0.5) * s;
         camera.position.y += (Math.random() - 0.5) * s;
         camera.position.z += (Math.random() - 0.5) * s;
         if (shakeT <= 0) shakeAmp = 0;
+        }
       }
     },
   };

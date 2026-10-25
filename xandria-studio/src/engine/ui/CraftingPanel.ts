@@ -418,6 +418,8 @@ export class CraftingPanel {
       'opacity:' + (canCraft ? '1' : '0.55'),
     ].join(';'), 'CRAFT') as HTMLButtonElement;
     btn.disabled = !canCraft;
+    // Tutorial wave: stable selector for the e2e harness (no behavior change).
+    btn.setAttribute('data-recipe-id', recipe.id);
     if (canCraft) btn.addEventListener('click', () => this.enqueue(recipe.id));
     bottom.append(reasonEl, btn);
 

@@ -66,7 +66,42 @@ export interface TouchLayout {
  * - racing: left stick steers (X only), gas auto-on, BRAKE + BOOST buttons.
  * - platformer: LEFT/RIGHT d-pad + JUMP button.
  */
+/**
+ * COMBAT-ABILITIES: touch buttons for the three abilities, appended to the
+ * combat genres' layouts (all other genres keep their layout untouched).
+ * Geometry (verified against every base layout above, 360x780):
+ *  - default row bottom:200, size 56: clears the tallest base cluster
+ *    (ATK/FIRE bottom 96 + size 88 -> top edge 184; gap 16px).
+ *  - top-down-shooter / survivor carry a DASH button at bottom 216 + size
+ *    60 (top edge 276), so their ability row sits at bottom:292 (gap 16px).
+ *  - third-person-action carries a DEPLOY button at bottom 190 + size 60
+ *    (top edge 250, added by the deployables wave after this row was first
+ *    laid out), so its ability row sits at bottom:268 (gap 18px).
+ *  - rights 24/92/160: the row spans the right edge without touching the
+ *    left stick zone (left 45%) or the pause button (top-right).
+ *  All three are >= 28px (56px) per the hud-polish touch-target rule.
+ */
+export function abilityTouchButtons(genre: string): TouchButtonDef[] {
+  const bottom = genre === 'top-down-shooter' || genre === 'survivor' ? 292
+    : genre === 'third-person-action' ? 268 : 200;
+  return [
+    { label: 'STRIKE', action: 'ability1', kind: 'tap', right: 24, bottom, size: 56 },
+    { label: 'WAVE', action: 'ability2', kind: 'tap', right: 92, bottom, size: 56 },
+    { label: 'MEND', action: 'ability3', kind: 'tap', right: 160, bottom, size: 56 },
+  ];
+}
+
+const ABILITY_TOUCH_GENRES = new Set([
+  'fps-arena', 'third-person-action', 'platformer', 'top-down-shooter', 'survivor',
+]);
+
 export function layoutForGenre(genre: string): TouchLayout {
+  const base = layoutForGenreBase(genre);
+  if (!ABILITY_TOUCH_GENRES.has(genre)) return base;
+  return { ...base, buttons: [...base.buttons, ...abilityTouchButtons(genre)] };
+}
+
+function layoutForGenreBase(genre: string): TouchLayout {
   switch (genre) {
     case 'fps-arena':
       return {
@@ -83,6 +118,8 @@ export function layoutForGenre(genre: string): TouchLayout {
           { label: 'ATK', action: 'attack', kind: 'hold', right: 24, bottom: 96, size: 88 },
           { label: 'DASH', action: 'dash', kind: 'tap', right: 128, bottom: 44, size: 64 },
           { label: 'JUMP', action: 'jump', kind: 'tap', right: 208, bottom: 100, size: 64 },
+          // UPGRADE LOOP (deployables): field-item deploy (G / Digit3 on desktop)
+          { label: 'DEPLOY', action: 'deploy', kind: 'tap', right: 208, bottom: 190, size: 60 },
         ],
       };
     case 'top-down-shooter':

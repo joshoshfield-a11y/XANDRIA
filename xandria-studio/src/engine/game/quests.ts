@@ -101,6 +101,20 @@ export interface QuestDef {
    * the locked → available line via requiresQuests.
    */
   side?: boolean;
+  /**
+   * factions-reputation wave: optional standing gate. The quest stays
+   * 'locked' (and accept() refuses it) until the player's standing with
+   * the faction reaches min. Honored by the accept path ONLY — it never
+   * blocks progress, completion, or turn-in of an already-accepted quest.
+   * No seeded quest ships gated; gating is opt-in per def.
+   */
+  minStanding?: { factionId: string; min: number };
+  /**
+   * factions-reputation wave: optional standing reward granted at
+   * turn-in (via opts.onQuestTurnedIn). Absent = the manager's caller
+   * decides (the blueprint default is +20 to 'freeholds').
+   */
+  standingReward?: { factionId: string; amount: number };
 }
 
 export type QuestStatus = 'locked' | 'available' | 'active' | 'complete' | 'turned-in';
@@ -131,6 +145,16 @@ export function validateQuestDef(def: QuestDef): string[] {
     errs.push(`quest ${def.id}: rewards.xp must be a non-negative number`);
   }
   if (!Array.isArray(def.rewards?.items)) errs.push(`quest ${def.id}: rewards.items must be an array`);
+  if (def.minStanding !== undefined) {
+    const g = def.minStanding;
+    if (!g || typeof g.factionId !== 'string' || !g.factionId) errs.push(`quest ${def.id}: minStanding.factionId must be a non-empty string`);
+    if (!g || !Number.isFinite(g.min)) errs.push(`quest ${def.id}: minStanding.min must be a finite number`);
+  }
+  if (def.standingReward !== undefined) {
+    const r = def.standingReward;
+    if (!r || typeof r.factionId !== 'string' || !r.factionId) errs.push(`quest ${def.id}: standingReward.factionId must be a non-empty string`);
+    if (!r || !Number.isFinite(r.amount)) errs.push(`quest ${def.id}: standingReward.amount must be a finite number`);
+  }
   if (def.rewards?.bonus !== undefined) {
     if (!Array.isArray(def.rewards.bonus)) errs.push(`quest ${def.id}: rewards.bonus must be an array`);
     else for (let i = 0; i < def.rewards.bonus.length; i++) {
@@ -404,6 +428,20 @@ export interface QuestManagerOpts {
    * and auto-turns-in on completion (no dialogue exists to do it).
    */
   autoAccept?: boolean;
+  /**
+   * factions-reputation wave: current standing for a faction id.
+   * Absent = 0 for every faction (unknown = neutral default). The
+   * blueprint wires this to the live FactionStandings object; the
+   * standings onChange hook calls refreshStandingGates().
+   */
+  standingOf?: (factionId: string) => number;
+  /**
+   * factions-reputation wave: called after a quest's rewards land and
+   * its status flips to turned-in. The blueprint wires it to
+   * standings.onQuestComplete(def). Observe-only — it never changes
+   * the turn-in itself.
+   */
+  onQuestTurnedIn?: (def: QuestDef) => void;
   /** called after an XP grant causes a level-up (blueprint wires the modal);
    * progression-curve: carries the LevelGain so stat growth applies. */
   onLevelUp?: (gain?: LevelGain) => void;
@@ -452,6 +490,10 @@ export class QuestManager {
     for (const q of this.quests) {
       if (q.def.side === true) q.status = 'available';
     }
+    // factions-reputation wave: standing gates demote anything gated
+    // and unmet back to locked — including side quests — before any
+    // auto-accept runs, so a gated quest can never start locked-out.
+    this.applyStandingGates();
     if (this.autoAccept) {
       // No villagers in this genre: accept everything offerable now (no
       // dialogue exists to do it); completion auto-turns-in as before.
@@ -521,10 +563,66 @@ export class QuestManager {
     }
   }
 
+  /** Current standing for a faction (opts.standingOf, or 0 when unwired). */
+  standingOf(factionId: string): number {
+    try {
+      const v = this.opts.standingOf?.(factionId) ?? 0;
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** True when a def's standing gate (if any) is satisfied right now. */
+  standingSatisfied(def: QuestDef): boolean {
+    const g = def.minStanding;
+    if (!g) return true;
+    return this.standingOf(g.factionId) >= g.min;
+  }
+
+  /**
+   * factions-reputation wave: demote gated-and-unmet quests that are
+   * still offerable (available/locked) to locked. Never touches active /
+   * complete / turned-in quests — the gate is accept-path only.
+   */
+  applyStandingGates(): void {
+    for (const q of this.quests) {
+      if ((q.status === 'available' || q.status === 'locked') && !this.standingSatisfied(q.def)) {
+        q.status = 'locked';
+      }
+    }
+  }
+
+  /**
+   * factions-reputation wave: unlock gated quests whose prerequisites
+   * AND standing gate are now satisfied. The blueprint calls this from
+   * the standings onChange hook; it is a no-op when nothing changed.
+   */
+  refreshStandingGates(): void {
+    let changed = false;
+    for (const q of this.quests) {
+      if (q.status !== 'locked') continue;
+      if (!this.requiresSatisfied(q.def) || !this.standingSatisfied(q.def)) continue;
+      q.status = 'available';
+      changed = true;
+      this.opts.toast(`New quest available: ${q.def.name}`);
+      if (this.autoAccept) this.accept(q.def.id);
+    }
+    if (changed) this.refreshTracker();
+  }
+
   /** Accept an available quest. Returns false when not acceptable. */
   accept(id: string): boolean {
     const q = this.byId.get(id);
     if (!q || q.status !== 'available') return false;
+    // factions-reputation wave: the accept path re-checks the gate, so
+    // a standing drop after unlock cannot sneak a gated quest through.
+    if (!this.standingSatisfied(q.def)) {
+      q.status = 'locked';
+      this.opts.toast(`Requires standing: ${q.def.minStanding?.factionId} ${q.def.minStanding?.min}`);
+      this.refreshTracker();
+      return false;
+    }
     q.status = 'active';
     this.opts.toast(`Quest accepted: ${q.def.name}`);
     this.refreshTracker();
@@ -562,9 +660,17 @@ export class QuestManager {
     }
     q.status = 'turned-in';
     this.opts.toast(`Quest complete: ${q.def.name}`);
-    // unlock the next link in the line
+    // factions-reputation wave: the standing reward lands here, after
+    // the quest's own rewards and status flip. The hook may unlock
+    // gated quests synchronously (via the blueprint's onChange ->
+    // refreshStandingGates); the unlock loop below then skips them
+    // because they are already available.
+    try { this.opts.onQuestTurnedIn?.(q.def); } catch (e) { console.warn('[quests] onQuestTurnedIn threw', e); }
+    // unlock the next link in the line (standing gates respected: a
+    // gated quest whose gate is unmet stays locked until
+    // refreshStandingGates() runs on a standings change)
     for (const next of this.quests) {
-      if (next.status === 'locked' && this.requiresSatisfied(next.def)) {
+      if (next.status === 'locked' && this.requiresSatisfied(next.def) && this.standingSatisfied(next.def)) {
         next.status = 'available';
         this.opts.toast(`New quest available: ${next.def.name}`);
         if (this.autoAccept) this.accept(next.def.id);

@@ -712,6 +712,20 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     host.appendChild(h(`<div class="xed-hint">Pickers override the curated reward tables (merged on top of them). Leave a quest untouched for its curated reward; RESET returns it to curated. Item ids resolve at Play time — gear/material ids are boot-ensured, unknown ids are skipped honestly at turn-in.</div>`));
     host.appendChild(renderQuestRewardPickers(s));
 
+    // Tutorial wave: first-run guide mode. auto = show once per player
+    // (Profile.tutorialSeen gates replay); force = always show (testing);
+    // skip = never show. Writes custom.tutorial.mode; read at boot by
+    // resolveTutorialMode (engine/game/Tutorial). Applies on the next Play.
+    host.appendChild(h(`<div class="xed-ns">TUTORIAL</div>`));
+    host.appendChild(field(
+      'TUTORIAL — MODE',
+      select(['auto', 'force', 'skip'], (s.custom as { tutorial?: { mode?: string } } | undefined)?.tutorial?.mode ?? 'auto', (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        (sp.custom as { tutorial?: { mode?: string } }).tutorial = { mode: v };
+      }),
+      'auto = first run only (Profile remembers); force = always (testing); skip = never. Applies on the next Play.',
+    ));
+
     host.appendChild(h(`<div class="xed-ns">SPECIES MIX — VEGETATION WEIGHTS</div>`));
     for (const species of FLORA_IDS) {
       const w = s.custom?.biome?.floraMix?.[species] ?? 5;

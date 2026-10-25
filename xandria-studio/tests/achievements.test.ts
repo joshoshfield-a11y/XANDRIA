@@ -73,12 +73,20 @@ interface Harness {
   store: Map<string, string>;
 }
 
+/**
+ * save-slots: profiles persist in the active slot of xandria.slots.v1.
+ * Reads the active slot's profile back out of the injected storage.
+ */
+function activeSlotProfile(store: Map<string, string>): Record<string, any> {
+  const st = JSON.parse(store.get('xandria.slots.v1')!);
+  return (st.slots.find((s: any) => s.id === st.activeSlotId) ?? st.slots[0]).profile;
+}
+
 function makeHarness(overrides: Partial<{
   progLevel: number;
   questDefs: Array<{ id: string; side?: boolean }>;
   withPortals: boolean;
-}> = {}): Harness {
-  const store = new Map<string, string>();
+}> = {}): Harness {  const store = new Map<string, string>();
   _setProfileStorage({
     getItem: (k) => store.get(k) ?? null,
     setItem: (k, v) => { store.set(k, v); },
@@ -193,7 +201,7 @@ describe('kill triggers', () => {
     expect(h.toasts.length).toBe(1);
     expect(h.toasts[0].msg).toContain('First Blood');
     expect(h.prog.xpGranted).toBe(25);
-    const saved = JSON.parse(h.store.get('xandria.profile.v1')!);
+    const saved = activeSlotProfile(h.store);
     expect(saved.achievements).toContain('first-blood');
   });
 

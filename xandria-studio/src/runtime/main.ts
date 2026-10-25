@@ -61,6 +61,16 @@ import {
   isDifficultyId,
   applyDifficultyScaling,
 } from '../engine/game/difficulty';
+/**
+ * UPGRADE LOOP (new-game-plus): pure NG+ table + apply fn for the e2e
+ * per-table stat assertions (same shipped code the spawn path uses).
+ */
+import {
+  NG_PLUS_TABLE,
+  MAX_NG_PLUS_CYCLE,
+  ngPlusByCycle,
+  applyNgPlusScaling,
+} from '../engine/game/newGamePlus';
 import {
   GatheringManager,
   GatheringInteractionSession,
@@ -97,6 +107,16 @@ import {
   lootItemDefs,
 } from '../engine/game/loot';
 import {
+  DEPLOY_SALT,
+  DEPLOYABLE_DEFS,
+  DEPLOY_CATALOG_RECIPES,
+  DeployablesManager,
+  Deployable,
+  deployableDefOf,
+  deployableItemDefs,
+  rollDeployTickMagnitude,
+} from '../engine/game/deployables';
+import {
   VENDOR_SALT,
   CURRENCY_SALT,
   CURRENCY_NAME,
@@ -123,6 +143,15 @@ import {
   buildSetUiReport,
   ensureSetItemDefs,
 } from '../engine/game/setBonuses';
+import {
+  ENCHANT_DEFS,
+  ENCHANT_MATERIAL_IDS,
+  ENCHANT_DROP_ADDONS,
+  enchantDef,
+  enchantMaterialDefs,
+  computeEnchantStats,
+  ensureEnchantItemDefs,
+} from '../engine/game/enchantments';
 import {
   QuestManager,
   buildQuestPool,
@@ -165,6 +194,16 @@ import {
   resolveSkillsXpMultiplier,
 } from '../engine/game/skills';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
+import {
+  ABILITY_DEFS,
+  ABILITY_IDS,
+  ABILITY_SALT,
+  MAX_ENERGY,
+  ENERGY_REGEN_PER_S,
+  AbilityManager,
+  AbilityBar,
+  resolveAbilitiesEnabled,
+} from '../engine/game/combatAbilities';
 import * as THREE from 'three';
 import {
   deriveWorldTier,
@@ -180,10 +219,37 @@ import {
   planDynamicEvents,
   buildMerchantStock,
   resolveEventsEnabled,
+  rollEventCurrency,
   DynamicEventManager,
   EventInteractionSession,
 } from '../engine/game/dynamicEvents';
 import { TradePanel } from '../engine/ui/TradePanel';
+import {
+  FACTION_CATALOG,
+  FACTION_IDS,
+  STANDING_TIERS,
+  STANDING_MIN,
+  STANDING_MAX,
+  ENEMY_KIND_FACTION,
+  VENDOR_FACTION,
+  KILL_STANDING_DELTA,
+  BOSS_KILL_STANDING_DELTA,
+  TRADE_BUY_STANDING_DELTA,
+  TRADE_SELL_STANDING_DELTA,
+  QUEST_DEFAULT_STANDING_DELTA,
+  QUEST_DEFAULT_FACTION,
+  tierForStanding,
+  clampStanding,
+  standingBuyFactor,
+  standingSellFactor,
+  effectiveBuyPrice,
+  effectiveSellPrice,
+  factionOfEnemyKind,
+  factionOfVendor,
+  FactionStandings,
+  localStorageFactionsAdapter,
+  type FactionStandingsSnapshot,
+} from '../engine/game/factions';
 import {
   WEATHER_SALT,
   WEATHER_TUNING,
@@ -417,6 +483,16 @@ function boot() {
         isDifficultyId,
         applyDifficultyScaling,
       },
+      // UPGRADE LOOP (new-game-plus): pure NG+ table + apply fn for the
+      // e2e per-table stat assertions (same shipped code the spawn path
+      // uses). Live engine.getNgPlusCycle()/enterNgPlus() are methods on
+      // X.engine.
+      ngPlus: {
+        NG_PLUS_TABLE,
+        MAX_NG_PLUS_CYCLE,
+        ngPlusByCycle,
+        applyNgPlusScaling,
+      },
       /** Test seam: submit never-ticked enemies once (instances persist). */
       submitStaticEnemies: (enemies: Enemy[]) => {
         const inst = NpcInstancer.for(engine);
@@ -531,7 +607,11 @@ function boot() {
         getEquipped: (slot: string) => string | null;
         equippedStats: () => Record<string, number>;
         setBonusStats: () => Record<string, number>;
+        enchantStats: () => Record<string, number>;
         effectiveStats: () => Record<string, number>;
+        getEnchant: (id: string) => string | null;
+        enchant: (id: string, enchantId: string) => { ok: boolean; reason?: string };
+        removeEnchant: (id: string) => { itemId: string; count: number }[];
       } | null =>
         (blueprint as { itemKit?: { inventory?: {
           count: (id: string) => number;
@@ -541,7 +621,11 @@ function boot() {
           getEquipped: (slot: string) => string | null;
           equippedStats: () => Record<string, number>;
           setBonusStats: () => Record<string, number>;
+          enchantStats: () => Record<string, number>;
           effectiveStats: () => Record<string, number>;
+          getEnchant: (id: string) => string | null;
+          enchant: (id: string, enchantId: string) => { ok: boolean; reason?: string };
+          removeEnchant: (id: string) => { itemId: string; count: number }[];
         } } | null }).itemKit?.inventory ?? null,
       /** Test seam: the live inventory HUD (inventory-qol wave). */
       liveInventoryHud: (): {
@@ -554,6 +638,25 @@ function boot() {
           close: () => void;
           isOpen: () => boolean;
         } } | null }).itemKit?.hud ?? null,
+    };
+    // UPGRADE LOOP (deployables): test-mode seam for the deployables e2e
+    // + perf harnesses — the defs table, salts, recipes, the seeded tick
+    // roll, and the live blueprint manager.
+    (window.__XANDRIA__ as Record<string, unknown>).deployTest = {
+      DEPLOY_SALT,
+      DEPLOYABLE_DEFS,
+      DEPLOY_CATALOG_RECIPES,
+      DeployablesManager,
+      Deployable,
+      deployableDefOf,
+      deployableItemDefs,
+      rollDeployTickMagnitude,
+      /** Test seam: the live deployables manager from the blueprint build. */
+      liveManager: (): DeployablesManager | null =>
+        (blueprint as { deployables?: DeployablesManager }).deployables ?? null,
+      /** Test seam: the live enemy manager (damage-tick + lure assertions). */
+      liveEnemies: (): { enemies: Array<{ alive: boolean; health: number; position: unknown; lureTarget: unknown; damage(n: number, from?: unknown): void }> } | null =>
+        (blueprint as { enemies?: { enemies: Array<{ alive: boolean; health: number; position: unknown; lureTarget: unknown; damage(n: number, from?: unknown): void }> } }).enemies ?? null,
     };
     // Vendor-economy wave: test-mode seam for the economy e2e harness —
     // salts, catalog, pure builders, the Wallet class, and the live
@@ -610,6 +713,26 @@ function boot() {
       computeSetBonuses,
       buildSetUiReport,
       ensureSetItemDefs,
+    };
+    // Tutorial wave: test-mode seam for the tutorial e2e harness — the
+    // live TutorialManager (observe-only) plus the defs table so the spec
+    // can assert step order, prompts, and skip rules without touching
+    // gameplay.
+    (window.__XANDRIA__ as Record<string, unknown>).tutorialTest = {
+      /** Test seam: the live tutorial manager from the engine build. */
+      live: () => engine.tutorial ?? null,
+    };
+    // Enchantments wave: test-mode seam for the enchant e2e + unit
+    // harnesses — the tuning table, material defs, the pure compute
+    // function, the additive drop tables, and the spec merge.
+    (window.__XANDRIA__ as Record<string, unknown>).enchantTest = {
+      ENCHANT_DEFS,
+      ENCHANT_MATERIAL_IDS,
+      ENCHANT_DROP_ADDONS,
+      enchantDef,
+      enchantMaterialDefs,
+      computeEnchantStats,
+      ensureEnchantItemDefs,
     };
     // Quest wave: test-mode seam for the quest e2e harness — the pool
     // builder, salts, manager class and the live blueprint handles.
@@ -739,6 +862,7 @@ function boot() {
       planDynamicEvents,
       buildMerchantStock,
       resolveEventsEnabled,
+      rollEventCurrency,
       DynamicEventManager,
       EventInteractionSession,
       /** Test seam: the live DynamicEventManager from the blueprint build (null when absent). */
@@ -750,6 +874,40 @@ function boot() {
       /** Test seam: the live trade panel. */
       liveTradePanel: (): TradePanel | null =>
         (blueprint as { tradePanel?: TradePanel }).tradePanel ?? null,
+    };
+    // UPGRADE LOOP (factions-reputation): test-mode seam for the
+    // factions e2e harness — the catalog, tier table, deltas, pure
+    // price helpers, mappings, the store class, and the live handles.
+    (window.__XANDRIA__ as Record<string, unknown>).factionsTest = {
+      FACTION_CATALOG,
+      FACTION_IDS,
+      STANDING_TIERS,
+      STANDING_MIN,
+      STANDING_MAX,
+      ENEMY_KIND_FACTION,
+      VENDOR_FACTION,
+      KILL_STANDING_DELTA,
+      BOSS_KILL_STANDING_DELTA,
+      TRADE_BUY_STANDING_DELTA,
+      TRADE_SELL_STANDING_DELTA,
+      QUEST_DEFAULT_STANDING_DELTA,
+      QUEST_DEFAULT_FACTION,
+      tierForStanding,
+      clampStanding,
+      standingBuyFactor,
+      standingSellFactor,
+      effectiveBuyPrice,
+      effectiveSellPrice,
+      factionOfEnemyKind,
+      factionOfVendor,
+      FactionStandings,
+      localStorageFactionsAdapter,
+      /** Test seam: the live standings store from the blueprint build. */
+      liveStandings: (): FactionStandings | null =>
+        (blueprint as { standings?: FactionStandings }).standings ?? null,
+      /** Test seam: the live standings panel (null when absent). */
+      livePanel: (): { render: (rows: unknown[]) => void } | null =>
+        (blueprint as { standingsPanel?: { render: (rows: unknown[]) => void } }).standingsPanel ?? null,
     };
     // UPGRADE LOOP (weather-cycles): test-mode seam for the weather e2e
     // harness — the salt, the tuning table, the pure scheduler, the
@@ -765,6 +923,30 @@ function boot() {
       /** Test seam: the live WeatherCycleManager from the blueprint build (null when absent). */
       liveWeather: (): WeatherCycleManager | null =>
         (blueprint as { weather?: WeatherCycleManager | null }).weather ?? null,
+    };
+    // COMBAT-ABILITIES (upgrade loop): test-mode seam for the abilities
+    // e2e harness — the tuning table, the manager, and the live handles.
+    (window.__XANDRIA__ as Record<string, unknown>).abilitiesTest = {
+      ABILITY_DEFS,
+      ABILITY_IDS,
+      ABILITY_SALT,
+      MAX_ENERGY,
+      ENERGY_REGEN_PER_S,
+      AbilityManager,
+      AbilityBar,
+      resolveAbilitiesEnabled,
+      /** Test seam: the live AbilityManager from the blueprint build (null when absent). */
+      liveManager: (): AbilityManager | null =>
+        (blueprint as { abilities?: AbilityManager }).abilities ?? null,
+      /** Test seam: the live ability bar (null when abilities disabled). */
+      liveBar: (): AbilityBar | null =>
+        (blueprint as { abilityBar?: AbilityBar | null }).abilityBar ?? null,
+      /** Test seam: the live player avatar. */
+      liveAvatar: (): PlayerAvatar | null =>
+        (blueprint as { avatar?: PlayerAvatar }).avatar ?? null,
+      /** Test seam: the live enemy manager. */
+      liveEnemies: (): EnemyManager | null =>
+        (blueprint as { enemies?: EnemyManager }).enemies ?? null,
     };
   }
   document.body.dataset.genre = spec.meta.genre;

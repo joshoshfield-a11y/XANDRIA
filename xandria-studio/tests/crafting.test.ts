@@ -89,24 +89,31 @@ describe('recipe pool determinism', () => {
     expect(a).not.toBe(b);
   });
 
-  it('poolSize config is honored for the seeded subset; master recipes (minSkillRank 3) always join', () => {
+  it('poolSize config is honored for the seeded subset; always-join recipes ride along', () => {
     // 6 rank-3 masters (4 new + Alloy Greaves + the gear-sets wave's
     // Masterforged crown) ride along with every seeded subset, deduped —
-    // so exact pool length is seed-dependent.
-    const MASTERS = [
+    // so exact pool length is seed-dependent. Deployables wave: the 3
+    // deployable kits (alwaysInPool, no gates) ride along too. MERGE
+    // (deployables x tutorial): the basic Fiber Weave Vest rides along
+    // too, so no seed's pool can lock out level-1 equippable crafting.
+    const ALWAYS = [
       'recipe_alloy_greaves',
       'recipe_starfall_warbrand',
       'recipe_dragonscale_aegis',
       'recipe_primordial_draught',
       'recipe_wildheart_regalia',
       'recipe_masterforged_crown',
+      'recipe_deploy_campfire',
+      'recipe_deploy_spike_trap',
+      'recipe_deploy_lure_totem',
+      'recipe_fiber_weave',
     ];
     const expectPool = (rawSize: number, seededLen: number) => {
       const pool = buildRecipePool(specWithCrafting(7, { recipes: { poolSize: rawSize } }));
       const ids = pool.map((r) => r.id);
-      const inSeed = MASTERS.filter((m) => ids.slice(0, seededLen).includes(m)).length;
-      expect(pool, `poolSize ${rawSize}`).toHaveLength(seededLen + (MASTERS.length - inSeed));
-      for (const m of MASTERS) expect(ids, m).toContain(m);
+      const inSeed = ALWAYS.filter((m) => ids.slice(0, seededLen).includes(m)).length;
+      expect(pool, `poolSize ${rawSize}`).toHaveLength(seededLen + (ALWAYS.length - inSeed));
+      for (const m of ALWAYS) expect(ids, m).toContain(m);
       expect(new Set(ids).size, 'deduped').toBe(ids.length);
     };
     expectPool(3, 3);

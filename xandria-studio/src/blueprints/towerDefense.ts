@@ -35,6 +35,15 @@ import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { PlayerAvatar } from './common';
+import { buildItemKit, type BlueprintItemKit } from './itemKit';
+import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
+import {
+  resolveCraftingEnabled,
+  ensureCraftingItemDefs,
+  buildRecipePool,
+  resolveGatheringDensity,
+} from '../engine/game/crafting';
+import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 
 interface Turret {
   group: THREE.Group;
@@ -162,6 +171,40 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
     if (p.kind === 'coin') { engine.score += 50; hud.setScore(engine.score); engine.audio.play('coin'); }
   };
 
+  // UPGRADE LOOP (blueprint-rollout): crafting/gathering/stations layer
+  // parity -- TD is the generator-variety blueprint's natural home for it.
+  // Gated on the crafting spec flag (default true); map-local lifecycle via
+  // engine.portalEntities like the other blueprints. TD has no SkillSystem
+  // or QuestManager, so the session runs with playerLevel 1 and no skill
+  // gates (skillId-gated recipes fail closed, honestly blocked).
+  const craftingEnabled = resolveCraftingEnabled(spec);
+  if (craftingEnabled) ensureCraftingItemDefs(spec);
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
+  const gathering = new GatheringManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    inventory: itemKit?.inventory ?? null,
+    density: resolveGatheringDensity(spec),
+  });
+  engine.portalEntities.register(gathering);
+  if (craftingEnabled) gathering.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  const stations = new StationManager(engine, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+  });
+  engine.portalEntities.register(stations);
+  if (craftingEnabled) stations.spawnForMap(spec.meta.seed);
+  const stationSession = craftingEnabled
+    ? new CraftingInteractionSession(engine, stations, {
+        recipes: () => buildRecipePool(spec),
+        defs: () => spec.custom?.items?.defs ?? {},
+        inventory: () => itemKit?.inventory ?? null,
+        playerLevel: () => 1,
+        toast: (m) => engine.hud.toast(m),
+      })
+    : null;
+  const gatheringSession = new GatheringInteractionSession(engine, gathering, {
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+  });
+
   // turret pads: deterministic ring around the core
   interface Pad { pos: THREE.Vector3; mesh: THREE.Mesh; ring: THREE.Mesh; turret: Turret | null; }
   const pads: Pad[] = [];
@@ -273,6 +316,9 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
     const t = engine.time;
     avatar.ctrl.camYaw = camRig.yaw;
     avatar.update(dt, t);
+    itemKit?.update(dt);
+    gatheringSession.update(dt); // UPGRADE LOOP (blueprint-rollout): [E] Harvest prompt + registration refresh
+    stationSession?.update(dt); // UPGRADE LOOP (blueprint-rollout): [E] Use prompt + crafting panel
 
     // twin-stick aim + fire (same pattern as the top-down shooter)
     const pp = avatar.ctrl.position;
@@ -302,7 +348,9 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
       hud.setHint(engine.score >= turretCost
         ? `[E] Build turret (${turretCost} score)`
         : `Need ${turretCost - engine.score} more score for a turret`);
-      if (input.justPressed('interact') && engine.score >= turretCost) {
+      // UPGRADE LOOP (blueprint-rollout): a live station prompt owns [E]
+      // -- the turret build defers so one keypress can't double-fire.
+      if (input.justPressed('interact') && engine.score >= turretCost && !stationSession?.promptedStation) {
         engine.score -= turretCost;
         hud.setScore(engine.score);
         buildTurret(nearPad);
@@ -332,6 +380,8 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
     const inst = NpcInstancer.for(engine);
     inst.beginFrame(dt);
     enemies.update(dt, corePos, t);
+    gathering.update(dt); // UPGRADE LOOP (blueprint-rollout): static node submits into the shared instancer frame
+    stations.update(dt); // UPGRADE LOOP (blueprint-rollout): static station submits into the shared instancer frame
     inst.endFrame();
     for (const e of [...enemies.enemies]) {
       if (!e.alive) continue;
@@ -382,5 +432,5 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, objectives, assets, pads, get coreHp() { return coreHp; } };
+  return { avatar, enemies, objectives, assets, pads, get coreHp() { return coreHp; }, gathering, stations, stationSession, gatheringSession, itemKit, itemWorld: itemKit?.itemWorld ?? null };
 }

@@ -16,6 +16,7 @@ import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Progression } from '../engine/game/Progression';
+import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import type { LevelGain } from '../engine/game/progressionCurve';
 import {
   makeCampaignObjectives,
@@ -114,6 +115,11 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   const avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  // COMBAT-ABILITIES: same wiring as tpAction; ctrl.yaw faces the nearest
+  // target in onUpdate, so the melee-convention aim is the target dir.
+  const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
+    damageMult: () => prog.damageMult(),
+  });
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
@@ -206,6 +212,12 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
     const t = engine.time;
     avatar.ctrl.camYaw = camRig.yaw;
     avatar.update(dt, t);
+    // COMBAT-ABILITIES: tick after the controller's velocity write (see tpAction).
+    abilities.update(dt);
+    abilities.poll(() => {
+      const y = avatar.ctrl.yaw + Math.PI;
+      return new THREE.Vector3(Math.sin(y), 0, Math.cos(y));
+    });
 
     // auto-fire: nearest living enemy inside 22m
     fireT -= dt;
@@ -249,5 +261,5 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, pickups, objectives, assets, prog };
+  return { avatar, enemies, pickups, objectives, assets, prog, abilities: abilities.manager, abilityBar: abilities.bar };
 }

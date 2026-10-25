@@ -36,5 +36,11 @@ export function wireBossFights(engine: Engine, spec: GameSpec, opts: BossWiringO
   });
   engine.portalEntities.register(encounter);
   encounter.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  // Gauntlet mode: stash the live handles on the engine so the gauntlet
+  // director (Engine.startGauntletRun) can drive rounds — re-seeding the
+  // arena per round and spawning each round's brute — without touching
+  // blueprint internals. Re-stashed on every rebuild; untouched (null) on
+  // blueprints without boss wiring.
+  engine.bossWiring = { encounter, manager: opts.manager };
   return { encounter, bar };
 }

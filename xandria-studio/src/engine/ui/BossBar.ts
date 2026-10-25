@@ -16,7 +16,17 @@ function el(doc: Document, tag: string, css: string, text?: string): HTMLElement
   e.style.cssText = css;
   if (text !== undefined) e.textContent = text;
   return e;
+
 }
+
+/**
+ * One live bar per container. Every world rebuild (the boot build plus each
+ * resetRun) runs wireBossFights again, orphaning the previous bar: without
+ * this, stale #xandria-boss-bar nodes pile up and getElementById lands on a
+ * dead one. The newcomer disposes its predecessor (which removes the stale
+ * node and no-ops its methods) instead of leaving duplicate ids behind.
+ */
+const liveBars = new WeakMap<object, BossBar>();
 
 export class BossBar {
   private root: HTMLElement;
@@ -33,6 +43,8 @@ export class BossBar {
     container: HTMLElement,
     private doc: Document = globalThis.document,
   ) {
+    liveBars.get(container)?.dispose();
+    liveBars.set(container, this);
     const root = el(doc, 'div', [
       'position:absolute', 'top:14px', 'left:50%', 'transform:translateX(-50%)',
       'width:min(460px,72vw)', 'z-index:9400', 'pointer-events:none',

@@ -107,6 +107,10 @@ export class PlayerAvatar {
 
   private die() {
     this.lives--;
+    // run-journal wave: report player deaths on the hook bus. Additive —
+    // no behavior change; zero taps in the normal flow (the onPlayerDamage
+    // emit in damage() is the precedent).
+    this.engine.hooks.emit('onPlayerDeath', {});
     this.engine.hud.setLives(this.lives);
     this.engine.audio.play('die');
     this.engine.particles.explosion(this.ctrl.position, 1.2);
@@ -126,6 +130,8 @@ export class PlayerAvatar {
   melee(aimYaw: number, range = 2.6, arc = 1.3, damage = 25): boolean {
     if (!this.enemies) return false;
     this.ctrl.swing();
+    // Tutorial wave: observe-only attack seam (no taps = no-op).
+    this.engine.hooks.emit('onAttack', { kind: 'melee' });
     this.engine.audio.play('swing');
     const origin = this.ctrl.position;
     const fwd = new THREE.Vector3(Math.sin(aimYaw + Math.PI), 0, Math.cos(aimYaw + Math.PI));
@@ -180,6 +186,8 @@ export class PlayerAvatar {
       this.projectiles.fire(from, dir, { speed: 38 * spdMult, damage: 16, friendly: true, ...beam });
     }
     if (this.ammo !== Infinity) this.ammo--;
+    // Tutorial wave: observe-only attack seam (no taps = no-op).
+    this.engine.hooks.emit('onAttack', { kind: 'ranged' });
     this.engine.audio.play(w === 'blaster' ? 'laser' : 'shoot');
     // polish wave: muzzle flash + a wisp of real (alpha-blended) gun smoke.
     this.engine.juice.muzzle(from);

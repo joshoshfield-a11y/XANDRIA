@@ -37,6 +37,7 @@ import type { GameSpec, ItemDef } from '@spec';
 import { Rng } from '../core/Rng';
 import { ItemBuilder } from './items/ItemBuilder';
 import { SET_DROP_ADDONS } from './setBonuses';
+import { ENCHANT_DROP_ADDONS } from './enchantments';
 import type { CraftingRecipe } from './crafting';
 
 /**
@@ -486,6 +487,9 @@ function toDrop(rng: Rng, e: LootEntry): LootDrop {
  * entries onto the base tables — the base entries, weights, and rarities
  * below are untouched by that merge (pinned by unit test). Same
  * (seed, kill sequence) -> identical drops, addon tables included.
+ * Enchantments wave: ENCHANT_DROP_ADDONS (enchantments.ts) merges
+ * ADDITIVE material entries onto the brute/turret tables the same way
+ * (boss material rolls included — bosses are brutes).
  */
 /**
  * UPGRADE LOOP (difficulty-modes): chanceMult scales the drop chance by
@@ -498,10 +502,15 @@ function toDrop(rng: Rng, e: LootEntry): LootDrop {
 export function rollLoot(rng: Rng, kind: string, isBoss: boolean, tier = 1, chanceMult = 1): LootDrop[] {
   const t = DROP_TABLES[kind] ?? DROP_TABLES.walker;
   const drops: LootDrop[] = [];
+  // additive only: base material entries first, enchant-material entries
+  // appended (brute/turret — the elite tables; bosses are brutes, so boss
+  // material rolls draw from the same merged table). Base entries,
+  // weights, and rarities below are untouched by the merge.
+  const materials = [...t.materials, ...(ENCHANT_DROP_ADDONS[kind] ?? [])];
   if (isBoss) {
     drops.push({ itemId: rng.pick(BOSS_GEAR), count: 1 });
-    for (let i = 0; i < 2 && t.materials.length > 0; i++) {
-      drops.push(toDrop(rng, weightedPick(rng, t.materials)));
+    for (let i = 0; i < 2 && materials.length > 0; i++) {
+      drops.push(toDrop(rng, weightedPick(rng, materials)));
     }
     return drops;
   }
@@ -511,7 +520,7 @@ export function rollLoot(rng: Rng, kind: string, isBoss: boolean, tier = 1, chan
   const nothingW = t.nothing / m;
   // additive only: base gear entries first, set-bonus entries appended
   const gear = [...t.gear, ...(SET_DROP_ADDONS[kind] ?? [])];
-  const all = [...t.materials, ...gear];
+  const all = [...materials, ...gear];
   let total = nothingW;
   for (const e of all) total += e.weight * (t.gear.includes(e) ? tierGearWeightMult(e.itemId, tier) : 1);
   const x = rng.range(0, total);

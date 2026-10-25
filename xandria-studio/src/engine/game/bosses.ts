@@ -38,6 +38,22 @@
 import * as THREE from 'three';
 import type { GameSpec, ObjectiveStage } from '@spec';
 import type { Engine } from '../Engine';
+/**
+ * ACCESSIBILITY PASS: under a non-none colorblind palette, telegraph
+ * ground decals resolve to the danger role and flash/burst colors to
+ * dangerBright (see accessibility.ts for the disclosed tradeoff: per-attack
+ * hue variety collapses to two roles). Under 'none' the shipped per-attack
+ * colors are used verbatim, so the default game is pixel-identical.
+ */
+import { getCurrentPalette, themeColor } from './accessibility';
+
+function telegraphColorFor(attack: BossAttackDef): string {
+  return getCurrentPalette() === 'none' ? attack.telegraphColor : themeColor('danger');
+}
+
+function flashColorFor(attack: BossAttackDef): string {
+  return getCurrentPalette() === 'none' ? attack.flashColor : themeColor('dangerBright');
+}
 import type { Enemy, EnemyManager } from './EnemyAI';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import { Rng } from '../core/Rng';
@@ -561,12 +577,12 @@ export class BossEncounter implements MapLocalEntitySystem {
     const damage = Math.round(w.attack.damage * dmgMult);
     const atk = w.attack;
     if (atk.kind === 'nova') {
-      this.spawnBurst(origin, atk.radius, atk.telegraphColor);
+      this.spawnBurst(origin, atk.radius, flashColorFor(atk));
       if (attackHitsPlayer(atk, { x: origin.x, z: origin.z }, null, { x: playerPos.x, z: playerPos.z })) {
         this.opts.onPlayerHit(damage, origin);
       }
     } else if (atk.kind === 'beam') {
-      this.spawnBurst(origin, atk.radius, atk.telegraphColor); // impact flash at the muzzle
+      this.spawnBurst(origin, atk.radius, flashColorFor(atk)); // impact flash at the muzzle
       this.spawnBeamFlash(origin, w.target, atk);
       if (attackHitsPlayer(atk, { x: origin.x, z: origin.z }, { x: w.target.x, z: w.target.z }, { x: playerPos.x, z: playerPos.z })) {
         this.opts.onPlayerHit(damage, origin);
@@ -663,7 +679,7 @@ export class BossEncounter implements MapLocalEntitySystem {
 
   private buildTelegraph(attack: BossAttackDef, origin: THREE.Vector3, target: THREE.Vector3): THREE.Object3D | null {
     const mat = new THREE.MeshBasicMaterial({
-      color: attack.telegraphColor, transparent: true, opacity: 0.5,
+      color: telegraphColorFor(attack), transparent: true, opacity: 0.5,
       side: THREE.DoubleSide, depthWrite: false,
     });
     if (attack.kind === 'nova' || attack.kind === 'ring') {
@@ -706,7 +722,7 @@ export class BossEncounter implements MapLocalEntitySystem {
     geo.rotateX(-Math.PI / 2);
     geo.translate(0, 0, -len / 2);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      color: attack.flashColor, transparent: true, opacity: 0.85,
+      color: flashColorFor(attack), transparent: true, opacity: 0.85,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
     }));
     mesh.position.set(origin.x, this.groundY(origin.x, origin.z) + 0.6, origin.z);
@@ -719,7 +735,7 @@ export class BossEncounter implements MapLocalEntitySystem {
     const geo = new THREE.RingGeometry(attack.radius * 0.9, attack.radius, 48);
     geo.rotateX(-Math.PI / 2);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      color: attack.telegraphColor, transparent: true, opacity: 0.8,
+      color: telegraphColorFor(attack), transparent: true, opacity: 0.8,
       side: THREE.DoubleSide, depthWrite: false,
     }));
     mesh.position.set(origin.x, this.groundY(origin.x, origin.z), origin.z);

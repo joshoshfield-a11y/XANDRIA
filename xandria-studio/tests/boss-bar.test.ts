@@ -131,6 +131,26 @@ describe('BossBar', () => {
     expect(phase.textContent).toBe('DESPERATE');
   });
 
+  it('a second bar on the same container disposes its predecessor (one live #xandria-boss-bar)', () => {
+    const roots = () =>
+      (doc as unknown as { created: FakeEl[] }).created.filter((e) => e.id === 'xandria-boss-bar');
+    const first = new BossBar(container as unknown as HTMLElement, doc);
+    first.show('THE WARDEN');
+    expect(first.isVisible).toBe(true);
+    const firstRoot = roots().at(-1)!;
+    const second = new BossBar(container as unknown as HTMLElement, doc);
+    // predecessor's node is gone and its methods are silenced…
+    expect(container.children).not.toContain(firstRoot);
+    first.show('EMBER TITAN'); // no-op: name stays as it was
+    expect((firstRoot.children[0] as FakeEl).textContent).toBe('THE WARDEN');
+    // …while the newcomer works normally
+    second.show('EMBER TITAN');
+    expect(second.isVisible).toBe(true);
+    const secondRoot = roots().at(-1)!;
+    expect(container.children).toContain(secondRoot);
+    expect((secondRoot.children[0] as FakeEl).textContent).toBe('EMBER TITAN');
+  });
+
   it('dispose removes the root and silences later calls', () => {
     const root = (doc as unknown as { created: FakeEl[] }).created[0];
     bar.show('THE WARDEN');

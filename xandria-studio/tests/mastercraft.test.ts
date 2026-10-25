@@ -242,7 +242,7 @@ describe('master recipes in the seeded pool', () => {
     expect(MASTER_CATALOG_RECIPES).toHaveLength(4);
     // Gear sets wave: +1 additive master recipe (recipe_masterforged_crown)
     // appended after the master entries.
-    expect(RECIPE_CATALOG_SIZE).toBe(18); // 10 base + 3 tier-2 + 4 master + 1 set
+    expect(RECIPE_CATALOG_SIZE).toBe(21); // 10 base + 3 tier-2 + 4 master + 1 set + 3 deployables
   });
 });
 

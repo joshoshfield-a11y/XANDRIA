@@ -28,6 +28,14 @@ interface DmgItem {
 export class Juice {
   /** 0..1 — screenshake trauma, decays in update(). */
   trauma = 0;
+  /**
+   * ACCESSIBILITY PASS: reduced-motion gate (set by Engine.
+   * applyAccessibility). shake() becomes a no-op and shakeOffset() returns
+   * zero, so the camera never moves from juice. Particle bursts are gated
+   * separately in Particles.emit(); hit-stop and damage numbers are
+   * deliberately untouched (not shake/particles/zoom).
+   */
+  reducedMotion = false;
   private freezeUntil = 0;
   private layer: HTMLDivElement;
   private items: DmgItem[] = [];
@@ -59,8 +67,9 @@ export class Juice {
     this.flashLight = fn;
   }
 
-  /** Screenshake impulse, 0..1. Stacks up to 1. */
+  /** Screenshake impulse, 0..1. Stacks up to 1. No-op under reduced motion. */
   shake(amount: number): void {
+    if (this.reducedMotion) return;
     this.trauma = Math.min(1, this.trauma + Math.max(0, amount));
   }
 
@@ -78,7 +87,7 @@ export class Juice {
    * before render and subtracts it right after.
    */
   shakeOffset(out: THREE.Vector3): THREE.Vector3 {
-    if (this.trauma <= 0) return out.set(0, 0, 0);
+    if (this.reducedMotion || this.trauma <= 0) return out.set(0, 0, 0);
     const s = this.trauma * this.trauma * 0.55;
     return out.set((Math.random() * 2 - 1) * s, (Math.random() * 2 - 1) * s * 0.7, 0);
   }

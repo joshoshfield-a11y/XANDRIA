@@ -18,12 +18,13 @@
  *   vendor path pattern the vendor-economy wave used (Fisher-Yates subset
  *   of the loot catalog pool, Rng((seed ^ EVENT_SALT ^ hash32(vendorId)))),
  *   with a lightweight barter trade panel (prices in the def's trade-good
- *   material). Stack choice: the vendor-economy SHOP PANEL / WALLET / scrap
- *   currency lives on the UNMERGED branch feature/upgrade-vendor-economy —
- *   this wave builds on main alone, so it cannot import it. When the user
- *   merges vendor-economy, a follow-up can repoint the merchant to its
- *   shop panel and wallet; the stock builder here is deliberately
- *   algorithm-identical so the swap is mechanical.
+ *   material). Stack choice (2026-10-21, still true): the merchant keeps its
+ *   barter panel — it is a distinct trade surface from the vendor-economy
+ *   shop, not a deferral. The currency-reward deferral IS resolved:
+ *   vendor-economy merged to main (707acd1), so ambush/patrol/cache
+ *   completions now grant seeded scrap through lootHooks.onCurrency (the
+ *   merged wallet path) via grantEventCurrency; the stock builder here
+ *   stays algorithm-identical to the vendor path by design.
  *
  * DETERMINISM: positions/kinds/stock/counts are pure functions of
  * mapSeed (+ spec overrides). Ambush/patrol combat outcomes and the patrol
@@ -53,7 +54,15 @@ import { Npc } from './Npc';
 import type { EnemyManager, Enemy, EnemyLootHooks } from './EnemyAI';
 import { NpcInstancer } from './npcInstancing';
 import { InteractionPrompt } from '../ui/InteractionPrompt';
+/**
+ * ACCESSIBILITY PASS: beacons resolve through the palette table at
+ * announce time; live beacons recolor when the palette changes (see the
+ * manager registry below — the manager is blueprint-owned, so Engine
+ * reaches it through recolorAllEventBeacons() rather than a handle).
+ */
+import { beaconColorForType, type DynamicEventTypeId } from './accessibility';
 import { voxelBoxCacheFor, voxelPart, paletteFor, type VoxelPalette, type VoxelGeoCache } from './voxelGeo';
+import { CURRENCY_SALT } from './economy';
 
 
 // ---------------------------------------------------------------- salts
@@ -63,6 +72,20 @@ import { voxelBoxCacheFor, voxelPart, paletteFor, type VoxelPalette, type VoxelG
  * distinct from the other wave salts by unit test.)
  */
 export const EVENT_SALT = 0xe1e4;
+
+/**
+ * UPGRADE LOOP (blueprint-rollout): pure seeded scrap reward for an event
+ * completion, by event type. The per-instance stream (planSeed ^
+ * CURRENCY_SALT) keeps event currency independent of completion order and
+ * off the item-loot stream. Exported for the e2e replication harness and
+ * unit tests.
+ */
+export function rollEventCurrency(planSeed: number, type: string): number {
+  const rng = new Rng((planSeed ^ CURRENCY_SALT) >>> 0);
+  return type === 'patrol' ? rng.int(15, 35)
+    : type === 'ambush' ? rng.int(10, 25)
+    : rng.int(5, 15);
+}
 
 /** cache discovery: toast + beacon fire when the player spots the node. */
 const CACHE_DISCOVERY_RADIUS = 25;
@@ -322,6 +345,13 @@ export class EventBeacon {
   private readonly gem: THREE.Mesh;
   private readonly pillar: THREE.Mesh;
 
+  /** ACCESSIBILITY PASS: recolor both beacon materials in place (palette change). */
+  recolor(colorHex: string): void {
+    const color = new THREE.Color(colorHex);
+    (this.gem.material as THREE.MeshBasicMaterial).color.copy(color);
+    (this.pillar.material as THREE.MeshBasicMaterial).color.copy(color);
+  }
+
   constructor(colorHex: string) {
     const color = new THREE.Color(colorHex);
     const gemGeo = new THREE.OctahedronGeometry(0.55);
@@ -462,6 +492,20 @@ export interface LiveEvent {
   untapKill: (() => void) | null;
 }
 
+/**
+ * ACCESSIBILITY PASS: live-manager registry. The manager is
+ * blueprint-owned and Engine holds no handle to it, so palette changes
+ * reach live beacons through this set (registered on construct,
+ * deregistered on despawnAll). Recoloring a stale manager's beacons is
+ * harmless — it only sets material colors.
+ */
+const liveManagers = new Set<DynamicEventManager>();
+
+/** ACCESSIBILITY PASS: recolor every live event beacon to the current palette. */
+export function recolorAllEventBeacons(): void {
+  for (const m of liveManagers) m.applyPalette();
+}
+
 export class DynamicEventManager implements MapLocalEntitySystem {
   readonly id = 'events';
   private readonly opts: DynamicEventManagerOpts;
@@ -472,6 +516,14 @@ export class DynamicEventManager implements MapLocalEntitySystem {
   constructor(private readonly engine: Engine, opts: DynamicEventManagerOpts) {
     this.opts = opts;
     this.instancer = NpcInstancer.for(engine);
+    liveManagers.add(this);
+  }
+
+  /** ACCESSIBILITY PASS: recolor live beacons to the current palette. */
+  applyPalette(): void {
+    for (const ev of this.live) {
+      if (ev.beacon) ev.beacon.recolor(beaconColorForType(ev.def.type as DynamicEventTypeId));
+    }
   }
 
   /** Read-only view for tests / the trade session. */
@@ -520,6 +572,7 @@ export class DynamicEventManager implements MapLocalEntitySystem {
   }
 
   despawnAll(): void {
+    liveManagers.delete(this);
     for (const ev of this.live) {
       try { ev.beacon?.dispose(this.engine.scene); } catch { /* never strand */ }
       ev.beacon = null;
@@ -603,6 +656,9 @@ export class DynamicEventManager implements MapLocalEntitySystem {
       this.opts.lootHooks?.onLoot(d, ev.cache!.root.position.clone());
       this.opts.inventory?.add(d.itemId, d.count);
     }
+    // UPGRADE LOOP (blueprint-rollout): supply caches also pay seeded
+    // scrap on the merged wallet path.
+    this.grantEventCurrency(ev, ev.cache!.root.position.clone());
     this.completeEvent(ev, true);
     return drops;
   }
@@ -667,7 +723,9 @@ export class DynamicEventManager implements MapLocalEntitySystem {
   private announce(ev: LiveEvent): void {
     this.opts.toast(ev.def.toastStart);
     const pos = this.eventAnchor(ev);
-    const beacon = new EventBeacon(ev.def.beaconColor);
+    // ACCESSIBILITY PASS: beacon color resolves through the live palette
+    // ('none' returns the exact shipped hex — see accessibility.ts).
+    const beacon = new EventBeacon(beaconColorForType(ev.def.type as DynamicEventTypeId));
     beacon.setPosition(pos);
     this.engine.scene.add(beacon.group);
     ev.beacon = beacon;
@@ -728,6 +786,9 @@ export class DynamicEventManager implements MapLocalEntitySystem {
       if (ev.combatants.every((e) => !e.alive)) {
         const bonus = this.rollReward(ev, ev.def.completionBonusRolls);
         for (const d of bonus) this.opts.lootHooks?.onLoot(d, payload.enemy.position.clone());
+        // UPGRADE LOOP (blueprint-rollout): seeded scrap bonus on the
+        // merged wallet path (ambush + patrol completions).
+        this.grantEventCurrency(ev, payload.enemy.position.clone());
         this.completeEvent(ev, true);
       }
     });
@@ -789,6 +850,25 @@ export class DynamicEventManager implements MapLocalEntitySystem {
 
   private unregisterInteractable(id: string): void {
     try { this.engine.npcInteractions.unregister(id); } catch { /* never strand */ }
+  }
+
+  /**
+   * UPGRADE LOOP (blueprint-rollout): seeded scrap reward for event
+   * completion, wired to the merged wallet path (EnemyManager.lootHooks.
+   * onCurrency — the vendor-economy hook the events wave deferred until
+   * the wallet merged). Per-instance stream (plan.seed ^ CURRENCY_SALT) —
+   * independent of completion order, never the item-loot stream. No-op
+   * when the blueprint didn't wire onCurrency (blueprints without the
+   * vendor-economy layer). The blueprint's own onCurrency hook toasts the
+   * grant, so this stays silent.
+   */
+  private grantEventCurrency(ev: LiveEvent, pos: THREE.Vector3): void {
+    const hook = this.opts.lootHooks?.onCurrency;
+    if (!hook) return;
+    const amount = rollEventCurrency(ev.plan.seed, ev.def.type);
+    try {
+      hook(amount, pos);
+    } catch { /* currency is cosmetic */ }
   }
 
   private rollReward(ev: LiveEvent, rolls: number): { itemId: string; count: number }[] {

@@ -34,6 +34,12 @@ import { ItemBuilder } from './items/ItemBuilder';
 import { LOOT_CATALOG_RECIPES, lootTier2OutputDefs } from './loot';
 import { MASTER_CATALOG_RECIPES, masterTier3OutputDefs } from './mastercraft';
 import { SET_CATALOG_RECIPES, setCraftedOutputDefs } from './setBonuses';
+/**
+ * UPGRADE LOOP (deployables): deployable field-item recipes + item defs
+ * (campfire / spike trap / lure totem). Additive: the catalog append and
+ * the item-def merge below are the only touch points.
+ */
+import { DEPLOY_CATALOG_RECIPES, deployableItemDefs } from './deployables';
 import type { SkillsLike } from './skills';
 
 // ---------------------------------------------------------------- salts
@@ -105,6 +111,12 @@ export interface CraftingRecipe {
   skillId?: string;
   /** required skill rank for skillId-gated recipes; default 1 */
   minSkillRank?: number;
+  /**
+   * UPGRADE LOOP (deployables): recipes flagged here always land in the
+   * seeded pool (like the minSkillRank-3 master rule below) — utility
+   * recipes the seeded subset must never lock out.
+   */
+  alwaysInPool?: boolean;
 }
 
 /**
@@ -140,6 +152,12 @@ const BASE_RECIPE_CATALOG: readonly CraftingRecipe[] = [
     name: 'Fiber Weave Vest',
     ingredients: [{ itemId: MAT_FIBER, count: 4 }],
     output: { itemId: 'craft_fiber_weave', count: 1 },
+    // MERGE (deployables x tutorial): the seeded pool is a shuffle of the
+    // full catalog, so appending recipes re-shuffles every seed's pool —
+    // the tutorial's equip step (craft gear when no drop) soft-locked on
+    // seeds whose pool held no level-1 craftable equippable. The basic
+    // armor must never be locked out, like the master rank-3 rule.
+    alwaysInPool: true,
   },
   {
     id: 'recipe_scrap_buckler',
@@ -236,6 +254,11 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
   // crown (smithing 3). Catalog check order and the minSkillRank-3
   // always-include rule are untouched.
   ...SET_CATALOG_RECIPES,
+  // UPGRADE LOOP (deployables): field-item recipes ride the same seeded
+  // pool via alwaysInPool (below) — appended last so smaller pools stay
+  // exact prefixes of larger ones for the same seed (the prefix property
+  // the tests pin).
+  ...DEPLOY_CATALOG_RECIPES,
 ];
 
 /** Catalog length — poolSize clamps to 1..this. */
@@ -274,9 +297,11 @@ export function buildRecipePool(spec: GameSpec): CraftingRecipe[] {
   });
   // Master always-include: rank-3-gated recipes are never locked out by
   // the seeded subset (dedup by id; deep copies like the rest).
+  // UPGRADE LOOP (deployables): alwaysInPool-flagged recipes (utility
+  // field-item kits) ride the same rule.
   const seen = new Set(pool.map((r) => r.id));
   for (const r of RECIPE_CATALOG) {
-    if ((r.minSkillRank ?? 0) >= 3 && !seen.has(r.id)) {
+    if (((r.minSkillRank ?? 0) >= 3 || r.alwaysInPool) && !seen.has(r.id)) {
       seen.add(r.id);
       pool.push({
         ...r,
@@ -337,6 +362,8 @@ export function craftedItemDefs(): Record<string, ItemDef> {
     ...masterTier3OutputDefs(),
     // Gear sets wave: the Masterforged crown output def (additive).
     ...setCraftedOutputDefs(),
+    // UPGRADE LOOP (deployables): the three crafted field-item kits.
+    ...deployableItemDefs(),
     craft_field_kit: new ItemBuilder('craft_field_kit')
       .named('Field Repair Kit')
       .consumable()

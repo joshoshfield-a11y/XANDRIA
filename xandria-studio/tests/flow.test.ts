@@ -63,6 +63,17 @@ function installLocalStorage() {
   };
 }
 
+/**
+ * save-slots: settings live in the active slot of the xandria.slots.v1
+ * store. Reads the active slot's settings back out of the mocked storage.
+ */
+function activeSlotSettings(): Record<string, unknown> {
+  const store = (globalThis as any).localStorage.__store as Record<string, string>;
+  const parsed = JSON.parse(store['xandria.slots.v1']);
+  const active = parsed.slots.find((s: any) => s.id === parsed.activeSlotId) ?? parsed.slots[0];
+  return active.settings as Record<string, unknown>;
+}
+
 const hudSpec = () =>
   ({
     meta: { name: 'Test Game' },
@@ -92,8 +103,8 @@ describe('Settings', () => {
   it('persists to localStorage and reloads', () => {
     const s = new Settings();
     s.set({ volume: 0.33, muted: true, quality: 'high' });
-    const raw = (globalThis as any).localStorage.__store['xandria.settings.v1'];
-    expect(JSON.parse(raw)).toMatchObject({ volume: 0.33, muted: true, quality: 'high' });
+    // save-slots: settings persist into the active slot of xandria.slots.v1
+    expect(activeSlotSettings()).toMatchObject({ volume: 0.33, muted: true, quality: 'high' });
     const s2 = new Settings();
     expect(s2.data).toMatchObject({ volume: 0.33, muted: true, quality: 'high' });
   });
@@ -312,7 +323,9 @@ describe('HUD flow screens', () => {
     const wrap = ov.children.find((c: any) => c.className === 'settings');
     // graphics wave 2 (E): volume, quality, PERF TIER, mute
     // UPGRADE LOOP (difficulty-modes): + DIFFICULTY row (index 3)
-    expect(wrap.children).toHaveLength(5);
+    // UPGRADE LOOP (accessibility-pass): + COLORBLIND (5), REDUCED MOTION
+    // (6), HUD TEXT SIZE (7), KEYBINDS section (8)
+    expect(wrap.children).toHaveLength(9);
     const vslider = wrap.children[0].children[1];
     vslider.value = '25';
     vslider.__fire('input');
@@ -338,11 +351,25 @@ describe('HUD flow screens', () => {
     mcheck.checked = true;
     mcheck.__fire('change');
     expect(eng.settings.data.muted).toBe(true);
-    // persisted
-    const raw = (globalThis as any).localStorage.__store['xandria.settings.v1'];
-    const persisted = JSON.parse(raw);
+    // persisted (save-slots: into the active slot of xandria.slots.v1)
+    const persisted = activeSlotSettings();
     expect(persisted.muted).toBe(true);
     expect(persisted.tier).toBe('s25');
+    // ACCESSIBILITY PASS rows: palette select, reduced-motion checkbox,
+    // text-size slider, keybinds section (head + 15 action rows + note).
+    const aselect = wrap.children[5].children[1];
+    expect(aselect.tag).toBe('select');
+    expect(aselect.children.map((o: any) => o.value)).toEqual(['none', 'protanopia', 'deuteranopia', 'tritanopia']);
+    const rcheck = wrap.children[6].children[1];
+    expect(rcheck.tag).toBe('input');
+    expect(rcheck.checked).toBe(false);
+    const xslider = wrap.children[7].children[1];
+    expect(xslider.tag).toBe('input');
+    expect(xslider.min).toBe('85');
+    expect(xslider.max).toBe('150');
+    const kbWrap = wrap.children[8];
+    expect(kbWrap.children).toHaveLength(17);
+    expect(kbWrap.children[1].children[0].textContent).toBe('FORWARD');
   });
 
   it('showEnd has RESTART and TITLE buttons', () => {

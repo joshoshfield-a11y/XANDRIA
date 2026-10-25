@@ -148,5 +148,9 @@ export function buildItemKit(
   opts?: { sell?: InventorySellHooks | null },
 ): BlueprintItemKit | null {
   if (!spec.custom?.items) return null;
-  return new BlueprintItemKit(engine, spec, avatar, opts);
+  const kit = new BlueprintItemKit(engine, spec, avatar, opts);
+  // Tutorial wave: let the observe-only tutorial manager poll equip slots.
+  // Additive — the manager only reads getEquipped(); no behavior changes.
+  engine.tutorial.setInventory(() => kit.inventory);
+  return kit;
 }

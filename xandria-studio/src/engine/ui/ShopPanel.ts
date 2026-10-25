@@ -31,6 +31,7 @@ import {
   unitSellPrice,
   type VendorStockEntry,
 } from '../game/economy';
+import { effectiveBuyPrice, effectiveSellPrice } from '../game/factions';
 import { RARITY_COLORS } from './InventoryHUD';
 
 export interface ShopVendor {
@@ -57,6 +58,17 @@ export interface ShopPanelOpts {
   isModalOpen?: () => boolean;
   /** toast sink */
   toast?: (msg: string) => void;
+  /**
+   * factions-reputation wave: current standing for a vendor id (the
+   * blueprint maps vendor -> faction first). Absent = 0 (neutral), so
+   * un-wired panels price exactly as before.
+   */
+  standingOf?: (vendorId: string) => number;
+  /**
+   * factions-reputation wave: fired after a successful buy/sell so the
+   * blueprint can adjust standing. Never affects the transaction.
+   */
+  onTrade?: (vendorId: string, kind: 'buy' | 'sell') => void;
 }
 
 const AMBER = '#ffb545';
@@ -262,17 +274,20 @@ export class ShopPanel {
       ].join(';'));
       const info = el(doc, 'div', 'display:flex;flex-direction:column;gap:1px;flex:1;min-width:0');
       const nm = el(doc, 'div', `font-size:13px;font-weight:700;color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`, name);
+      // factions-reputation wave: the standing factor applies AFTER the
+      // seeded stock price (jitter + buyMult already inside line.price).
+      const price = this.effectiveBuy(line, v.vendorId);
       const sub = el(doc, 'div', `font-size:11px;color:${DIM}`,
-        line.stock > 0 ? `${line.price} ${CURRENCY_NAME} · ${line.stock} left` : 'SOLD OUT');
+        line.stock > 0 ? `${price} ${CURRENCY_NAME} · ${line.stock} left` : 'SOLD OUT');
       info.append(nm, sub);
       const buy = el(doc, 'button', BTN_CSS, 'BUY') as HTMLButtonElement;
       buy.style.background = AMBER;
       buy.style.color = '#10131a';
       buy.style.border = 'none';
-      const afford = (wallet?.balance ?? 0) >= line.price;
+      const afford = (wallet?.balance ?? 0) >= price;
       buy.disabled = line.stock <= 0 || !afford;
       if (buy.disabled) { buy.style.opacity = '0.45'; buy.style.cursor = 'default'; }
-      buy.setAttribute('aria-label', `Buy ${name} for ${line.price} ${CURRENCY_NAME}`);
+      buy.setAttribute('aria-label', `Buy ${name} for ${price} ${CURRENCY_NAME}`);
       buy.addEventListener('click', () => this.buy(line));
       row.append(info, buy);
       this.listEl.append(row);
@@ -298,7 +313,9 @@ export class ShopPanel {
       return;
     }
     for (const r of rows) {
-      const price = unitSellPrice(r.def, sellMult);
+      // factions-reputation wave: the standing factor applies AFTER
+      // unitSellPrice (sellMult already inside it).
+      const price = effectiveSellPrice(unitSellPrice(r.def, sellMult), this.standingFor(this.vendor?.vendorId ?? ''));
       const color = r.def.rarity ? (RARITY_COLORS[r.def.rarity] ?? TEXT) : TEXT;
       const row = el(doc, 'div', [
         'display:flex', 'align-items:center', 'gap:8px',
@@ -320,25 +337,48 @@ export class ShopPanel {
     }
   }
 
+  /** Standing for the open vendor's faction (0 when unwired). */
+  private standingFor(vendorId: string): number {
+    try {
+      const v = this.opts.standingOf?.(vendorId) ?? 0;
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Effective buy price for a stock line at the open vendor. */
+  private effectiveBuy(line: VendorStockEntry, vendorId: string): number {
+    return effectiveBuyPrice(line.price, this.standingFor(vendorId));
+  }
+
   /** Buy one unit of a stock line. Atomic: a full backpack refunds the spend. */
   buy(line: VendorStockEntry): void {
     const inv = this.opts.inventory();
     const wallet = this.opts.wallet();
     if (!inv || !wallet) return;
     if (line.stock <= 0) return;
-    if (!wallet.spend(line.price)) {
+    // factions-reputation wave: the price is computed at click time
+    // from the live standing (the render-time figure is the same value
+    // unless standing moved while the panel was open). At neutral the
+    // factor is exactly 1, so legacy callers see line.price.
+    const price = this.vendor ? this.effectiveBuy(line, this.vendor.vendorId) : line.price;
+    if (!wallet.spend(price)) {
       this.opts.toast?.(`Not enough ${CURRENCY_NAME}.`);
       return;
     }
     const leftover = inv.add(line.itemId, 1);
     if (leftover > 0) {
-      wallet.add(line.price); // refund — the backpack had no room
+      wallet.add(price); // refund — the backpack had no room
       this.opts.toast?.('Backpack full.');
       this.render();
       return;
     }
     line.stock -= 1;
     this.opts.toast?.(`Bought ${this.opts.defs()[line.itemId]?.name ?? line.itemId}.`);
+    if (this.vendor) {
+      try { this.opts.onTrade?.(this.vendor.vendorId, 'buy'); } catch (e) { console.warn('[shop] onTrade threw', e); }
+    }
     this.render();
   }
 
@@ -350,6 +390,9 @@ export class ShopPanel {
     if (inv.remove(itemId, 1) === 1) {
       wallet.add(unitPrice);
       this.opts.toast?.(`Sold for ${unitPrice} ${CURRENCY_NAME}.`);
+      if (this.vendor) {
+        try { this.opts.onTrade?.(this.vendor.vendorId, 'sell'); } catch (e) { console.warn('[shop] onTrade threw', e); }
+      }
       this.render();
     }
   }

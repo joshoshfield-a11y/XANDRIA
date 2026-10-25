@@ -490,7 +490,13 @@ export class CraftingInteractionSession {
       playerLevel: opts.playerLevel,
       skills: opts.skills,
       craftTimeMult: opts.craftTimeMult,
-      onCrafted: opts.onCrafted,
+      // Tutorial wave: the blueprint's onCrafted wiring is preserved
+      // exactly; the hook emit alongside it is additive (no taps = no-op)
+      // and feeds the tutorial's craft step plus any future observers.
+      onCrafted: (recipe) => {
+        opts.onCrafted?.(recipe);
+        engine.hooks.emit('onCraftComplete', { recipeId: recipe.id });
+      },
       toast: opts.toast,
     });
     this.prompt = new InteractionPrompt(container, engine.npcInteractions, {
@@ -504,6 +510,17 @@ export class CraftingInteractionSession {
   /** True while the crafting panel is open (blueprints wire this into the other sessions' isModalOpen). */
   get isPanelOpen(): boolean {
     return this.panel?.isOpen ?? false;
+  }
+
+  /**
+   * UPGRADE LOOP (blueprint-rollout): the station currently shown in the
+   * prompt (null = none). Lets blueprints with their own [E] interactions
+   * (e.g. tower-defense turret pads) defer when a station prompt is live,
+   * so one keypress can't double-fire two interactions.
+   */
+  get promptedStation(): StationEntity | null {
+    const t = this.prompt?.currentTarget;
+    return t ? this.byId.get(t.id) ?? null : null;
   }
 
   /** Visible for tests: the owned panel (null when enableUi === false). */

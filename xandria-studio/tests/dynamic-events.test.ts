@@ -18,7 +18,9 @@ import {
   resolveEventCount,
   resolveEventsEnabled,
   isEventTypeDisabled,
+  rollEventCurrency,
 } from '../src/engine/game/dynamicEvents';
+import { CURRENCY_SALT } from '../src/engine/game/economy';
 import { ENEMY_SALT } from '../src/engine/game/EnemyAI';
 import { NPC_SALT } from '../src/engine/game/Npc';
 import { CRAFT_SALT } from '../src/engine/game/crafting';
@@ -163,5 +165,36 @@ describe('buildMerchantStock', () => {
   it('returns [] for a non-merchant def or an empty pool', () => {
     expect(buildMerchantStock(eventDefById('event_cache')!, 1, defs as never)).toEqual([]);
     expect(buildMerchantStock(def, 1, {})).toEqual([]);
+  });
+});
+
+describe('rollEventCurrency (blueprint-rollout)', () => {
+  it('is deterministic per (planSeed, type)', () => {
+    expect(rollEventCurrency(4242, 'ambush')).toBe(rollEventCurrency(4242, 'ambush'));
+    expect(rollEventCurrency(4242, 'patrol')).toBe(rollEventCurrency(4242, 'patrol'));
+    expect(rollEventCurrency(4242, 'cache')).toBe(rollEventCurrency(4242, 'cache'));
+  });
+  it('varies with the plan seed', () => {
+    const a = [rollEventCurrency(1, 'ambush'), rollEventCurrency(2, 'ambush'), rollEventCurrency(3, 'ambush')];
+    expect(new Set(a).size).toBeGreaterThan(1);
+  });
+  it('stays inside the per-type bands', () => {
+    for (let s = 0; s < 200; s++) {
+      const a = rollEventCurrency(s, 'ambush');
+      expect(a).toBeGreaterThanOrEqual(10);
+      expect(a).toBeLessThanOrEqual(25);
+      const p = rollEventCurrency(s, 'patrol');
+      expect(p).toBeGreaterThanOrEqual(15);
+      expect(p).toBeLessThanOrEqual(35);
+      const c = rollEventCurrency(s, 'cache');
+      expect(c).toBeGreaterThanOrEqual(5);
+      expect(c).toBeLessThanOrEqual(15);
+    }
+  });
+  it('draws on a separate stream from the item-loot rolls (plan.seed ^ CURRENCY_SALT)', () => {
+    // rollReward uses (seed ^ 0x8e1); the currency roll must not collide
+    // with the item stream for the same plan seed -- different salt, and
+    // the band bounds differ from any loot count in the pool.
+    expect(CURRENCY_SALT).not.toBe(0x8e1);
   });
 });

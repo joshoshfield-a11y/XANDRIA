@@ -74,6 +74,31 @@ function toastText(page: any) {
   });
 }
 
+/**
+ * blueprint-rollout: kills grant XP, and an XP level-up opens a modal that
+ * pauses the game (same pattern vendor-economy.spec.ts already settles).
+ * Without settling, every later update-driven leg (cache discovery, patrol
+ * timers) stalls: this spec failed identically on clean main 707acd1. This
+ * is a spec-only settle step; product behavior is unchanged.
+ */
+const settleModals = async (page: any): Promise<void> => {
+  for (let i = 0; i < 5; i++) {
+    const n: number = await page.evaluate(() => document.querySelectorAll('button.lvlopt').length);
+    if (n > 0) {
+      await page.evaluate(() => (document.querySelector('button.lvlopt') as HTMLButtonElement).click());
+    }
+    const settled: boolean = await page.evaluate(() => {
+      const X = (window as unknown as { __XANDRIA__?: any }).__XANDRIA__;
+      if (document.querySelectorAll('button.lvlopt').length > 0) return false;
+      if (X.engine.state === 'paused') X.engine.resume();
+      return X.engine.state === 'playing';
+    });
+    if (settled) return;
+    await page.waitForTimeout(1000);
+  }
+  throw new Error('settleModals: game did not return to playing');
+};
+
 test('dynamic-events: all four event types via the test-seed hook, desktop', async ({ page }) => {
   test.setTimeout(900_000);
   const errors = await boot(page);
@@ -140,6 +165,9 @@ test('dynamic-events: all four event types via the test-seed hook, desktop', asy
   });
   expect(ambushDone.bonusDrops, 'completion bonus dropped as world loot').toBeGreaterThan(0);
   expect(ambushDone.beaconGone, 'beacon removed on completion').toBe(true);
+  // kills -> XP -> possible level-up modal (pauses); settle before the
+  // update-driven cache leg
+  await settleModals(page);
 
   // ---- leg 2: cache (discovery -> [E] open -> inventory grants) ----
   const cacheInfo = await page.evaluate(() => {
@@ -211,6 +239,9 @@ test('dynamic-events: all four event types via the test-seed hook, desktop', asy
     return X.lootTest.liveItemWorld()?.liveItems?.length ?? 0;
   });
   expect(dropsAfter, 'patrol kill -> bonus reward drops').toBeGreaterThan(dropsBefore);
+  // patrol kills -> XP -> possible level-up modal (pauses); settle before
+  // the merchant leg
+  await settleModals(page);
 
   // ---- leg 4: merchant (trade panel -> buy -> sell) ----
   const merchantSetup = await page.evaluate(() => {

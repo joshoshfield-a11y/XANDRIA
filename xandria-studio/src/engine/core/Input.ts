@@ -5,23 +5,20 @@
  */
 export type Action =
   | 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'dash' | 'attack' | 'attack2'
-  | 'interact' | 'pause' | 'boost' | 'brake' | 'reset' | 'confirm' | 'weapon1' | 'weapon2';
+  | 'interact' | 'pause' | 'boost' | 'brake' | 'reset' | 'confirm' | 'weapon1' | 'weapon2'
+  | 'deploy' | 'ability1' | 'ability2' | 'ability3';
 
-const KEYMAP: Record<string, Action[]> = {
-  KeyW: ['forward'], ArrowUp: ['forward'],
-  KeyS: ['back'], ArrowDown: ['back'],
-  KeyA: ['left'], ArrowLeft: ['left'],
-  KeyD: ['right'], ArrowRight: ['right'],
-  Space: ['jump', 'boost', 'confirm'],
-  ShiftLeft: ['sprint', 'dash'], ShiftRight: ['sprint', 'dash'],
-  KeyE: ['interact'], KeyF: ['interact'],
-  KeyQ: ['attack2'],
-  KeyR: ['reset'],
-  Escape: ['pause'], KeyP: ['pause'],
-  Enter: ['confirm'],
-  ControlLeft: ['brake'], KeyX: ['brake'],
-  Digit1: ['weapon1'], Digit2: ['weapon2'],
-};
+/**
+ * ACCESSIBILITY PASS: the keyboard map is no longer a hardcoded const —
+ * it is built from accessibility.ts (primary codes + fixed secondaries),
+ * so remaps stored in the profile take effect. Defaults reproduce the old
+ * KEYMAP exactly (KeyX brake survives as a secondary). Mouse attack and
+ * gamepad are untouched by this.
+ */
+import {
+  buildKeymap, effectiveActionCodes,
+  type KeybindOverrides, type RemappableAction,
+} from '../game/accessibility';
 
 export class Input {
   private down = new Set<Action>();
@@ -39,6 +36,46 @@ export class Input {
   private el: HTMLElement;
   private handlers: Array<[EventTarget, string, any]> = [];
   enabled = true;
+  /** ACCESSIBILITY PASS: live code → actions map + stored user overrides. */
+  private keymap: Record<string, Action[]> = buildKeymap({}) as Record<string, Action[]>;
+  private keybindOverrides: KeybindOverrides = {};
+
+  /**
+   * ACCESSIBILITY PASS: replace the keyboard map from profile overrides
+   * (called by Engine.applyAccessibility on boot and on settings change).
+   * Held keys are cleared so a remapped key can't stick down.
+   */
+  setKeybinds(overrides: KeybindOverrides): void {
+    this.keybindOverrides = { ...overrides };
+    this.keymap = buildKeymap(overrides) as Record<string, Action[]>;
+    this.down.clear();
+    this.just.clear();
+    this.released.clear();
+  }
+
+  /** ACCESSIBILITY PASS: effective primary code per remappable action. */
+  getKeybinds(): Record<RemappableAction, string> {
+    return effectiveActionCodes(this.keybindOverrides);
+  }
+
+  /** Per-instance key remaps (COMBAT-ABILITIES: remappable-safe hotkeys).
+   *  An entry overrides the live keymap for that code; null unbinds the
+   *  code. The ability manager never reads key codes, so remapping needs
+   *  no manager change — rebind here and ability1/2/3 follow. A later
+   *  setKeybinds() rebuilds the keymap underneath; per-instance overrides
+   *  still win in actionsForCode. */
+  private keyOverrides = new Map<string, Action[] | null>();
+
+  /** Remap one key code to actions (or null to unbind it). */
+  remapKey(code: string, actions: Action[] | null): void {
+    this.keyOverrides.set(code, actions);
+  }
+
+  /** Effective actions for a key code (per-instance override wins, else the live keymap). */
+  actionsForCode(code: string): Action[] {
+    if (this.keyOverrides.has(code)) return this.keyOverrides.get(code) ?? [];
+    return this.keymap[code] ?? [];
+  }
 
   constructor(el: HTMLElement) {
     this.el = el;
@@ -47,8 +84,8 @@ export class Input {
       this.handlers.push([t, type, fn]);
     };
     on(window, 'keydown', (e: KeyboardEvent) => {
-      const acts = KEYMAP[e.code];
-      if (!acts) return;
+      const acts = this.actionsForCode(e.code);
+      if (!acts.length) return;
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
       for (const a of acts) {
         if (!this.down.has(a)) this.just.add(a);
@@ -56,8 +93,8 @@ export class Input {
       }
     });
     on(window, 'keyup', (e: KeyboardEvent) => {
-      const acts = KEYMAP[e.code];
-      if (!acts) return;
+      const acts = this.actionsForCode(e.code);
+      if (!acts.length) return;
       for (const a of acts) {
         this.down.delete(a);
         this.released.add(a);

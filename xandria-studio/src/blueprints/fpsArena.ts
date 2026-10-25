@@ -11,8 +11,10 @@ import { GatheringManager, GatheringInteractionSession } from '../engine/game/ga
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
 import { ensureSetItemDefs } from '../engine/game/setBonuses';
+import { ensureEnchantItemDefs } from '../engine/game/enchantments';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
 import { AchievementsPanel } from '../engine/ui/AchievementsPanel';
@@ -20,6 +22,17 @@ import { AchievementManager } from '../engine/game/achievements';
 import { BestiaryPanel } from '../engine/ui/BestiaryPanel';
 import { resolveGatheringDensity } from '../engine/game/crafting';
 import { QuestManager, buildQuestPool, resolveQuestsEnabled } from '../engine/game/quests';
+import { NpcManager } from '../engine/game/NpcManager';
+import { QuestTalkSession } from '../engine/game/questTalk';
+import {
+  Wallet,
+  CURRENCY_NAME,
+  DEFAULT_SELL_MULT,
+  VENDOR_SALT,
+  resolveVendorDefs,
+  buildVendorNpcSpecs,
+} from '../engine/game/economy';
+import { ShopPanel } from '../engine/ui/ShopPanel';
 import { buildSideQuestPool } from '../engine/game/sidequests';
 import { QuestTracker } from '../engine/ui/QuestTracker';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
@@ -208,6 +221,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     playerLevel: () => prog.level,
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
+    ngPlus: () => engine.getNgPlusCycle(),
 
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
@@ -216,6 +230,11 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const variants = new VariantDirector(engine, enemies, projectiles);
 
   avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(0, terrain.heightAt(0, 0) + 2, 0), enemies, projectiles);
+  // COMBAT-ABILITIES: same wiring as tpAction; aim is the camera forward
+  // (the FPS shoot convention) projected to the ground plane.
+  const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
+    damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
+  });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
   // + recipe outputs) before wireItems, when the spec has crafting enabled
@@ -228,7 +247,36 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   ensureLootItemDefs(spec);
   // Gear sets wave: set-piece item defs (additive, idempotent).
   ensureSetItemDefs(spec);
-  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar);
+  // UPGRADE LOOP (blueprint-rollout): vendor-economy parity with tpAction.
+  // The player-scoped currency wallet (survives portals by construction --
+  // never in portalEntities; the PortalState snapshot carries the balance
+  // for rebuild paths). engine.wallet exposes it to PortalManager.portalParts().
+  const wallet = new Wallet();
+  engine.wallet = wallet;
+  wallet.onChange = () => engine.hud.setCurrency(wallet.balance);
+  // Merchant NPCs get their OWN map-local roster (id 'vendors', VENDOR_SALT
+  // stream) -- one NpcManager, so seeded spawn streams stay isolated from
+  // every other system. The QuestTalkSession below dispatches their [E]
+  // activation to the shop panel instead of the quest dialogue.
+  const vendorDefs = resolveVendorDefs(spec);
+  const vendorManager = new NpcManager(engine, {
+    id: 'vendors',
+    salt: VENDOR_SALT,
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    specs: buildVendorNpcSpecs(vendorDefs),
+    count: vendorDefs.length,
+  });
+  engine.portalEntities.register(vendorManager);
+  vendorManager.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+  // inventory-qol parity: sell-junk hooks ride the vendor-economy wallet
+  // (DEFAULT_SELL_MULT -- the same rate the shop panel pays). The wallet
+  // is player-scoped, so sell credits land in the same balance the shop
+  // and kill-drops use.
+  // Enchantments wave: enchant-material item defs (additive, idempotent).
+  ensureEnchantItemDefs(spec);
+  const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar, {
+    sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
+  });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
   // walks over to collect. Independent of the CRAFTING toggle (loot is an
@@ -241,11 +289,21 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
         const def = spec.custom?.items?.defs?.[drop.itemId];
         engine.hud.toast(`Loot: ${drop.count > 1 ? `${drop.count}\u00d7 ` : ''}${def?.name ?? drop.itemId}`);
       },
+      // UPGRADE LOOP (blueprint-rollout): seeded scrap payouts ride the
+      // separate currency stream (EnemyAI); the wallet is player-scoped,
+      // so kills bank scrap that survives portal travel.
+      onCurrency: (amount, _pos) => {
+        wallet.add(amount);
+        engine.hud.toast(`+${amount} ${CURRENCY_NAME}`);
+      },
     };
   }
   // quest wave: the main-story quest line (player-scoped, never in
   // portalEntities — survives portal travel by construction). No villagers
   // in this genre, so the line auto-accepts and auto-turns-in.
+  // UPGRADE LOOP (blueprint-rollout): hoisted for the shop panel's
+  // isModalOpen chain (assigned below, after the panel is constructed).
+  let talkSession: QuestTalkSession | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -292,6 +350,9 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     onLevelUp: (gain) => notifyLevelUp(gain),
   });
   engine.achievementManager = achievements;
+  // run-journal wave: publish Progression so the engine's run journal
+  // can read the run's total XP at run end (observe-only).
+  engine.progression = prog;
   // crafting wave (workstream B): harvestable gathering nodes (ore veins,
   // fiber plants, salvage caches), map-local lifecycle. The manager
   // registers itself with engine.portalEntities ({ id: 'gathering' }) so
@@ -359,8 +420,41 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
         toast: (m) => engine.hud.toast(m),
       })
     : null;
+  // UPGRADE LOOP (blueprint-rollout): vendor-economy parity -- the shop
+  // panel (buy/sell tabs, seeded per-map stock). The QuestTalkSession covers
+  // the vendor roster only (no villagers in this genre) and dispatches vendor
+  // [E] activation to the shop panel instead of the quest dialogue. Modal
+  // arbitration mirrors tpAction.
+  const shopPanel = new ShopPanel({
+    container: engine.container,
+    inventory: () => itemKit?.inventory ?? null,
+    wallet: () => wallet,
+    defs: () => spec.custom?.items?.defs ?? {},
+    vendorDefs: () => vendorDefs,
+    toast: (m) => engine.hud.toast(m),
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+  });
+  // keep an open shop live-synced with wallet/inventory changes
+  wallet.onChange = () => {
+    engine.hud.setCurrency(wallet.balance);
+    shopPanel.refresh();
+  };
+  const invForShop = itemKit?.inventory ?? null;
+  if (invForShop) {
+    const prevOnChange = invForShop.onChange;
+    invForShop.onChange = () => { prevOnChange?.(); shopPanel.refresh(); };
+  }
+  talkSession = questsEnabled && quests
+    ? new QuestTalkSession(engine, [vendorManager], quests, {
+        openVendor: (npc) => shopPanel.openForVendor({
+          vendorId: npc.vendorId!,
+          spawnSeed: npc.spawnSeed,
+          keeperName: npc.name,
+        }),
+      })
+    : null;
   const gatheringSession = new GatheringInteractionSession(engine, gathering, {
-    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false) || shopPanel.isOpen,
   });
   // skills wave: the skills panel (K key / SKILLS chip toggle). Never
   // opens while the crafting panel owns input. Not built when skills
@@ -554,10 +648,24 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const t = engine.time;
     avatar.ctrl.camYaw = camRig.yaw;
     avatar.update(dt, t);
+    // COMBAT-ABILITIES: tick after the controller's velocity write (see tpAction).
+    abilities.update(dt);
+    abilities.poll(() => {
+      const dir = new THREE.Vector3();
+      engine.camera.getWorldDirection(dir);
+      dir.y = 0;
+      return dir.lengthSq() > 1e-6 ? dir.normalize() : new THREE.Vector3(0, 0, 1);
+    });
     itemKit?.update(dt);
     gatheringSession.update(dt); // crafting wave (B): [E] Harvest prompt + registration refresh
     quests?.update(dt); // quest wave: explore objectives read the portal transition counter
     stationSession?.update(dt); // crafting wave (C): [E] Use prompt + crafting panel
+    talkSession?.update(dt); // UPGRADE LOOP (blueprint-rollout): vendor [E] Trade prompt + shop dispatch
+    // vendor-economy parity: shop stock is map-local (seeded per map), so a
+    // portal arrival ALWAYS closes the shop -- unconditional (mirrors tpAction).
+    if (shopPanel.isOpen) {
+      shopPanel.hide();
+    }
 
     if ((input.pressed('attack') || input.justPressed('attack')) && engine.state === 'playing') {
       const dir = new THREE.Vector3();
@@ -570,6 +678,7 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     const inst = NpcInstancer.for(engine);
     inst.beginFrame(dt);
     enemies.update(dt, avatar.ctrl.position, t);
+    vendorManager.update(dt); // UPGRADE LOOP (blueprint-rollout): merchants tick in the shared instancer frame
     gathering.update(dt); // crafting wave (B): static node submits into the shared instancer frame
     stations.update(dt); // crafting wave (C): static station submits into the shared instancer frame
     inst.endFrame();
@@ -606,5 +715,5 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
     if (spec.objective.type === 'survive') hud.setProgress(`${enemies.aliveCount()} hostiles`);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession , abilities: abilities.manager, abilityBar: abilities.bar };
 }

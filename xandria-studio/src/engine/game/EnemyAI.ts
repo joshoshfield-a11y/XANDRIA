@@ -48,6 +48,16 @@ import {
   difficultyById,
   type DifficultyId,
 } from './difficulty';
+/**
+ * UPGRADE LOOP (new-game-plus): prestige run cycles (NG+1, NG+2, ...).
+ * Additive on top of difficulty — spawnOne applies the band, then the
+ * difficulty multiplier, then the NG+ multiplier from newGamePlus.ts's
+ * NG_PLUS_TABLE. Cycle 0 is the identity row (byte-identical spawns).
+ */
+import {
+  applyNgPlusScaling,
+  ngPlusByCycle,
+} from './newGamePlus';
 
 /**
  * Salt for the enemy roster stream — keeps it off the NPC stream and the
@@ -96,6 +106,16 @@ export class Enemy {
   get hostile(): boolean {
     return this.state !== 'idle';
   }
+  /**
+   * UPGRADE LOOP (deployables): additive lure hook. When non-null, the
+   * enemy targets this world point instead of the player — chase/attack
+   * ranges, facing and ranged aim all read it. Melee attacks against the
+   * lure never damage the player (the onPlayerHit call is gated on
+   * !lureTarget: the enemy mauls the totem, not the player). Null
+   * (default) = byte-identical pre-deployables behavior. Assigned and
+   * cleared per-frame by DeployablesManager; never by EnemyManager.
+   */
+  lureTarget: THREE.Vector3 | null = null;
   private attackCd = 0;
   private wanderTarget: THREE.Vector3 | null = null;
   private hoverPhase: number;
@@ -451,7 +471,10 @@ export class Enemy {
     const pos = this.position;
     // render-interpolated position for visual placements only — AI logic keeps raw `pos`
     const vpos = this.body ? this.engine.physics.interpolatedPosition(this.body, this.tmpV) : pos;
-    const dist = pos.distanceTo(playerPos);
+    // UPGRADE LOOP (deployables): the lure hook — a lured enemy measures
+    // ranges and aims at the totem instead of the player.
+    const tgt = this.lureTarget ?? playerPos;
+    const dist = pos.distanceTo(tgt);
     this.attackCd -= dt;
 
     const aggroR = (this.kind === 'turret' ? 42 : 30) * this.aggroMult;
@@ -465,7 +488,7 @@ export class Enemy {
       case 'walker': case 'brute': {
         const b = this.body!;
         if (this.state === 'chase' || this.state === 'attack') {
-          const dir = playerPos.clone().sub(pos).setY(0).normalize();
+          const dir = tgt.clone().sub(pos).setY(0).normalize();
           const sp = this.spec.speed * this.speedMult * (this.state === 'attack' ? 0.4 : 1);
           b.velocity.x = dir.x * sp;
           b.velocity.z = dir.z * sp;
@@ -473,7 +496,9 @@ export class Enemy {
           if (this.state === 'attack' && this.attackCd <= 0) {
             this.attackCd = 1.2;
             this.rig!.swing?.();
-            if (dist < 2.6) this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
+            // UPGRADE LOOP (deployables): a lured enemy mauls the totem —
+            // never the player.
+            if (dist < 2.6 && !this.lureTarget) this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
           }
         } else {
           // wander
@@ -492,7 +517,7 @@ export class Enemy {
       case 'drone': case 'flyer': {
         const b = this.body!;
         const hoverY = (this.engine.terrain ? this.engine.terrain.heightAt(pos.x, pos.z) : 0) + (this.kind === 'flyer' ? 4 : 3) + Math.sin(t * 2 + this.hoverPhase) * 0.4;
-        const target = this.state === 'idle' ? this.home : playerPos;
+        const target = this.state === 'idle' ? this.home : tgt;
         const dir = target.clone().sub(pos);
         dir.y = 0;
         const d = dir.length();
@@ -507,11 +532,11 @@ export class Enemy {
         b.velocity.z = dir.z * sp;
         b.velocity.y = (hoverY - pos.y) * 2.2;
         this.rig!.group.position.copy(vpos);
-        this.rig!.group.rotation.y = Math.atan2(playerPos.x - pos.x, playerPos.z - pos.z);
+        this.rig!.group.rotation.y = Math.atan2(tgt.x - pos.x, tgt.z - pos.z);
         this.rig!.animate(t, sp, {});
         if (this.state === 'attack' && this.attackCd <= 0 && this.projectiles) {
           this.attackCd = this.kind === 'flyer' ? 1.6 : 2.2;
-          const aim = playerPos.clone().add(new THREE.Vector3(0, 0.9, 0)).sub(pos).normalize();
+          const aim = tgt.clone().add(new THREE.Vector3(0, 0.9, 0)).sub(pos).normalize();
           this.projectiles.fire(pos.clone().add(aim.clone().multiplyScalar(0.8)), aim, { speed: 26, damage: this.spec.damage, friendly: false });
           this.engine.audio.play('laser', { pitch: 0.8, vol: 0.5 });
         }
@@ -521,7 +546,7 @@ export class Enemy {
         if (!this.turret) break;
         if (this.state !== 'idle') {
           const head = this.turret.head;
-          const want = Math.atan2(playerPos.x - pos.x, playerPos.z - pos.z);
+          const want = Math.atan2(tgt.x - pos.x, tgt.z - pos.z);
           let d = want - head.rotation.y;
           while (d > Math.PI) d -= Math.PI * 2;
           while (d < -Math.PI) d += Math.PI * 2;
@@ -530,7 +555,7 @@ export class Enemy {
             this.attackCd = 0.55;
             const muzzle = new THREE.Vector3();
             this.turret.muzzle.getWorldPosition(muzzle);
-            const aim = playerPos.clone().add(new THREE.Vector3(0, 1, 0)).sub(muzzle).normalize();
+            const aim = tgt.clone().add(new THREE.Vector3(0, 1, 0)).sub(muzzle).normalize();
             this.projectiles.fire(muzzle, aim, { speed: 40, damage: this.spec.damage, friendly: false });
             this.engine.audio.play('shoot', { pitch: 1.3, vol: 0.4 });
           }
@@ -601,6 +626,12 @@ export interface EnemyManagerOpts {
    * spawns). Blueprints wire () => engine.getDifficultyMode().
    */
   difficulty?: () => DifficultyId;
+  /**
+   * UPGRADE LOOP (new-game-plus): the player's prestige cycle, read at
+   * spawn time. Default () => 0 (identity row, byte-identical spawns).
+   * Blueprints wire () => engine.getNgPlusCycle().
+   */
+  ngPlus?: () => number;
 }
 
 /** Spawns and manages the full enemy roster from spec. */
@@ -677,7 +708,14 @@ export class EnemyManager implements MapLocalEntitySystem {
     // identical encounters.
     const diff = difficultyById(this.opts.difficulty?.() ?? 'normal');
     const dScaled = applyDifficultyScaling(scaled.spec.health, scaled.spec.damage, scaled.xpMult, diff);
-    const finalSpec = { ...scaled.spec, health: dScaled.health, damage: dScaled.damage };
+    // UPGRADE LOOP (new-game-plus): additive NG+ multiplier on top of the
+    // band + difficulty scaling (cycle 0 = identity, byte-identical
+    // spawns). The authored spec object is never mutated — the Enemy gets
+    // a scaled copy. Deterministic: same (mapSeed, playerLevel, difficulty,
+    // cycle) -> identical encounters; NG+ draws no RNG.
+    const ng = ngPlusByCycle(this.opts.ngPlus?.() ?? 0);
+    const nScaled = applyNgPlusScaling(dScaled.health, dScaled.damage, dScaled.xpMult, diff.lootChanceMult, ng);
+    const finalSpec = { ...scaled.spec, health: nScaled.health, damage: nScaled.damage };
     const e = new Enemy(this.engine, finalSpec, pos, this.projectiles, {
       onPlayerHit: this.events.onPlayerHit,
       // ANIMATION wave: the kill is counted at death; the roster entry is
@@ -695,7 +733,7 @@ export class EnemyManager implements MapLocalEntitySystem {
           if (!this.lootRng) {
             this.lootRng = buildLootRng(this.opts.lootSeed ?? this.engine.spec.meta.seed);
           }
-          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss, this.engine.worldTier ?? 1, this.difficultyDef().lootChanceMult)) {
+          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss, this.engine.worldTier ?? 1, this.difficultyDef().lootChanceMult * this.ngPlusDef().lootChanceMult)) {
             try { this.lootHooks.onLoot(drop, en.position); } catch { /* loot is cosmetic */ }
           }
           // VENDOR-ECONOMY: seeded scrap payout off the separate currency
@@ -721,7 +759,8 @@ export class EnemyManager implements MapLocalEntitySystem {
     // UPGRADE LOOP (enemy-scaling): per-enemy band metadata (see fields).
     // UPGRADE LOOP (difficulty-modes): the kill XP multiplier is the band
     // xpMult times the difficulty enemyXpMult.
-    e.xpMult = dScaled.xpMult;
+    // UPGRADE LOOP (new-game-plus): times the NG+ enemyXpMult on top.
+    e.xpMult = nScaled.xpMult;
     e.scalingBand = scaled.bandIndex;
     this.enemies.push(e);
     return e;
@@ -735,6 +774,16 @@ export class EnemyManager implements MapLocalEntitySystem {
    */
   private difficultyDef() {
     return difficultyById(this.opts.difficulty?.() ?? 'normal');
+  }
+
+  /**
+   * UPGRADE LOOP (new-game-plus): the live NG+ def for this manager's
+   * roster. Read per spawn/kill so a cycle change applies to enemies
+   * spawned after the change (already-spawned enemies keep their
+   * spawn-time stats — deterministic per (seed, level, difficulty, cycle)).
+   */
+  private ngPlusDef() {
+    return ngPlusByCycle(this.opts.ngPlus?.() ?? 0);
   }
 
   /**
@@ -768,6 +817,10 @@ export class EnemyManager implements MapLocalEntitySystem {
    * playerLevel, map) -> identical encounters. Positions/kinds remain
    * mapSeed-ALONE; variance streams use SCALING_SALT so the spawn-order
    * stream above is untouched.
+   * UPGRADE LOOP (new-game-plus): STATS additionally depend on the
+   * player's NG+ cycle via newGamePlus.ts (band -> difficulty -> NG+,
+   * each on a scaled copy) — same (mapSeed, playerLevel, difficulty,
+   * cycle) -> identical encounters; NG+ draws no RNG.
    */
   spawnForMap(mapSeed: number): void {
     this.despawnAll();
