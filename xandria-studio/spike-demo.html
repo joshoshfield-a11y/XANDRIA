@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XANDRIA gfx spike demo (Pass 0)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #101820; }
+  canvas { display: block; }
+  .label { position: absolute; top: 12px; font: 600 14px/1.4 system-ui, sans-serif; color: #e8f4ff; text-shadow: 0 1px 4px #000; }
+  #l { left: 16px; } #r { right: 16px; text-align: right; }
+  @media (max-width: 500px) { .label { font-size: 11px; } #r { top: 52px; } }
+  #status { position: absolute; bottom: 12px; left: 16px; font: 12px system-ui, sans-serif; color: #9fb2cc; }
+</style>
+</head>
+<body>
+<div class="label" id="l">Left to right: Default (quilt) · Stealth (carbon) · Desert Nomad (camo) · Spectral (runes)</div>
+<div class="label" id="r">Ground: baked grass · pants: denim · skin: matte</div>
+<div id="status">loading textures…</div>
+<script type="module" src="/scripts/spike-demo.ts"></script>
+</body>
+</html>

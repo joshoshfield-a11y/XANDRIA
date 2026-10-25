@@ -20,6 +20,7 @@ import { forgeHumanoidPlan } from '../src/engine/gfx/ModelForge';
 import {
   BUILT_IN_SKINS, resolveSkinDef, applySkin, availableSkinIds, makePatternTexture,
 } from '../src/engine/gfx/Skins';
+import { bakedTexture } from '../src/engine/gfx/BakedTextures';
 import {
   listSkinIds, setCustomSkinAccent, hasCustomSkinOverride,
 } from '../src/studio/editor/specOps';
@@ -153,20 +154,20 @@ describe('beauty wave: pattern quality + role targeting', () => {
     expect(makePatternTexture('plaid' as never)).toBeNull();
   });
 
-  it('textureRoles land the map on the right roles: rustscrap hazard → accent only', () => {
+  it('per-role baked maps (Pass A): rustscrap camo body + hazard accent + denim pants', () => {
     const rig = makeHumanoid(mats(), {}, 5);
     applySkin(rig, BUILT_IN_SKINS.rustscrap);
-    expect(roleMat(rig, 'accent').map).toBeInstanceOf(THREE.CanvasTexture);
-    expect(roleMat(rig, 'shirt').map).toBeNull();
-    expect(roleMat(rig, 'pants').map).toBeNull();
+    expect(roleMat(rig, 'shirt').map).toBe(bakedTexture('fabric-camo'));
+    expect(roleMat(rig, 'accent').map).toBe(bakedTexture('accent-hazard'));
+    expect(roleMat(rig, 'pants').map).toBe(bakedTexture('pants-denim'));
     rig.dispose();
   });
 
-  it('default roles still get shirt+pants (neonstreet fade, cyberronin digital)', () => {
+  it('default roles still get shirt+pants (neonstreet + cyberronin now baked carbon)', () => {
     const rig = makeHumanoid(mats(), {}, 6);
     applySkin(rig, BUILT_IN_SKINS.neonstreet);
-    expect(roleMat(rig, 'shirt').map).toBeInstanceOf(THREE.CanvasTexture);
-    expect(roleMat(rig, 'pants').map).toBeInstanceOf(THREE.CanvasTexture);
+    expect(roleMat(rig, 'shirt').map).toBe(bakedTexture('fabric-carbon'));
+    expect(roleMat(rig, 'pants').map).toBe(bakedTexture('pants-denim'));
     expect(roleMat(rig, 'accent').map).toBeNull();
     // emissive accent applied
     expect(roleMat(rig, 'accent').emissive.getHex()).toBe(0xff2fd6);
@@ -178,7 +179,7 @@ describe('beauty wave: pattern quality + role targeting', () => {
     applySkin(rig, BUILT_IN_SKINS.spectral);
     expect(roleMat(rig, 'shirt').color.getHex()).toBe(0x3a5a7a);
     expect(roleMat(rig, 'accent').emissive.getHex()).toBe(0x9ff2ff);
-    expect(roleMat(rig, 'shirt').map).toBeInstanceOf(THREE.CanvasTexture);
+    expect(roleMat(rig, 'shirt').map).toBe(bakedTexture('accent-runes'));
     rig.dispose();
   });
 });
@@ -198,7 +199,7 @@ describe('beauty wave: owned-materials-only discipline (extended)', () => {
 
     expect(roleMat(rig, 'shirt').color.getHex()).toBe(0x0f0f13);
     expect(roleMat(rig, 'accent').color.getHex()).toBe(0xff2255);
-    expect(roleMat(rig, 'shirt').map).toBeInstanceOf(THREE.CanvasTexture);
+    expect(roleMat(rig, 'shirt').map).toBe(bakedTexture('fabric-carbon'));
     expect(cachedShirt.color.getHex()).toBe(beforeShirt);
     expect(cachedShirt.map).toBeNull();
     expect(cachedAccent.color.getHex()).toBe(beforeAccent);

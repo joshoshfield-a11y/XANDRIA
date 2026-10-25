@@ -57,6 +57,10 @@ export interface BiomeGroundParams {
   roughness: number;
   emissive?: string;
   emissiveIntensity?: number;
+  /** Graphics-overhaul Pass 0 spike: baked registry id replacing the canvas
+   *  texture for this ground. No shipped biome sets it yet; unknown ids
+   *  fall back to the canvas kind. */
+  baked?: string;
 }
 
 /** Water treatment — consumed by Terrain's water plane. */
@@ -121,7 +125,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#4d7a3d', secondary: '#8a6a3a', accent: '#ffb43c',
       sky: '#3a5a8c', horizon: '#e8a06a', fog: '#c9a97e', water: '#2a6fb0',
     },
-    ground: { kind: 'ground', base: '#ffffff', alt: '#d8d4c8', roughness: 0.95 },
+    ground: { kind: 'ground', base: '#ffffff', alt: '#d8d4c8', roughness: 0.95, baked: 'ground-grass' },
     water: { tint: '#2a6fb0', opacity: 0.75, glint: '#ffb46b' },
     fog: { color: '#c9a97e', density: 0.0028, luminance: 0.85 },
     flora: { pine: 2, oak: 3 },
@@ -136,7 +140,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#a8562e', secondary: '#7a3a20', accent: '#ffb43c',
       sky: '#4a5a9c', horizon: '#ff9a5a', fog: '#d69a6a', water: '#3a8fa8',
     },
-    ground: { kind: 'cracked', base: '#ffffff', alt: '#d8d0c0', roughness: 0.95 },
+    ground: { kind: 'cracked', base: '#ffffff', alt: '#d8d0c0', roughness: 0.95, baked: 'ground-cracked' },
     water: { tint: '#3a8fa8', opacity: 0.7, glint: '#ffcf8a' },
     fog: { color: '#d69a6a', density: 0.0025, luminance: 0.8 },
     flora: { cactus: 4, deadtree: 2 },
@@ -151,7 +155,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#2e5a2e', secondary: '#6a4a2e', accent: '#ffb43c',
       sky: '#2e4a7c', horizon: '#d88a5a', fog: '#9aa87e', water: '#2a5f8a',
     },
-    ground: { kind: 'ground', base: '#ffffff', alt: '#d0d4c4', roughness: 0.95 },
+    ground: { kind: 'ground', base: '#ffffff', alt: '#d0d4c4', roughness: 0.95, baked: 'ground-litter' },
     water: { tint: '#2a5f8a', opacity: 0.75, glint: '#ffb46b' },
     fog: { color: '#9aa87e', density: 0.0035, luminance: 0.85 },
     flora: { pine: 4, oak: 3 },
@@ -166,7 +170,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#dfe9f0', secondary: '#9aa8bc', accent: '#ffb43c',
       sky: '#4a6a9c', horizon: '#e8c09a', fog: '#c9d4e6', water: '#3a7fb0',
     },
-    ground: { kind: 'snowdrift', base: '#ffffff', alt: '#e2e8f0', roughness: 0.7 },
+    ground: { kind: 'snowdrift', base: '#ffffff', alt: '#e2e8f0', roughness: 0.7, baked: 'ground-snow' },
     water: { tint: '#3a7fb0', opacity: 0.8, glint: '#cfe8ff' },
     // pale fog, but luminance 0.78 keeps it off pure white (anti-blowout)
     fog: { color: '#c9d4e6', density: 0.003, luminance: 0.78 },
@@ -184,7 +188,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
     },
     ground: {
       kind: 'emberrock', base: '#ffffff', alt: '#c8bcb0', roughness: 0.95,
-      emissive: '#ff5a1a', emissiveIntensity: 1.1,
+      emissive: '#ff5a1a', emissiveIntensity: 1.1, baked: 'ground-basalt',
     },
     water: {
       tint: '#ff5a1f', opacity: 0.85, glint: '#ffcf7a',
@@ -203,7 +207,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#3f8f4f', secondary: '#2e6a7a', accent: '#ffb43c',
       sky: '#3a6a9c', horizon: '#e8b06a', fog: '#bcd4d8', water: '#2a9fb0',
     },
-    ground: { kind: 'wetsand', base: '#ffffff', alt: '#dcd2bc', roughness: 0.85 },
+    ground: { kind: 'wetsand', base: '#ffffff', alt: '#dcd2bc', roughness: 0.85, baked: 'ground-wetsand' },
     water: { tint: '#2a9fb0', opacity: 0.7, glint: '#ffe0a0' },
     fog: { color: '#bcd4d8', density: 0.0028, luminance: 0.85 },
     flora: { palm: 4, oak: 1 },
@@ -218,7 +222,7 @@ export const BIOMES: Record<BiomeId, BiomeDef> = {
       primary: '#3a5a6a', secondary: '#2a4a5a', accent: '#59d8ff',
       sky: '#101820', horizon: '#2a4a5a', fog: '#1e3a44', water: '#1e5a6a',
     },
-    ground: { kind: 'rock', base: '#ffffff', alt: '#b8c0c4', roughness: 1.0 },
+    ground: { kind: 'rock', base: '#ffffff', alt: '#b8c0c4', roughness: 1.0, baked: 'ground-caverock' },
     water: { tint: '#1e5a6a', opacity: 0.8, glint: '#7adfff' },
     // dense and dark — caves are enclosed; luminance 0.7, nowhere near white
     fog: { color: '#1e3a44', density: 0.006, luminance: 0.7 },

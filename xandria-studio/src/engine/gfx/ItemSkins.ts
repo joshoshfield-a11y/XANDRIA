@@ -21,6 +21,7 @@
  * SkinTexturePattern set between the two.
  */
 import * as THREE from 'three';
+import { bakedTexture, bakedNormalTexture } from './BakedTextures';
 import { TextureLoader } from 'three';
 import {
   type GameSpec, type ItemSkinDef, type ItemSkinRole,
@@ -32,6 +33,7 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
   iron: {
     name: 'Iron',
     palette: { primary: '#8a8d91', secondary: '#5a5d63', glow: '#d8d8d8' },
+    texture: { baked: 'item-brushed' },
     roughness: 0.45,
     metalness: 0.8,
   },
@@ -40,11 +42,12 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     palette: { primary: '#b9c0c9', secondary: '#6d7684', glow: '#e8f2ff' },
     roughness: 0.3,
     metalness: 0.9,
-    texture: { pattern: 'carbon' },
+    texture: { baked: 'item-brushed' },
   },
   gold: {
     name: 'Gold',
     palette: { primary: '#d4a017', secondary: '#8a6a1f', glow: '#ffd700' },
+    texture: { baked: 'item-brushed' },
     emissive: { color: '#ffd700', intensity: 0.3 },
     roughness: 0.35,
     metalness: 0.95,
@@ -55,7 +58,7 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     emissive: { color: '#ff5a1f', intensity: 1.6 },
     roughness: 0.7,
     metalness: 0.3,
-    texture: { pattern: 'hazard' },
+    texture: { baked: 'accent-hazard' },
     textureRoles: ['secondary'],
   },
   frost: {
@@ -64,7 +67,7 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     emissive: { color: '#9ff2ff', intensity: 1.2 },
     roughness: 0.25,
     metalness: 0.1,
-    texture: { pattern: 'fade' },
+    texture: { baked: 'item-brushed' },
   },
   shadow: {
     name: 'Shadow',
@@ -72,7 +75,7 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     emissive: { color: '#8a2fd6', intensity: 1.0 },
     roughness: 0.6,
     metalness: 0.5,
-    texture: { pattern: 'digital' },
+    texture: { baked: 'item-brushed' },
   },
   verdant: {
     name: 'Verdant',
@@ -80,7 +83,7 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     emissive: { color: '#4dff6a', intensity: 0.6 },
     roughness: 0.8,
     metalness: 0.15,
-    texture: { pattern: 'camo' },
+    texture: { baked: 'fabric-camo' },
   },
   storm: {
     name: 'Storm',
@@ -88,7 +91,8 @@ export const BUILT_IN_ITEM_SKINS: Record<string, ItemSkinDef> = {
     emissive: { color: '#35e0ff', intensity: 1.4 },
     roughness: 0.4,
     metalness: 0.6,
-    texture: { pattern: 'stripes' },
+    texture: { baked: 'item-brushed' },
+    textures: { glow: { baked: 'item-energy' } },
   },
 };
 
@@ -179,11 +183,38 @@ export function applyItemSkin(mesh: THREE.Object3D, skin: ItemSkinDef): void {
       }
     };
     const t = skin.texture;
-    if (t && 'pattern' in t) {
+    if (t && 'baked' in t && typeof t.baked === 'string') {
+      const tex = bakedTexture(t.baked);
+      if (tex) {
+        const nrm = bakedNormalTexture(t.baked);
+        if (nrm) {
+          // applyTex stamps map only; stamp the normal twin on the same roles
+          const prev = texRoles.flatMap((r) => roles.get(r) ?? []);
+          applyTex(tex);
+          for (const mat of prev) { try { mat.normalMap = nrm; mat.needsUpdate = true; } catch { /* skip */ } }
+        } else applyTex(tex);
+      }
+    } else if (t && 'pattern' in t) {
       const tex = makePatternTexture(t.pattern);
       if (tex) applyTex(tex);
     } else if (t && 'url' in t && typeof t.url === 'string' && TEX_URL_RE.test(t.url)) {
       textureLoader.load(t.url, applyTex, undefined, () => { /* procedural fallback: palette stands */ });
+    }
+    // Per-role baked textures (Pass A): override the main texture on that role only.
+    if (skin.textures) {
+      for (const [role, rt] of Object.entries(skin.textures)) {
+        if (!rt || !('baked' in rt) || typeof rt.baked !== 'string') continue;
+        const rtex = bakedTexture(rt.baked);
+        if (!rtex) continue;
+        const rnorm = bakedNormalTexture(rt.baked);
+        for (const mat of roles.get(role) ?? []) {
+          try {
+            mat.map = rtex;
+            if (rnorm) mat.normalMap = rnorm;
+            mat.needsUpdate = true;
+          } catch { /* skip */ }
+        }
+      }
     }
   } catch {
     // item skins must never break generation — a bad skin is a no-op

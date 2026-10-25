@@ -18,6 +18,7 @@ import { forgeHumanoidPlan } from '../src/engine/gfx/ModelForge';
 import {
   BUILT_IN_SKINS, resolveSkinDef, applySkin, availableSkinIds,
 } from '../src/engine/gfx/Skins';
+import { bakedTexture } from '../src/engine/gfx/BakedTextures';
 import {
   normalizeBoneName, resolvePivots, fitModelToHeight, makeRigFromGLTF, loadRigFromURL,
 } from '../src/engine/gfx/RigAdapter';
@@ -168,13 +169,13 @@ describe('skins: applySkin', () => {
     rig.dispose();
   });
 
-  it('stamps canvas pattern textures onto shirt/pants (stealth → digital)', () => {
+  it('stamps baked textures onto shirt/pants (Pass A: stealth → carbon + denim)', () => {
     const rig = makeHumanoid(mats(), {}, 21);
     applySkin(rig, BUILT_IN_SKINS.stealth);
     const shirtMap = roleMat(rig, 'shirt').map;
     const pantsMap = roleMat(rig, 'pants').map;
-    expect(shirtMap).toBeInstanceOf(THREE.CanvasTexture);
-    expect(pantsMap).toBeInstanceOf(THREE.CanvasTexture);
+    expect(shirtMap).toBe(bakedTexture('fabric-carbon'));
+    expect(pantsMap).toBe(bakedTexture('pants-denim'));
     rig.dispose();
   });
 

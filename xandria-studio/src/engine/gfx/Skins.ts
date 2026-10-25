@@ -30,6 +30,7 @@ import {
   SKIN_TEXTURE_ROLES,
 } from '@spec';
 import type { CharacterRig } from './Characters';
+import { bakedTexture, bakedNormalTexture } from './BakedTextures';
 import { applyVoxelArmor, clearVoxelArmor, resolveVoxelArmorSet, pickVoxelArmorSetId } from './VoxelArmor';
 
 /** Options for applySkin's opt-in seeded auto-armor (graphics follow-up, worker E). */
@@ -60,10 +61,14 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   default: {
     name: 'Default Operative',
     palette: { skin: '#d9a066', shirt: '#3f5a78', pants: '#2e2a26', accent: '#ffd23f' },
+    texture: { baked: 'spike-shirt' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   crimson: {
     name: 'Crimson Vanguard',
     palette: { skin: '#c98a5a', shirt: '#8a1f1f', pants: '#241a1a', accent: '#ff4433' },
+    texture: { baked: 'spike-shirt' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     emissive: { color: '#ff2211', intensity: 0.35 },
     roughness: 0.6,
     metalness: 0.2,
@@ -74,7 +79,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#35e0ff', intensity: 1.2 },
     roughness: 0.9,
     metalness: 0.1,
-    texture: { pattern: 'digital' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   gold: {
     name: 'Gilded Champion',
@@ -82,7 +88,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#ffcc33', intensity: 0.25 },
     roughness: 0.3,
     metalness: 0.9,
-    texture: { pattern: 'carbon' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   neonstreet: {
     name: 'Neon Street',
@@ -90,15 +97,16 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#ff2fd6', intensity: 1.4 },
     roughness: 0.6,
     metalness: 0.3,
-    texture: { pattern: 'fade' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   rustscrap: {
     name: 'Rust Scrap',
     palette: { skin: '#a37a52', shirt: '#5f4a30', pants: '#3b2d22', accent: '#e08a2e' },
     roughness: 0.95,
     metalness: 0.35,
-    texture: { pattern: 'hazard' },
-    textureRoles: ['accent'],
+    texture: { baked: 'fabric-camo' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' }, accent: { baked: 'accent-hazard' } }
   },
   spectral: {
     name: 'Spectral Warden',
@@ -106,7 +114,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#9ff2ff', intensity: 1.6 },
     roughness: 0.4,
     metalness: 0.05,
-    texture: { pattern: 'runes' },
+    texture: { baked: 'accent-runes' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   royalguard: {
     name: 'Royal Guard',
@@ -114,14 +123,16 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#ffd700', intensity: 0.3 },
     roughness: 0.5,
     metalness: 0.5,
-    texture: { pattern: 'stripes' },
+    texture: { baked: 'spike-shirt' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   desertnomad: {
     name: 'Desert Nomad',
     palette: { skin: '#c28a5e', shirt: '#a8895a', pants: '#6e5638', accent: '#2e7f8a' },
     roughness: 1.0,
     metalness: 0.0,
-    texture: { pattern: 'camo' },
+    texture: { baked: 'fabric-camo' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   abyssal: {
     name: 'Abyssal Diver',
@@ -129,7 +140,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#35e0ff', intensity: 1.0 },
     roughness: 0.35,
     metalness: 0.4,
-    texture: { pattern: 'fade' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     textureRoles: ['shirt', 'pants'],
   },
   solarpaladin: {
@@ -138,7 +150,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#ffcc55', intensity: 0.8 },
     roughness: 0.45,
     metalness: 0.55,
-    texture: { pattern: 'runes' },
+    texture: { baked: 'spike-shirt' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   cyberronin: {
     name: 'Cyber Ronin',
@@ -146,12 +159,15 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
     emissive: { color: '#ff2255', intensity: 1.8 },
     roughness: 0.4,
     metalness: 0.6,
-    texture: { pattern: 'digital' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
   },
   // ---- art-direction pass: voxel armor skins (each = armor set + palette + visor color) ----
   nomad: {
     name: 'Nomad',
     palette: { skin: '#2a2d36', shirt: '#14161c', pants: '#101216', accent: '#d8a428' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     armor: 'nomad',
     visor: { color: '#ffd23f', intensity: 2.2 },
     roughness: 0.55,
@@ -160,6 +176,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   'desert-raider': {
     name: 'Desert Raider',
     palette: { skin: '#8a5a3a', shirt: '#7a3320', pants: '#4a2418', accent: '#e08a2e' },
+    texture: { baked: 'fabric-camo' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     armor: 'raider',
     visor: { color: '#ff9d2e', intensity: 2.4 },
     roughness: 0.9,
@@ -168,6 +186,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   'emerald-guardian': {
     name: 'Emerald Guardian',
     palette: { skin: '#2a4a38', shirt: '#16301f', pants: '#12281c', accent: '#d8a428' },
+    texture: { baked: 'spike-shirt' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     armor: 'guardian',
     visor: { color: '#4dff6a', intensity: 2.2 },
     roughness: 0.5,
@@ -176,6 +196,8 @@ export const BUILT_IN_SKINS: Record<string, SkinDef> = {
   'void-scout': {
     name: 'Void Scout',
     palette: { skin: '#4a5a7a', shirt: '#232c40', pants: '#1c2330', accent: '#9fb2cc' },
+    texture: { baked: 'fabric-carbon' },
+    textures: { skin: { baked: 'skin-matte' }, pants: { baked: 'pants-denim' } },
     armor: 'scout',
     visor: { color: '#35e0ff', intensity: 2.2 },
     roughness: 0.6,
@@ -438,19 +460,46 @@ export function applySkin(rig: { group: THREE.Object3D }, skin: SkinDef, opts?: 
     // texture → textureRoles (default shirt+pants). URL loads async; on any failure the palette stands.
     const texRoles = (skin.textureRoles?.length ? skin.textureRoles : ['shirt', 'pants'])
       .filter((r) => VALID_TEX_ROLES.includes(r));
-    const applyTex = (tex: THREE.Texture) => {
+    const applyTex = (tex: THREE.Texture, normal?: THREE.Texture | null) => {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       for (const mat of texRoles.flatMap((r) => roles.get(r) ?? [])) {
-        try { mat.map = tex; mat.needsUpdate = true; } catch { /* skip */ }
+        try {
+          mat.map = tex;
+          if (normal) mat.normalMap = normal;
+          mat.needsUpdate = true;
+        } catch { /* skip */ }
       }
     };
     const t = skin.texture;
-    if (t && 'pattern' in t) {
+    if (t && 'baked' in t && typeof t.baked === 'string') {
+      // Baked registry texture (Pass 0): synchronous Texture object whose
+      // data-URI pixels populate on load; unknown id → null → palette stands.
+      const tex = bakedTexture(t.baked);
+      if (tex) applyTex(tex, bakedNormalTexture(t.baked));
+    } else if (t && 'pattern' in t) {
       const tex = makePatternTexture(t.pattern);
       if (tex) applyTex(tex);
     } else if (t && 'url' in t && typeof t.url === 'string' && TEX_URL_RE.test(t.url)) {
       textureLoader.load(t.url, applyTex, undefined, () => { /* procedural fallback: palette stands */ });
+    }
+
+    // Per-role baked textures (Pass A): each role gets its own map+normal,
+    // overriding the main texture on that role only. Unknown ids are skipped.
+    if (skin.textures) {
+      for (const [role, rt] of Object.entries(skin.textures)) {
+        if (!rt || !('baked' in rt) || typeof rt.baked !== 'string') continue;
+        const rtex = bakedTexture(rt.baked);
+        if (!rtex) continue;
+        const rnorm = bakedNormalTexture(rt.baked);
+        for (const mat of roles.get(role) ?? []) {
+          try {
+            mat.map = rtex;
+            if (rnorm) mat.normalMap = rnorm;
+            mat.needsUpdate = true;
+          } catch { /* skip */ }
+        }
+      }
     }
 
     // Voxel armor (art-direction pass): a skin naming an armor set renders the

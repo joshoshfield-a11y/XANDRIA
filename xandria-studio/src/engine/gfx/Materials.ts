@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import type { GameSpec, Palette, Environment } from '@spec';
 import { Noise2D, Rng } from '../core/Rng';
+import { bakedTexture, bakedNormalTexture } from './BakedTextures';
 
 export type TexKind = 'ground' | 'rock' | 'metal' | 'brick' | 'wood' | 'grid' | 'sand' | 'snow' | 'lava' | 'asphalt' | 'concrete' | 'crystal' | 'panel'
   /** env-art pass: cracked desert earth, glittering snow, ember-cracked basalt, darkened wet sand */
@@ -375,11 +376,32 @@ export class MaterialLibrary {
    * result. Structural param (not the BiomeDef type) so gfx/ never imports
    * world/. `emissive` paints glowing crack veins (volcanic emberrock).
    */
-  biomeGroundDef(g: { kind: TexKind; base: string; alt: string; roughness: number; emissive?: string; emissiveIntensity?: number }, opts: { repeat?: number } = {}): THREE.MeshStandardMaterial {
-    const key = `biomedef:${g.kind}:${g.base}:${g.alt}:${g.roughness}:${g.emissive ?? ''}:${g.emissiveIntensity ?? 0}:${opts.repeat ?? 0}`;
+  biomeGroundDef(g: { kind: TexKind; base: string; alt: string; roughness: number; emissive?: string; emissiveIntensity?: number; baked?: string }, opts: { repeat?: number } = {}): THREE.MeshStandardMaterial {
+    const key = `biomedef:${g.kind}:${g.base}:${g.alt}:${g.roughness}:${g.emissive ?? ''}:${g.emissiveIntensity ?? 0}:${opts.repeat ?? 0}:${g.baked ?? ''}`;
     const hit = this.matCache.get(key);
     if (hit) return hit as THREE.MeshStandardMaterial;
     const rep = { repeat: opts.repeat };
+    // Graphics-overhaul Pass 0 spike: a baked ground id replaces the canvas
+    // texture + normal twin with the baked pair. Unknown id → canvas path
+    // below (the fallback is the branch, not a throw).
+    if (g.baked) {
+      const bmap = bakedTexture(g.baked);
+      if (bmap) {
+        if (opts.repeat) { bmap.repeat.set(opts.repeat, opts.repeat); }
+        const bnrm = bakedNormalTexture(g.baked);
+        if (bnrm && opts.repeat) { bnrm.repeat.set(opts.repeat, opts.repeat); }
+        const bm = new THREE.MeshStandardMaterial({
+          map: bmap, normalMap: bnrm ?? undefined, roughness: g.roughness,
+        });
+        if (g.emissive) {
+          bm.emissive = new THREE.Color(g.emissive);
+          bm.emissiveIntensity = g.emissiveIntensity ?? 1;
+        }
+        applyGroundDetail(bm);
+        this.matCache.set(key, bm);
+        return bm;
+      }
+    }
     const m = new THREE.MeshStandardMaterial({
       map: this.texture(g.kind, g.base, { alt: g.alt, ...rep }),
       normalMap: this.normalMap(g.kind, g.base, { alt: g.alt, ...rep }),

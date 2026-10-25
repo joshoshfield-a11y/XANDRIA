@@ -425,11 +425,15 @@ export interface SkinDef {
   emissive?: SkinEmissive;
   roughness?: number;  // 0..1
   metalness?: number;  // 0..1
-  /** shirt/pants texture: a URL image (https, png/jpg/webp) or a named canvas pattern.
+  /** shirt/pants texture: a URL image (https, png/jpg/webp), a named canvas pattern,
+   *  or a baked registry id (graphics-overhaul Pass 0; unknown ids fall back to palette).
    *  Texture failures never throw — the plain palette stands as fallback. */
-  texture?: { url: string } | { pattern: SkinTexturePattern };
+  texture?: { url: string } | { pattern: SkinTexturePattern } | { baked: string };
   /** which body roles get the texture map (default: shirt+pants). */
   textureRoles?: SkinTextureRole[];
+  /** per-role baked textures (Pass A): each role's map+normal override the
+   *  main texture on that role only. Keys are SkinTextureRole ids. */
+  textures?: Partial<Record<SkinTextureRole, { baked: string }>>;
   /** voxel armor set id rendered on the rig when the skin is applied
    *  (a built-in VOXEL_ARMOR_SET_IDS id, or a custom id registered at runtime
    *  and passed to validateSpec via ValidateSpecOptions.customArmorSets).
@@ -525,9 +529,11 @@ export interface ItemSkinDef {
   emissive?: SkinEmissive;
   roughness?: number;  // 0..1
   metalness?: number;  // 0..1
-  /** item-mesh texture: URL image or named canvas pattern (same pattern set as character skins) */
-  texture?: { url: string } | { pattern: SkinTexturePattern };
+  /** item-mesh texture: URL image, named canvas pattern, or baked registry id */
+  texture?: { url: string } | { pattern: SkinTexturePattern } | { baked: string };
   textureRoles?: ItemSkinRole[];
+  /** per-role baked textures (Pass A): override the main texture on that role only. */
+  textures?: Partial<Record<ItemSkinRole, { baked: string }>>;
   /** voxel armor set id rendered when an armor-slot item carrying this skin is
    *  equipped (see engine/gfx/VoxelArmor.ts). Same id rules as SkinDef.armor. */
   armor?: string;
@@ -1490,12 +1496,24 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
                 } else if ('pattern' in sd.texture) {
                   if (!inEnum((sd.texture as Record<string, unknown>).pattern, SKIN_TEXTURE_PATTERNS))
                     err(`${p}.texture.pattern`, `must be one of ${SKIN_TEXTURE_PATTERNS.join('|')}`);
-                } else err(`${p}.texture`, 'must be { url } or { pattern }');
+                } else if ('baked' in sd.texture) {
+                  if (typeof (sd.texture as Record<string, unknown>).baked !== 'string'
+                    || !(sd.texture as Record<string, unknown>).baked)
+                    err(`${p}.texture.baked`, 'must be a non-empty baked texture id');
+                } else err(`${p}.texture`, 'must be { url }, { pattern }, or { baked }');
               }
               if (sd.textureRoles !== undefined) {
                 const okRoles = Array.isArray(sd.textureRoles) &&
                   sd.textureRoles.every((r) => inEnum(r, SKIN_TEXTURE_ROLES));
                 if (!okRoles) err(`${p}.textureRoles`, `must be an array of ${SKIN_TEXTURE_ROLES.join('|')}`);
+              }
+              if (sd.textures !== undefined) {
+                if (!isObj(sd.textures)) err(`${p}.textures`, 'must be an object');
+                else for (const [role, rt] of Object.entries(sd.textures as Record<string, unknown>)) {
+                  if (!inEnum(role, SKIN_TEXTURE_ROLES)) err(`${p}.textures.${role}`, `must be one of ${SKIN_TEXTURE_ROLES.join('|')}`);
+                  else if (!isObj(rt) || typeof (rt as Record<string, unknown>).baked !== 'string' || !(rt as Record<string, unknown>).baked)
+                    err(`${p}.textures.${role}.baked`, 'must be a non-empty baked texture id');
+                }
               }
               if (sd.armor !== undefined) checkArmorId(sd.armor, `${p}.armor`);
               if (sd.visor !== undefined) checkVisor(sd.visor, `${p}.visor`);
@@ -1602,12 +1620,24 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
                 } else if ('pattern' in sd.texture) {
                   if (!inEnum((sd.texture as Record<string, unknown>).pattern, SKIN_TEXTURE_PATTERNS))
                     err(`${p}.texture.pattern`, `must be one of ${SKIN_TEXTURE_PATTERNS.join('|')}`);
-                } else err(`${p}.texture`, 'must be { url } or { pattern }');
+                } else if ('baked' in sd.texture) {
+                  if (typeof (sd.texture as Record<string, unknown>).baked !== 'string'
+                    || !(sd.texture as Record<string, unknown>).baked)
+                    err(`${p}.texture.baked`, 'must be a non-empty baked texture id');
+                } else err(`${p}.texture`, 'must be { url }, { pattern }, or { baked }');
               }
               if (sd.textureRoles !== undefined) {
                 const ok = Array.isArray(sd.textureRoles) &&
                   sd.textureRoles.every((r) => inEnum(r, ITEM_SKIN_ROLES));
                 if (!ok) err(`${p}.textureRoles`, `must be an array of ${ITEM_SKIN_ROLES.join('|')}`);
+              }
+              if (sd.textures !== undefined) {
+                if (!isObj(sd.textures)) err(`${p}.textures`, 'must be an object');
+                else for (const [role, rt] of Object.entries(sd.textures as Record<string, unknown>)) {
+                  if (!inEnum(role, ITEM_SKIN_ROLES)) err(`${p}.textures.${role}`, `must be one of ${ITEM_SKIN_ROLES.join('|')}`);
+                  else if (!isObj(rt) || typeof (rt as Record<string, unknown>).baked !== 'string' || !(rt as Record<string, unknown>).baked)
+                    err(`${p}.textures.${role}.baked`, 'must be a non-empty baked texture id');
+                }
               }
               if (sd.armor !== undefined) checkArmorId(sd.armor, `${p}.armor`);
             }

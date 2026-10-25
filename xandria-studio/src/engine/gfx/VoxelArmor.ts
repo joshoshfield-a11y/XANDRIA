@@ -29,6 +29,7 @@
  * above: clearVoxelArmor never touches cape pieces.
  */
 import * as THREE from 'three';
+import { bakedTexture } from './BakedTextures';
 import type { CharacterRig } from './Characters';
 import { VOXEL_ARMOR_SET_IDS, type EquipSlot } from '@spec';
 import { Rng } from '../core/Rng';
@@ -230,8 +231,12 @@ function measurePivot(rig: CharacterRig, p: VoxelArmorPivot, mode: 'self' | 'sub
   }
 }
 
-function makeMat(hex: string, roughness: number, metalness: number, emissive?: string, emissiveIntensity?: number): THREE.MeshStandardMaterial {
+function makeMat(hex: string, roughness: number, metalness: number, emissive?: string, emissiveIntensity?: number, bakedId?: string): THREE.MeshStandardMaterial {
   const m = new THREE.MeshStandardMaterial({ roughness, metalness });
+  if (bakedId) {
+    const tex = bakedTexture(bakedId);
+    if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.wrapS = tex.wrapT = THREE.RepeatWrapping; m.map = tex; }
+  }
   try { m.color.set(hex); } catch { /* invalid hex → white, never throws */ }
   if (emissive) {
     try { m.emissive.set(emissive); } catch { /* keep black */ }
@@ -249,8 +254,8 @@ function buildCtx(
   const visorIntensity = THREE.MathUtils.clamp(
     typeof opts.visorIntensity === 'number' && Number.isFinite(opts.visorIntensity)
       ? opts.visorIntensity : set.visor.intensity, 0, 5);
-  const shell = makeMat(set.palette.shell, 0.55, 0.45);
-  const trim = makeMat(set.palette.trim, 0.38, 0.65);
+  const shell = makeMat(set.palette.shell, 0.55, 0.45, undefined, undefined, 'item-brushed');
+  const trim = makeMat(set.palette.trim, 0.38, 0.65, undefined, undefined, 'item-brushed');
   const dark = makeMat(set.palette.dark, 0.85, 0.1);
   const glow = makeMat('#111111', 0.3, 0.0, visorColor, visorIntensity);
   const origin = opts.origin ?? 'skin';
@@ -622,8 +627,8 @@ export function applyVoxelCape(rig: CharacterRig, opts: ApplyVoxelCapeOpts = {})
     }
 
     const pal = opts.palette ?? DEFAULT_CAPE_PALETTE;
-    const shell = makeMat(pal.shell, 0.8, 0.15);
-    const trim = makeMat(pal.trim, 0.45, 0.5);
+    const shell = makeMat(pal.shell, 0.8, 0.15, undefined, undefined, 'item-brushed');
+    const trim = makeMat(pal.trim, 0.45, 0.5, undefined, undefined, 'item-brushed');
     const dark = makeMat(pal.dark, 0.9, 0.05);
     const glow = typeof opts.glowColor === 'string' && HEX6_RE.test(opts.glowColor)
       ? makeMat('#111111', 0.3, 0.0, opts.glowColor, 1.6)
