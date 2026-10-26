@@ -636,7 +636,10 @@ function migrateLegacySettings(raw: unknown): SettingsData {
     ? Math.max(0, Math.min(1, r.volume)) : base.volume;
   const quality = r.quality === 'retro' || r.quality === 'standard' || r.quality === 'high' ? r.quality : 'auto';
   const tier = r.tier === 'desktop' || r.tier === 's25' ? r.tier : 'auto';
-  return { volume: vol, muted: r.muted === true, quality, tier };
+  // DAMAGE-NUMBERS: this normalizer also runs on every load of a current
+  // store, so it must PRESERVE a stored floatingText:false — defaulting
+  // here would silently re-enable the toggle on every reload.
+  return { volume: vol, muted: r.muted === true, quality, tier, floatingText: r.floatingText !== false };
 }
 
 /**
@@ -873,7 +876,7 @@ export function saveSlotSettings(s: SettingsData): void {
  * import cycle. Settings.ts merges these over its own defaults anyway.
  */
 function defaultSlotSettings(): SettingsData {
-  return { volume: 0.8, muted: false, quality: 'auto', tier: 'auto' };
+  return { volume: 0.8, muted: false, quality: 'auto', tier: 'auto', floatingText: true };
 }
 
 /** Local calendar date as YYYY-MM-DD (local timezone — "today" for the player). */

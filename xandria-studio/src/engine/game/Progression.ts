@@ -6,9 +6,11 @@
  * Deterministic: upgrade choices draw from engine.rng (seeded).
  * Everything no-ops cleanly when spec.progression.enabled is false.
  */
+import * as THREE from 'three';
 import type { Engine } from '../Engine';
 import type { PlayerAvatar } from '../../blueprints/common';
 import type { ProgressionSpec, GameSpec } from '@spec';
+import type { Juice } from './Juice';
 import {
   LEVEL_CAP,
   levelRow,
@@ -111,6 +113,19 @@ export class Progression {  level = 1;
     const leveled = this.level > from;
     if (leveled) this.engine.audio?.play('levelup');
     if (leveled) this.engine.hooks.emit('onLevelUp', { level: this.level, progression: this });
+    // DAMAGE-NUMBERS: observe-only — every XP gain reads as a themed
+    // number above the player. Guarded for partial unit-test engines
+    // (no juice/camera/avatar there): display never affects XP math.
+    const juice = (this.engine as unknown as { juice?: Juice }).juice;
+    const avPos = this.engine.portalsPlayerAvatar?.ctrl?.position;
+    if (juice && typeof juice.spawnText === 'function' && avPos && this.engine.camera) {
+      juice.spawnText(
+        this.engine.camera,
+        avPos.clone().add(new THREE.Vector3(0, 2, 0)),
+        'xp',
+        n,
+      );
+    }
     return { leveled, gain: leveled ? { from, to: this.level } : null };
   }
 

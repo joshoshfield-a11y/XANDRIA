@@ -390,6 +390,10 @@ export class Engine {
     this.audio.setMuted(this.settings.data.muted);
     this.particles = new Particles(this.scene, spec.meta.seed ^ 0x9a77);
     this.juice = new Juice(container, this.particles);
+    // DAMAGE-NUMBERS: apply the persisted toggle at boot (before any
+    // combat can spawn a number); applySettings() re-applies it on
+    // pause-menu changes and slot switches.
+    this.juice.setFloatingTextEnabled(this.settings.data.floatingText !== false);
     this.hooks = new Modding(this);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
@@ -782,6 +786,8 @@ export class Engine {
   applySettings() {
     this.audio.setVolume(this.settings.data.volume);
     this.audio.setMuted(this.settings.data.muted);
+    // DAMAGE-NUMBERS: keep Juice in step with the persisted toggle.
+    this.juice.setFloatingTextEnabled(this.settings.data.floatingText !== false);
     const quality = this.effectiveQuality();
     // Graphics wave 2, workstream A: keep the ground detail layer in step
     // with pause-menu quality changes (uniform update — no recompile).

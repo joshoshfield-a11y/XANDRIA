@@ -37,9 +37,17 @@ import type { Engine } from '../Engine';
 import type { EnemyManager } from './EnemyAI';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
+import type { FloatingTextKind } from './floatingText';
 
 /** Salt for the ability variance stream — off the loot/enemy streams. */
 export const ABILITY_SALT = 0xab17;
+
+/**
+ * DAMAGE-NUMBERS: top-decile cutoff for the display-only crit highlight.
+ * A seeded variance draw u >= 0.9 (damage multiplier >= 1.08) renders
+ * with crit styling; the damage value itself is unchanged.
+ */
+export const CRIT_VARIANCE_CUTOFF = 0.9;
 
 export type AbilityId = 'dash-strike' | 'shockwave-slam' | 'mend';
 export const ABILITY_IDS: readonly AbilityId[] = [
@@ -173,7 +181,12 @@ export interface AbilityEnemies {
 /** Pooled-VFX surface (wired to engine.particles / engine.juice by the helper). */
 export interface AbilityFx {
   burst(pos: THREE.Vector3, color: string): void;
-  damageNumber(pos: THREE.Vector3, text: string, color: string): void;
+  /**
+   * DAMAGE-NUMBERS: kind selects the FLOATING_TEXT_THEME style; the
+   * color arg is legacy (live wiring ignores it — the theme owns color).
+   * Recorders that ignore the 4th arg keep working unchanged.
+   */
+  damageNumber(pos: THREE.Vector3, text: string, color: string, kind?: FloatingTextKind): void;
   shake(amount: number): void;
 }
 
@@ -279,9 +292,9 @@ export class AbilityManager {
         if (d > def.range) continue;
         if (d > 0 && to.normalize().dot(dir) < def.arcCos) continue;
         const dmg = this.rollDamage(def);
-        e.damage(dmg, origin);
-        this.fx?.damageNumber(e.position, String(Math.round(dmg)), def.color);
-        damageDealt += dmg;
+        e.damage(dmg.dmg, origin);
+        this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
+        damageDealt += dmg.dmg;
         targets++;
       }
       // mobility: dash velocity is applied per-frame by update() (after
@@ -299,13 +312,13 @@ export class AbilityManager {
         const d = to.length();
         if (d > def.radius) continue;
         const dmg = this.rollDamage(def);
-        e.damage(dmg, origin);
-        this.fx?.damageNumber(e.position, String(Math.round(dmg)), def.color);
+        e.damage(dmg.dmg, origin);
+        this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
         if (e.body && d > 0.001) {
           const push = to.normalize().multiplyScalar(def.knockback);
           e.body.applyImpulse({ x: push.x, y: def.knockback * 0.25, z: push.z });
         }
-        damageDealt += dmg;
+        damageDealt += dmg.dmg;
         targets++;
       }
       this.fx?.burst(origin.clone().add(new THREE.Vector3(0, 0.5, 0)), def.color);
@@ -364,8 +377,16 @@ export class AbilityManager {
   }
 
   /** Seeded damage roll: base * damageMult * uniform[0.9, 1.1]. */
-  private rollDamage(def: AbilityDef): number {
-    return Math.round(def.damage * this.damageMult() * (0.9 + this.rng.next() * 0.2));
+  private rollDamage(def: AbilityDef): { dmg: number; crit: boolean } {
+    const u = this.rng.next();
+    return {
+      dmg: Math.round(def.damage * this.damageMult() * (0.9 + u * 0.2)),
+      // DAMAGE-NUMBERS: crit is DISPLAY ONLY — the game has no crit
+      // mechanic, so no damage is ever altered here. A top-decile seeded
+      // variance roll (u >= 0.9, i.e. multiplier >= 1.08) merely renders
+      // with crit styling; dmg above is the exact same value as before.
+      crit: u >= CRIT_VARIANCE_CUTOFF,
+    };
   }
 }
 
@@ -501,8 +522,13 @@ export function wireCombatAbilities(
       burst: (pos, color) => {
         engine.particles.burst(pos, { count: 14, color, color2: '#ffffff', speed: 6, life: 0.5, size: 1.6, gravity: 0 });
       },
-      damageNumber: (pos, text, color) => {
-        engine.juice.damageNumber(engine.camera, pos, text, color);
+      damageNumber: (pos, text, color, kind) => {
+        // DAMAGE-NUMBERS: the theme owns the style now — the ability
+        // color arg is legacy and ignored; kind selects the style, and
+        // the text parses back to the dealt amount (cast() formats it
+        // as String(dmg), so this is exact, not a re-derivation).
+        const n = Number(text);
+        engine.juice.spawnText(engine.camera, pos, kind ?? 'playerDamage', Number.isFinite(n) ? n : 0);
       },
       shake: (amount) => engine.juice.shake(amount),
     },

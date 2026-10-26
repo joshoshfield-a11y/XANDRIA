@@ -95,12 +95,22 @@ export class PlayerAvatar {
     this.ctrl.rig.flash();
     // polish wave: getting hit reads — sparks + shake on top of the HUD flash
     this.engine.juice.combatHit(this.ctrl.position.clone().add(new THREE.Vector3(0, 1.2, 0)), 1.1);
+    // DAMAGE-NUMBERS: observe-only — damage taken reads as a themed number
+    // above the player (enemyDamage: '−' prefix + danger role).
+    this.engine.juice.spawnText(this.engine.camera, this.ctrl.position.clone().add(new THREE.Vector3(0, 1.6, 0)), 'enemyDamage', amount);
     if (this.health <= 0) this.die();
   }
 
   heal(amount: number) {
+    // DAMAGE-NUMBERS: observe-only — show only the health actually
+    // restored (0 at full health shows nothing). Per-frame HoT ticks
+    // round to 0 and are suppressed, so mend never floods the pool.
+    const actual = Math.min(this.maxHealth, this.health + amount) - this.health;
     this.health = Math.min(this.maxHealth, this.health + amount);
     this.engine.hud.setHealth(this.health / this.maxHealth);
+    if (Math.round(actual) >= 1) {
+      this.engine.juice.spawnText(this.engine.camera, this.ctrl.position.clone().add(new THREE.Vector3(0, 1.6, 0)), 'heal', actual);
+    }
   }
 
   addAmmo(n: number) { if (this.ammo !== Infinity) this.ammo = Math.min(999, this.ammo + n); }
@@ -144,8 +154,9 @@ export class PlayerAvatar {
       to.normalize();
       if (to.dot(fwd) < Math.cos(arc)) continue;
       e.damage(damage, origin);
-      // T1-2: melee hit feedback — floating damage number per enemy hit.
-      this.engine.juice.damageNumber(this.engine.camera, e.position, String(Math.round(damage)));
+      // DAMAGE-NUMBERS: melee hit feedback — themed floating number per
+      // enemy hit (kind, not a caller hex; see floatingText.ts).
+      this.engine.juice.spawnText(this.engine.camera, e.position, 'playerDamage', damage);
       hitAny = true;
     }
     if (hitAny) {

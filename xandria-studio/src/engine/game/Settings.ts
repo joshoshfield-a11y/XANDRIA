@@ -21,9 +21,15 @@ export interface SettingsData {
    * PerformanceManager (?tier= → spec.custom.tier → device auto-detect).
    */
   tier: PerfTierSetting;
+  /**
+   * DAMAGE-NUMBERS: floating combat-text master toggle. Default true;
+   * persisted per save slot like the rest of SettingsData, so it
+   * survives reload (Engine.applySettings re-applies it to Juice).
+   */
+  floatingText: boolean;
 }
 
-const DEFAULTS: SettingsData = { volume: 0.8, muted: false, quality: 'auto', tier: 'auto' };
+const DEFAULTS: SettingsData = { volume: 0.8, muted: false, quality: 'auto', tier: 'auto', floatingText: true };
 const QUALITIES: QualitySetting[] = ['auto', 'retro', 'standard', 'high'];
 const TIERS: PerfTierSetting[] = ['auto', 'desktop', 's25'];
 
@@ -36,6 +42,9 @@ export class Settings {
     this.data.volume = Settings.clampVol(this.data.volume);
     if (!QUALITIES.includes(this.data.quality)) this.data.quality = 'auto';
     if (!TIERS.includes(this.data.tier)) this.data.tier = 'auto';
+    // Older slots predate the damage-numbers toggle: undefined must read
+    // as the default (true), never as falsy-off.
+    if (typeof this.data.floatingText !== 'boolean') this.data.floatingText = true;
   }
 
   private static clampVol(v: unknown): number {
@@ -53,6 +62,9 @@ export class Settings {
     if (patch.tier !== undefined && !TIERS.includes(patch.tier)) {
       this.data.tier = 'auto';
     }
+    if (patch.floatingText !== undefined) {
+      this.data.floatingText = patch.floatingText === true;
+    }
     saveSlotSettings(this.data);
   }
 
@@ -66,5 +78,6 @@ export class Settings {
     this.data.muted = !!fresh.muted;
     this.data.quality = QUALITIES.includes(fresh.quality) ? fresh.quality : 'auto';
     this.data.tier = TIERS.includes(fresh.tier) ? fresh.tier : 'auto';
+    this.data.floatingText = typeof fresh.floatingText === 'boolean' ? fresh.floatingText : true;
   }
 }

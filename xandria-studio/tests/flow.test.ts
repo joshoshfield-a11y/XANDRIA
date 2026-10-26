@@ -323,9 +323,10 @@ describe('HUD flow screens', () => {
     const wrap = ov.children.find((c: any) => c.className === 'settings');
     // graphics wave 2 (E): volume, quality, PERF TIER, mute
     // UPGRADE LOOP (difficulty-modes): + DIFFICULTY row (index 3)
-    // UPGRADE LOOP (accessibility-pass): + COLORBLIND (5), REDUCED MOTION
-    // (6), HUD TEXT SIZE (7), KEYBINDS section (8)
-    expect(wrap.children).toHaveLength(9);
+    // DAMAGE-NUMBERS: + DAMAGE NUMBERS row (index 5)
+    // UPGRADE LOOP (accessibility-pass): + COLORBLIND (6), REDUCED MOTION
+    // (7), HUD TEXT SIZE (8), KEYBINDS section (9)
+    expect(wrap.children).toHaveLength(10);
     const vslider = wrap.children[0].children[1];
     vslider.value = '25';
     vslider.__fire('input');
@@ -355,19 +356,28 @@ describe('HUD flow screens', () => {
     const persisted = activeSlotSettings();
     expect(persisted.muted).toBe(true);
     expect(persisted.tier).toBe('s25');
+    // DAMAGE NUMBERS row (index 5): checkbox toggles the setting + applies
+    const fcheck = wrap.children[5].children[1];
+    expect(wrap.children[5].children[0].textContent).toBe('DAMAGE NUMBERS');
+    expect(fcheck.tag).toBe('input');
+    expect(fcheck.checked).toBe(true);
+    fcheck.checked = false;
+    fcheck.__fire('change');
+    expect(eng.settings.data.floatingText).toBe(false);
+    expect(eng.applySettings).toHaveBeenCalled();
     // ACCESSIBILITY PASS rows: palette select, reduced-motion checkbox,
     // text-size slider, keybinds section (head + 15 action rows + note).
-    const aselect = wrap.children[5].children[1];
+    const aselect = wrap.children[6].children[1];
     expect(aselect.tag).toBe('select');
     expect(aselect.children.map((o: any) => o.value)).toEqual(['none', 'protanopia', 'deuteranopia', 'tritanopia']);
-    const rcheck = wrap.children[6].children[1];
+    const rcheck = wrap.children[7].children[1];
     expect(rcheck.tag).toBe('input');
     expect(rcheck.checked).toBe(false);
-    const xslider = wrap.children[7].children[1];
+    const xslider = wrap.children[8].children[1];
     expect(xslider.tag).toBe('input');
     expect(xslider.min).toBe('85');
     expect(xslider.max).toBe('150');
-    const kbWrap = wrap.children[8];
+    const kbWrap = wrap.children[9];
     expect(kbWrap.children).toHaveLength(17);
     expect(kbWrap.children[1].children[0].textContent).toBe('FORWARD');
   });

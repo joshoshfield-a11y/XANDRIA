@@ -123,7 +123,7 @@ beforeEach(() => {
 });
 
 function settingsWith(tier: 'auto' | 'desktop' | 's25') {
-  return { data: { volume: 0.8, muted: false, quality: 'auto' as const, tier } };
+  return { data: { volume: 0.8, muted: false, quality: 'auto' as const, tier, floatingText: true } };
 }
 
 function baseSpec() {

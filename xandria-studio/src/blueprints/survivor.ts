@@ -127,7 +127,7 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); }
+      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); engine.juice.spawnText(engine.camera, point, 'playerDamage', p.damage * prog.damageMult()); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }

@@ -1232,7 +1232,7 @@ export class HUD {
     const h = document.createElement('h1');
     h.textContent = 'SETTINGS';
     h.style.fontSize = '30px';
-    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const, tier: 'auto' as const };
+    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const, tier: 'auto' as const, floatingText: true };
     const wrap = document.createElement('div');
     wrap.className = 'settings';
 
@@ -1343,6 +1343,23 @@ export class HUD {
       eng?.applySettings();
     });
     mrow.append(mlab, mcb);
+
+    // DAMAGE-NUMBERS: floating combat-text toggle, persisted per save
+    // slot via Settings (survives reload; Engine.applySettings pushes it
+    // into Juice, where off clears live numbers immediately).
+    const frow = document.createElement('div');
+    frow.className = 'settings-row';
+    const flab = document.createElement('span');
+    flab.textContent = 'DAMAGE NUMBERS';
+    const fcb = document.createElement('input');
+    fcb.type = 'checkbox';
+    fcb.checked = s.floatingText !== false;
+    fcb.setAttribute('aria-label', 'Damage numbers');
+    fcb.addEventListener('change', () => {
+      eng?.settings.set({ floatingText: fcb.checked });
+      eng?.applySettings();
+    });
+    frow.append(flab, fcb);
 
     // ACCESSIBILITY PASS: colorblind palette, reduced motion, HUD text
     // scale, keybinds — all persisted in the profile (see Engine.
@@ -1488,7 +1505,7 @@ export class HUD {
       if (typeof window !== 'undefined') window.removeEventListener('keydown', onCaptureKey, true);
       eng?.audio.play('click'); this.showPause();
     });
-    wrap.append(vrow, qrow, trow, drow, mrow, arow, rrow, xrow, kbWrap);
+    wrap.append(vrow, qrow, trow, drow, mrow, frow, arow, rrow, xrow, kbWrap);
     ov.append(h, wrap, back);
     this.overlay = ov;
   }
