@@ -610,6 +610,10 @@ export class ItemWorld {
     disposeObject(item.mesh);
     if (item.body) { this.engine.physics.remove(item.body); item.body = null; }
     this.engine.hooks.emit('onPickup', { pickup: item as never });
+    // UPGRADE LOOP (audio-system): dropped-item loot sound. Direct call,
+    // NOT an onPickup tap — blueprints already sound Pickups.onCollect
+    // after the same emit, so a tap here would double every pickup.
+    this.engine.audio.play('pickup');
     this.onPickup(item.id, item.count);
   }
 

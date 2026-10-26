@@ -7,6 +7,7 @@ import { CharacterController } from '../engine/game/CharacterController';
 import { EnemyManager } from '../engine/game/EnemyAI';
 import type { Projectiles } from '../engine/game/Projectiles';
 import type { GameSpec } from '@spec';
+import { CRIT_MELEE_SALT, CritRoller, applyCrit, BASE_CRIT_CTX, type CritCtx } from '../engine/game/crit';
 
 export interface PlayerAvatarEvents {
   onDeath?: () => void;
@@ -22,6 +23,13 @@ export class PlayerAvatar {
   private fireCd = 0;
   spawn: THREE.Vector3;
   private events: PlayerAvatarEvents;
+  /**
+   * CRIT-SYSTEM: the avatar's own melee crit stream, seeded from the map
+   * seed — one draw per enemy hit, never engine.rng / Math.random. The
+   * avatar persists across portal transitions (blueprints are not rebuilt
+   * on travel), so the stream continues across maps by construction.
+   */
+  private readonly meleeCrit: CritRoller;
 
   constructor(
     protected engine: Engine,
@@ -33,6 +41,7 @@ export class PlayerAvatar {
   ) {
     this.events = events;
     this.spawn = spawn.clone();
+    this.meleeCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_MELEE_SALT) >>> 0);
     this.maxHealth = spec.player.health;
     this.health = this.maxHealth;
     this.lives = spec.rules.lives;
@@ -116,6 +125,21 @@ export class PlayerAvatar {
   addAmmo(n: number) { if (this.ammo !== Infinity) this.ammo = Math.min(999, this.ammo + n); }
 
   private die() {
+    // UPGRADE LOOP (hardcore-ironman): one life. An ironman death never
+    // touches the lives/respawn path below — the run ends here, the
+    // run-completion path marks the slot dead, and there is no respawn.
+    // The onPlayerDeath emit still fires first, so the run journal
+    // counts the death exactly like a normal death.
+    if (this.engine.isIronmanRun()) {
+      this.engine.hooks.emit('onPlayerDeath', {});
+      this.engine.hud.setLives(0);
+      this.engine.audio.play('die');
+      this.engine.particles.explosion(this.ctrl.position, 1.2);
+      this.events.onDeath?.();
+      this.engine.noteIronmanDeath();
+      this.engine.lose('Ironman run ended — the slot is dead.');
+      return;
+    }
     this.lives--;
     // run-journal wave: report player deaths on the hook bus. Additive —
     // no behavior change; zero taps in the normal flow (the onPlayerDamage
@@ -136,8 +160,14 @@ export class PlayerAvatar {
     }
   }
 
-  /** melee arc attack; returns true if swing started */
-  melee(aimYaw: number, range = 2.6, arc = 1.3, damage = 25): boolean {
+  /**
+   * melee arc attack; returns true if swing started.
+   * CRIT-SYSTEM: each enemy hit consumes one draw from the avatar's
+   * seeded melee crit stream. A crit multiplies the passed damage per
+   * the CRIT_TABLE (and renders with crit styling); a non-crit deals
+   * the passed damage exactly, as before.
+   */
+  melee(aimYaw: number, range = 2.6, arc = 1.3, damage = 25, critCtx: CritCtx = BASE_CRIT_CTX): boolean {
     if (!this.enemies) return false;
     this.ctrl.swing();
     // Tutorial wave: observe-only attack seam (no taps = no-op).
@@ -153,10 +183,13 @@ export class PlayerAvatar {
       if (d > range) continue;
       to.normalize();
       if (to.dot(fwd) < Math.cos(arc)) continue;
-      e.damage(damage, origin);
+      const roll = this.meleeCrit.roll(critCtx);
+      const finalDamage = applyCrit(damage, roll);
+      e.damage(finalDamage, origin);
       // DAMAGE-NUMBERS: melee hit feedback — themed floating number per
       // enemy hit (kind, not a caller hex; see floatingText.ts).
-      this.engine.juice.spawnText(this.engine.camera, e.position, 'playerDamage', damage);
+      // CRIT-SYSTEM: the kind is now a real crit, not a display highlight.
+      this.engine.juice.spawnText(this.engine.camera, e.position, roll.crit ? 'crit' : 'playerDamage', finalDamage);
       hitAny = true;
     }
     if (hitAny) {

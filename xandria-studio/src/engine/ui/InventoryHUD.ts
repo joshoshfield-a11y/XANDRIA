@@ -45,6 +45,7 @@ export interface InventorySellHooks {
   sellMult: number;
 }
 import type { SetUiReport } from '../game/setBonuses';
+import type { CritStats } from '../game/crit';
 import { ENCHANT_DEFS } from '../game/enchantments';
 
 export const RARITY_COLORS: Record<ItemRarity, string> = {
@@ -180,6 +181,10 @@ export class InventoryHUD {
   private setReport: (() => SetUiReport) | null = null;
   private setSection: HTMLDivElement;
   private setRows: HTMLDivElement;
+  // CRIT-SYSTEM: resolver for the CRIT STATS section (null = hidden).
+  private critReport: (() => CritStats) | null = null;
+  private critSection: HTMLDivElement;
+  private critRows: HTMLDivElement;
   // Enchantments wave: enchant-action section (reads live inventory state).
   private enchSection: HTMLDivElement;
   private enchRows: HTMLDivElement;
@@ -187,11 +192,12 @@ export class InventoryHUD {
   constructor(
     private container: HTMLElement,
     private inventory: Inventory,
-    opts?: { input?: Input; sell?: InventorySellHooks | null; setReport?: () => SetUiReport },
+    opts?: { input?: Input; sell?: InventorySellHooks | null; setReport?: () => SetUiReport; critReport?: () => CritStats },
   ) {
     if (opts?.input) this.input = opts.input;
     if (opts?.sell) this.sellHooks = opts.sell;
     if (opts?.setReport) this.setReport = opts.setReport;
+    if (opts?.critReport) this.critReport = opts.critReport;
     if (typeof document !== 'undefined') {
       const style = document.createElement('style');
       style.textContent = CSS;
@@ -242,6 +248,17 @@ export class InventoryHUD {
     this.setRows = document.createElement('div');
     this.setSection.appendChild(this.setRows);
     this.panel.appendChild(this.setSection);
+
+    // CRIT-SYSTEM: live crit stats (equipped weapon tier + smithing rank).
+    this.critSection = document.createElement('div');
+    this.critSection.className = 'crits';
+    const critSec = document.createElement('div');
+    critSec.className = 'sec';
+    critSec.textContent = 'CRIT STATS';
+    this.critSection.appendChild(critSec);
+    this.critRows = document.createElement('div');
+    this.critSection.appendChild(this.critRows);
+    this.panel.appendChild(this.critSection);
 
     // Enchantments wave: per-equipped-gear enchant actions (apply from
     // the table, remove with full material refund). One row per
@@ -636,6 +653,7 @@ export class InventoryHUD {
       cell.classList.toggle('cursor', this.openFlag && this.cursor.area === 'equip' && this.cursor.index === j);
     }
     this.renderSetRows();
+    this.renderCritRows();
     this.renderEnchantRows();
   }
 
@@ -656,6 +674,37 @@ export class InventoryHUD {
    * are active. textContent everywhere (def text is spec-sourced —
    * never innerHTML).
    */
+  /**
+   * CRIT-SYSTEM: render the CRIT STATS section. One line: crit chance
+   * and crit damage multiplier from the live equipped-weapon tier +
+   * smithing rank, plus the inputs so the numbers are auditable.
+   * Hidden when no resolver is wired (blueprints without an item kit).
+   */
+  private renderCritRows(): void {
+    this.critRows.innerHTML = '';
+    if (!this.critReport) {
+      this.critSection.style.display = 'none';
+      return;
+    }
+    this.critSection.style.display = '';
+    let report: CritStats;
+    try {
+      report = this.critReport();
+    } catch {
+      return;
+    }
+    const pct = Math.round(report.chance * 1000) / 10;
+    const row = document.createElement('div');
+    row.className = 'critrow';
+    const main = document.createElement('div');
+    main.textContent = `CRIT ${pct}% chance · ×${report.multiplier.toFixed(1)} damage`;
+    row.appendChild(main);
+    const sub = document.createElement('div');
+    sub.textContent = `weapon: ${report.tier} · smithing rank ${report.skillRank}`;
+    row.appendChild(sub);
+    this.critRows.appendChild(row);
+  }
+
   private renderSetRows(): void {
     this.setRows.innerHTML = '';
     if (!this.setReport) {

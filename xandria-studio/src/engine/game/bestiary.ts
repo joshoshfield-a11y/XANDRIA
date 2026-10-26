@@ -29,6 +29,13 @@ import type { Engine } from '../Engine';
 import type { EnemyKind } from '@spec';
 import type { Enemy } from './EnemyAI';
 import { BOSS_DEFS } from './bosses';
+/**
+ * UPGRADE LOOP (elite-affixes): the codex's elite-affix section reads
+ * the SAME table the spawn path rolls from (eliteAffixes.ts) — the codex
+ * never lies about affix effects. Observe-only: no Enemy/EnemyManager
+ * contract change, no kill-count interaction.
+ */
+import { eliteCodexLines } from './eliteAffixes';
 import { loadProfile, saveProfile } from './Profile';
 
 /** Registry entry ids: the combat kinds + the boss aggregator. */
@@ -150,6 +157,13 @@ export const BESTIARY_DEFS: readonly BestiaryEntryDef[] = [
     silhouette: 'boss',
   },
 ];
+
+/**
+ * UPGRADE LOOP (elite-affixes): codex lines for elite affixes, straight
+ * from ELITE_AFFIX_DEFS (icon + name + shipped effect). The panel renders
+ * these verbatim; the manager does not track affix kills.
+ */
+export const ELITE_CODEX_LINES = eliteCodexLines();
 
 /** Tier thresholds for a spec: defaults, overridable via custom.bestiary. */
 export interface BestiaryTiers {

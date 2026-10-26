@@ -19,6 +19,8 @@ import { fitModelToHeight, resolvePivots } from '../../engine/gfx/RigAdapter';
 import { MaterialLibrary } from '../../engine/gfx/Materials';
 import { makeHumanoid, type CharacterRig } from '../../engine/gfx/Characters';
 import { BUILT_IN_SKINS, resolveSkinDef, applySkin } from '../../engine/gfx/Skins';
+import { loadProfile } from '../../engine/game/Profile';
+import { applyCosmeticsToRig } from '../../engine/game/cosmetics';
 import { mountSkinCreator } from '../creators/skinCreator';
 import { mountItemEditor, type LootSpot } from '../creators/itemEditor';
 import { deriveWorldTier } from '../../engine/world/worldTiers';
@@ -951,8 +953,19 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'width:100%;height:180px;border-radius:8px;background:#0a0e16';
     const status = h(`<div class="xed-hint"></div>`);
+    // UPGRADE LOOP (character-customization): Studio preview surface — a
+    // toggle that layers the player's saved Profile cosmetics (visor, trim,
+    // scarf/hood) over the selected skin on this same turntable, so authors
+    // see the player-facing look without leaving Studio.
+    let showCosmetics = false;
+    const cosmeticsCheck = document.createElement('input');
+    cosmeticsCheck.type = 'checkbox';
+    cosmeticsCheck.title = 'Layer my saved Profile cosmetics over this preview';
+    cosmeticsCheck.addEventListener('change', () => { showCosmetics = cosmeticsCheck.checked; refresh(curId); });
+    const cosmeticsRow = h(`<div style="display:flex;gap:8px;align-items:center;margin-top:6px"></div>`);
+    cosmeticsRow.append(cosmeticsCheck, h(`<div class="xed-flabel">SHOW MY PROFILE COSMETICS</div>`));
     const box = h(`<div class="xed-card" style="padding:8px"></div>`);
-    box.append(status, canvas);
+    box.append(status, canvas, cosmeticsRow);
 
     let rig: CharacterRig | null = null;
     let pivot: THREE.Group | null = null;
@@ -964,6 +977,9 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       rig = makeHumanoid(new MaterialLibrary(working), {}, 7);
       const def = resolveSkinDef(working, id);
       if (def) applySkin(rig, def);
+      if (showCosmetics) {
+        try { applyCosmeticsToRig(rig, loadProfile().cosmetics); } catch { /* preview-only */ }
+      }
       if (pivot) { pivot.clear(); pivot.add(rig.group); }
       return def;
     };
@@ -989,7 +1005,7 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       accentReset.style.display = overridden ? '' : 'none';
       status.textContent = !id
         ? 'preview: procedural default (no skin selected)'
-        : `preview: ${def?.name ?? id}${overridden ? ' — custom accent override' : ''}`;
+        : `preview: ${def?.name ?? id}${overridden ? ' — custom accent override' : ''}${showCosmetics ? ' + profile cosmetics' : ''}`;
     };
 
     accentInput.addEventListener('input', () => {

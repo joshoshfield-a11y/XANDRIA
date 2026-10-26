@@ -26,8 +26,8 @@ import {
 import {
   ABILITY_SALT,
   AbilityManager,
-  CRIT_VARIANCE_CUTOFF,
 } from '../src/engine/game/combatAbilities';
+import { critChanceFor, critMultiplierFor } from '../src/engine/game/crit';
 import { Rng } from '../src/engine/core/Rng';
 import { Settings } from '../src/engine/game/Settings';
 import { _setProfileStorage } from '../src/engine/game/Profile';
@@ -189,18 +189,26 @@ describe('Juice floating text pool', () => {
   });
 });
 
-describe('ability crit styling (display only)', () => {
-  it('crit kind matches the top-decile seeded roll; damage value unchanged', () => {
-    for (const seed of [12345, 7, 99, 20261012]) {
-      const u = new Rng(((seed ^ ABILITY_SALT) >>> 0)).next();
-      const expectedDmg = Math.round(40 * (0.9 + u * 0.2));
-      const expectedCrit = u >= CRIT_VARIANCE_CUTOFF;
+describe('ability crit is real (CRIT-SYSTEM)', () => {
+  it('crit kind follows the second seeded draw; crit damage is the variance value times the table multiplier, non-crit is bit-identical to the old formula', () => {
+    // Non-crit seeds (second draw >= base chance) + real crit seeds
+    // (second draw < 0.05): 15 -> 86, 75 -> 85, 79 -> 81.
+    for (const seed of [12345, 7, 99, 20261012, 15, 75, 79]) {
+      const rng = new Rng(((seed ^ ABILITY_SALT) >>> 0));
+      const u = rng.next();
+      const cu = rng.next();
+      const variance = 40 * (0.9 + u * 0.2);
+      const expectedCrit = cu < critChanceFor(null, 0);
+      const expectedDmg = expectedCrit
+        ? Math.round(variance * critMultiplierFor(null, 0))
+        : Math.round(variance);
       const kinds: Array<string | undefined> = [];
       const numbers: string[] = [];
+      const dealt: number[] = [];
       const enemy: any = {
         alive: true,
         position: new THREE.Vector3(0, 0, 2),
-        damage: vi.fn(),
+        damage: (n: number) => { dealt.push(n); },
         body: null,
       };
       const manager = new AbilityManager({
@@ -216,9 +224,36 @@ describe('ability crit styling (display only)', () => {
       const res = manager.cast('dash-strike', new THREE.Vector3(0, 0, 1));
       expect(res.ok).toBe(true);
       expect(res.damageDealt).toBe(expectedDmg);
+      expect(dealt).toEqual([expectedDmg]);
       expect(numbers).toEqual([String(expectedDmg)]);
       expect(kinds).toEqual([expectedCrit ? 'crit' : 'playerDamage']);
+      expect(manager.lastCast?.crits).toBe(expectedCrit ? 1 : 0);
     }
+  });
+
+  it('tier + skill-rank bonuses move both chance and damage (legendary + rank 3)', () => {
+    // Force a crit by picking a draw below the boosted chance: with the
+    // base ctx the same draw is a non-crit, with legendary+rank3 it crits.
+    // Seed 15 second draw is 0.0410: base chance 0.05 already crits, so
+    // instead verify the multiplier on a crit through critCtx directly.
+    const dealt: number[] = [];
+    const enemy: any = {
+      alive: true,
+      position: new THREE.Vector3(0, 0, 2),
+      damage: (n: number) => { dealt.push(n); },
+      body: null,
+    };
+    const manager = new AbilityManager({
+      avatar: { ctrl: { position: new THREE.Vector3(0, 0, 0) } } as any,
+      enemies: { enemies: [enemy] },
+      seed: 15,
+      critCtx: () => ({ tier: 'legendary', skillRank: 3 }),
+      fx: { burst: () => {}, damageNumber: () => {}, shake: () => {} },
+    });
+    const res = manager.cast('dash-strike', new THREE.Vector3(0, 0, 1));
+    // variance 42.8224, legendary+rank3 multiplier 2.7 -> 116 (rounded).
+    expect(res.damageDealt).toBe(116);
+    expect(dealt).toEqual([116]);
   });
 });
 

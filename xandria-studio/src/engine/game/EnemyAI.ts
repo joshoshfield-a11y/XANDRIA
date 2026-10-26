@@ -58,6 +58,22 @@ import {
   applyNgPlusScaling,
   ngPlusByCycle,
 } from './newGamePlus';
+/**
+ * UPGRADE LOOP (elite-affixes): seeded elite enemy affixes — the affix
+ * table, the seeded roll and the additive stat application all live in
+ * eliteAffixes.ts. EnemyAI only owns the runtime mechanics (shield pool,
+ * damage-taken multiplier, lifesteal-on-attack, volatile detonation) and
+ * the gold marker tint through the existing applyGlow path.
+ */
+import {
+  ELITE_MARKER_COLOR,
+  VOLATILE_RADIUS,
+  VOLATILE_DAMAGE_FRAC,
+  eliteLabel,
+  rollEliteAffixes,
+  applyEliteAffixes,
+  type EliteAffixId,
+} from './eliteAffixes';
 
 /**
  * Salt for the enemy roster stream — keeps it off the NPC stream and the
@@ -162,6 +178,41 @@ export class Enemy {
    * (0 = identity band). Informational — drives nothing by itself.
    */
   scalingBand = 0;
+  /**
+   * UPGRADE LOOP (elite-affixes): affix ids this enemy spawned with
+   * ('' = ordinary enemy; the default, byte-identical to pre-affix
+   * spawns). Set by EnemyManager.spawnOne only — never by blueprints.
+   */
+  eliteAffixes: EliteAffixId[] = [];
+  /** True when this enemy carries at least one affix. */
+  get isElite(): boolean {
+    return this.eliteAffixes.length > 0;
+  }
+  /** Display label ("⚡ Swift · 🩸 Vampiric"), '' for ordinary enemies. */
+  get eliteNameplate(): string {
+    return eliteLabel(this.eliteAffixes);
+  }
+  /**
+   * UPGRADE LOOP (elite-affixes): damage-taken multiplier from affixes
+   * (armored = 0.6, else 1). Applied in damage(), after shield absorb.
+   */
+  damageTakenMult = 1;
+  /**
+   * UPGRADE LOOP (elite-affixes): shield pool (shielded affix = 50% of
+   * maxHealth). Absorbs damage before health in damage(); maxShield is
+   * the spawn-time pool (informational — the pool never refills).
+   */
+  shield = 0;
+  maxShield = 0;
+  /**
+   * UPGRADE LOOP (elite-affixes): lifesteal fraction (vampiric = 0.2).
+   * Healed on every successful attack execution in update().
+   */
+  lifestealFrac = 0;
+  /** UPGRADE LOOP (elite-affixes): volatile affix flag (detonates in die()). */
+  volatile = false;
+  /** UPGRADE LOOP (elite-affixes): attacker position of the last hit taken. */
+  private lastDamageFrom: THREE.Vector3 | null = null;
 
   /**
    * ENEMIES WAVE C: the instancible render root — rig group for
@@ -333,9 +384,45 @@ export class Enemy {
   corpseDone = false;
   private deathVel = new THREE.Vector3();
 
+  /**
+   * UPGRADE LOOP (elite-affixes): gold marker tint through the existing
+   * applyGlow emissive path (no new render path). Called by
+   * EnemyManager.spawnOne for elites only; ordinary enemies never get
+   * it. On the instanced portal path the gold emissive becomes one extra
+   * canonical bucket per geometry (emissive is part of the bucket key),
+   * never one per enemy.
+   */
+  applyEliteMarker(): void {
+    const root = this.rig?.group ?? this.turret?.group;
+    if (root) this.applyGlow(ELITE_MARKER_COLOR, root);
+  }
+
+  /** UPGRADE LOOP (elite-affixes): heal, capped at maxHealth (lifesteal). */
+  private heal(amount: number): void {
+    if (!this.alive || amount <= 0) return;
+    this.health = Math.min(this.maxHealth, this.health + amount);
+  }
+
   damage(amount: number, from?: THREE.Vector3) {
     if (!this.alive) return;
-    this.health -= amount;
+    // UPGRADE LOOP (elite-affixes): remember the attacker for the
+    // volatile detonation check in die(); shield absorbs first, then
+    // the damage-taken multiplier (armored) applies to what gets through.
+    if (from) this.lastDamageFrom = from.clone();
+    let remaining = amount;
+    if (this.shield > 0) {
+      const absorbed = Math.min(this.shield, remaining);
+      this.shield -= absorbed;
+      remaining -= absorbed;
+    }
+    if (remaining <= 0) {
+      // Fully absorbed: feedback still reads, health untouched, no death.
+      this.rig?.flash();
+      this.instancer?.flash(this);
+      this.engine.juice.combatHit(this.position, 0.9);
+      return;
+    }
+    this.health -= remaining * this.damageTakenMult;
     this.rig?.flash();
     // ENEMIES WAVE C: the instanced hit pulse. rig.flash() mutates the
     // enemy's OWN owned materials on the hidden source meshes (invisible
@@ -351,10 +438,11 @@ export class Enemy {
       m.emissive.setHex(0xff2222); m.emissiveIntensity = 0.8;
       setTimeout(() => { m.emissive.setHex(0); }, 90);
     }
-    // knockback
+    // knockback (on the damage that actually landed, post-shield/armor)
     if (this.body && from) {
+      const landed = remaining * this.damageTakenMult;
       const dir = this.position.sub(from).setY(0).normalize();
-      this.body.applyImpulse(new CANNON.Vec3(dir.x * amount * 0.6, amount * 0.25, dir.z * amount * 0.6));
+      this.body.applyImpulse(new CANNON.Vec3(dir.x * landed * 0.6, landed * 0.25, dir.z * landed * 0.6));
     }
     if (this.health <= 0) { this.die(); return; }
     this.checkBossPhase();
@@ -392,6 +480,15 @@ export class Enemy {
     this.alive = false;
     const p = this.position;
     this.deathPos = p.clone();
+    // UPGRADE LOOP (elite-affixes): volatile detonation. Only when the
+    // killing blow was struck from within VOLATILE_RADIUS of the death
+    // site — the attacker was close enough to be caught in the blast.
+    // Damage rides the existing onPlayerHit channel (same channel every
+    // melee/ranged hit uses); distant kills never detonate on the player.
+    if (this.volatile && this.lastDamageFrom
+      && this.lastDamageFrom.distanceTo(p) <= VOLATILE_RADIUS) {
+      this.events.onPlayerHit?.(this.spec.damage * VOLATILE_DAMAGE_FRAC, p, this.kind);
+    }
     // polish wave: death reads — explosion + smoke column + shake + hit-stop
     this.engine.juice.deathFX(p, this.kind === 'brute' ? 1.8 : 1);
     this.engine.audio.play('explosion', { vol: 0.7 });
@@ -498,7 +595,13 @@ export class Enemy {
             this.rig!.swing?.();
             // UPGRADE LOOP (deployables): a lured enemy mauls the totem —
             // never the player.
-            if (dist < 2.6 && !this.lureTarget) this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
+            if (dist < 2.6 && !this.lureTarget) {
+              this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
+              // UPGRADE LOOP (elite-affixes): vampiric lifesteal on a
+              // landed melee hit (lured mauling heals nothing — no player
+              // was hit, so no life was drained).
+              this.heal(this.spec.damage * this.lifestealFrac);
+            }
           }
         } else {
           // wander
@@ -538,6 +641,10 @@ export class Enemy {
           this.attackCd = this.kind === 'flyer' ? 1.6 : 2.2;
           const aim = tgt.clone().add(new THREE.Vector3(0, 0.9, 0)).sub(pos).normalize();
           this.projectiles.fire(pos.clone().add(aim.clone().multiplyScalar(0.8)), aim, { speed: 26, damage: this.spec.damage, friendly: false });
+          // UPGRADE LOOP (elite-affixes): vampiric lifesteal on firing —
+          // the projectile carries the drain (documented approximation:
+          // the heal lands on launch, not on projectile impact).
+          this.heal(this.spec.damage * this.lifestealFrac);
           this.engine.audio.play('laser', { pitch: 0.8, vol: 0.5 });
         }
         break;
@@ -557,6 +664,9 @@ export class Enemy {
             this.turret.muzzle.getWorldPosition(muzzle);
             const aim = tgt.clone().add(new THREE.Vector3(0, 1, 0)).sub(muzzle).normalize();
             this.projectiles.fire(muzzle, aim, { speed: 40, damage: this.spec.damage, friendly: false });
+            // UPGRADE LOOP (elite-affixes): vampiric lifesteal on firing
+            // (same launch-time approximation as drones/flyers).
+            this.heal(this.spec.damage * this.lifestealFrac);
             this.engine.audio.play('shoot', { pitch: 1.3, vol: 0.4 });
           }
         }
@@ -632,6 +742,14 @@ export interface EnemyManagerOpts {
    * Blueprints wire () => engine.getNgPlusCycle().
    */
   ngPlus?: () => number;
+  /**
+   * UPGRADE LOOP (elite-affixes): elite chance for this roster, read at
+   * spawn time. Default () => 0 (identity: no elites, byte-identical
+   * spawns — the roll short-circuits before any draw). Blueprints wire
+   * () => resolveEliteChance(engine.spec). The roll itself is a pure
+   * function of (spawnSeed, chance) in eliteAffixes.ts.
+   */
+  eliteChance?: () => number;
 }
 
 /** Spawns and manages the full enemy roster from spec. */
@@ -715,7 +833,18 @@ export class EnemyManager implements MapLocalEntitySystem {
     // cycle) -> identical encounters; NG+ draws no RNG.
     const ng = ngPlusByCycle(this.opts.ngPlus?.() ?? 0);
     const nScaled = applyNgPlusScaling(dScaled.health, dScaled.damage, dScaled.xpMult, diff.lootChanceMult, ng);
-    const finalSpec = { ...scaled.spec, health: nScaled.health, damage: nScaled.damage };
+    // UPGRADE LOOP (elite-affixes): seeded elite roll, applied LAST on
+    // the scaled copy (band -> difficulty -> NG+ -> affixes). The roll
+    // draws from its own ELITE_SALT stream, so non-elite spawns and the
+    // scaling-variance draws are untouched; eliteChance 0 short-circuits
+    // to no affixes with zero draws. The authored spec is never mutated.
+    const eliteRoll = rollEliteAffixes(seed, this.opts.eliteChance?.() ?? 0);
+    const affixed = applyEliteAffixes(
+      nScaled.health, nScaled.damage, scaled.spec.speed, nScaled.xpMult, eliteRoll.affixes);
+    const finalSpec = {
+      ...scaled.spec,
+      health: affixed.health, damage: affixed.damage, speed: affixed.speed,
+    };
     const e = new Enemy(this.engine, finalSpec, pos, this.projectiles, {
       onPlayerHit: this.events.onPlayerHit,
       // ANIMATION wave: the kill is counted at death; the roster entry is
@@ -760,8 +889,18 @@ export class EnemyManager implements MapLocalEntitySystem {
     // UPGRADE LOOP (difficulty-modes): the kill XP multiplier is the band
     // xpMult times the difficulty enemyXpMult.
     // UPGRADE LOOP (new-game-plus): times the NG+ enemyXpMult on top.
-    e.xpMult = nScaled.xpMult;
+    // UPGRADE LOOP (elite-affixes): times the affix xpMult on top of all
+    // three, and the affix mechanics ride the enemy (shield pool from
+    // the affixed maxHealth, damage-taken mult, lifesteal, volatile flag).
+    // Elites get the gold marker tint (existing applyGlow path).
+    e.xpMult = affixed.xpMult;
     e.scalingBand = scaled.bandIndex;
+    e.eliteAffixes = eliteRoll.affixes;
+    e.damageTakenMult = affixed.mods.damageTakenMult;
+    e.lifestealFrac = affixed.mods.lifestealFrac;
+    e.volatile = affixed.mods.volatile;
+    e.maxShield = e.shield = e.maxHealth * affixed.mods.shieldFrac;
+    if (eliteRoll.isElite) e.applyEliteMarker();
     this.enemies.push(e);
     return e;
   }

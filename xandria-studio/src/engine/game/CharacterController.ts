@@ -12,6 +12,9 @@ import { wadingState, SplashDetector } from '../physics/Water';
 import { AnimationAdjust } from '../physics/AnimationAdjust';
 import { makeHumanoid, type CharacterRig } from '../gfx/Characters';
 import { resolveSkinDef, applySkin, skinOptionsForSpec } from '../gfx/Skins';
+import { clearVoxelArmor, clearVoxelCape } from '../gfx/VoxelArmor';
+import { loadProfile } from './Profile';
+import { applyCosmeticsToRig, type CosmeticSelection } from './cosmetics';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { PlayerSpec } from '@spec';
 
@@ -35,6 +38,13 @@ export class CharacterController {
   attackT = -1; // 0..1 swing progress, -1 idle
   attacking = false;
   speedBoostT = 0;
+  /**
+   * UPGRADE LOOP (mounts): multiplicative speed scalar set per frame by
+   * the blueprint's mount manager (1 when dismounted/exhausted, the
+   * mount's table value otherwise). The ONLY movement effect mounts
+   * have — it stacks with sprint/boost exactly like speedBoostT does.
+   */
+  speedScalar = 1;
   /** set each frame by the blueprint from the active camera rig — movement is camera-relative */
   camYaw = 0;
   private stepAcc = 0;
@@ -71,11 +81,19 @@ export class CharacterController {
   ) {
     this.body = engine.physics.capsule(0.42, 1.7, [spawn.x, spawn.y + 1.2, spawn.z], { mass: 70 });
     this.rig = makeHumanoid(engine.mats, colors, engine.spec.meta.seed, engine.spec.custom?.forge);
+    // UPGRADE LOOP (character-customization): snapshot the construction look
+    // BEFORE any skin/cosmetic mutation, so applyCosmetics() can reset to
+    // this exact base and re-apply (live changes never stack or smear).
+    this.snapshotBaseLook();
     // DE — character customization: an explicit spec skin wins over the
     // palette-derived `colors` param; an import-model URL swaps the rig async.
     const slot = engine.spec.custom?.characters?.player;
     const skinDef = resolveSkinDef(engine.spec, slot?.skin);
     if (skinDef) applySkin(this.rig, skinDef, skinOptionsForSpec(engine.spec));
+    // Player cosmetics (Profile, per save slot) win over the spec skin —
+    // the player's own look is theirs, not the spec author's. Identity
+    // default (no cosmetics chosen) changes nothing.
+    this.applyCosmetics();
     engine.scene.add(this.rig.group);
     if (slot?.model) void this.swapToModel(slot.model, slot.boneMap);
     engine.physics.addStepHandler((dt) => this.fixedUpdate(dt));
@@ -87,6 +105,83 @@ export class CharacterController {
    * load failure. The skin (if any) is re-applied — a no-op on imported rigs
    * since their materials carry no role tags.
    */
+  /**
+   * UPGRADE LOOP (character-customization): construction-time role-material
+   * snapshot (color/emissive/roughness/metalness/map per role). applyCosmetics
+   * restores this before re-applying, so live changes are exact, never
+   * layered on top of the previous look.
+   */
+  private baseLook: Map<string, {
+    color: number; emissive: number; emissiveIntensity: number;
+    roughness: number; metalness: number; map: THREE.Texture | null;
+  }> = new Map();
+
+  private snapshotBaseLook(): void {
+    try {
+      this.rig.group.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const mats = Array.isArray(m.material) ? m.material : [m.material];
+        for (const mm of mats) {
+          const mat = mm as THREE.MeshStandardMaterial;
+          const role = mat?.userData?.role;
+          if (!mat?.userData?.owned || typeof role !== 'string' || this.baseLook.has(role)) continue;
+          this.baseLook.set(role, {
+            color: (mat.color as THREE.Color).getHex(),
+            emissive: (mat.emissive as THREE.Color).getHex(),
+            emissiveIntensity: mat.emissiveIntensity,
+            roughness: mat.roughness,
+            metalness: mat.metalness,
+            map: (mat.map as THREE.Texture | null) ?? null,
+          });
+        }
+      });
+    } catch { /* snapshot failure → applyCosmetics still applies on top */ }
+  }
+
+  /**
+   * Re-apply the player's cosmetics to this rig, exactly: restore the
+   * construction look, re-apply the spec skin (if any), then the Profile
+   * cosmetics. Cosmetics never touch stats, hitboxes, or behavior — this
+   * method only mutates rig materials/cape pieces. Never throws.
+   */
+  applyCosmetics(selection?: CosmeticSelection): void {
+    try {
+      // restore construction look
+      this.rig.group.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const mats = Array.isArray(m.material) ? m.material : [m.material];
+        for (const mm of mats) {
+          const mat = mm as THREE.MeshStandardMaterial;
+          const role = mat?.userData?.role;
+          if (!mat?.userData?.owned || typeof role !== 'string') continue;
+          const snap = this.baseLook.get(role);
+          if (!snap) continue;
+          try {
+            (mat.color as THREE.Color).setHex(snap.color);
+            (mat.emissive as THREE.Color).setHex(snap.emissive);
+            mat.emissiveIntensity = snap.emissiveIntensity;
+            mat.roughness = snap.roughness;
+            mat.metalness = snap.metalness;
+            mat.map = snap.map;
+            mat.needsUpdate = true;
+          } catch { /* per-material failure is decorative */ }
+        }
+      });
+      clearVoxelArmor(this.rig, undefined, 'skin');
+      clearVoxelCape(this.rig, 'skin');
+      const slot = this.engine.spec.custom?.characters?.player;
+      const skinDef = resolveSkinDef(this.engine.spec, slot?.skin);
+      if (skinDef) applySkin(this.rig, skinDef, skinOptionsForSpec(this.engine.spec));
+      let sel = selection;
+      if (!sel) {
+        try { sel = loadProfile().cosmetics; } catch { sel = undefined; }
+      }
+      if (sel) applyCosmeticsToRig(this.rig, sel, this.engine.spec);
+    } catch { /* cosmetics never break the run */ }
+  }
+
   private async swapToModel(url: string, boneMap?: BoneMapping) {
     const rig = await loadRigFromURL(url, boneMap);
     if (!rig) return; // procedural fallback stands
@@ -97,6 +192,9 @@ export class CharacterController {
     old.dispose();
     this.rig = rig;
     this.engine.scene.add(rig.group);
+    // Imported rigs carry no role tags, so this is a no-op there — kept
+    // for path uniformity (a future tagged import gets cosmetics).
+    this.applyCosmetics();
   }
 
   get position(): THREE.Vector3 { return toV3(this.body.position); }
@@ -117,7 +215,7 @@ export class CharacterController {
     const ax = input.axes;
     const run = this.spec.abilities.includes('sprint') && input.pressed('sprint');
     const boost = this.speedBoostT > 0 ? 1.5 : 1;
-    let targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost;
+    let targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost * this.speedScalar;
 
     const sin = Math.sin(camYaw), cos = Math.cos(camYaw);
     const dir = new THREE.Vector3(ax.x * cos - ax.y * sin, 0, -ax.x * sin - ax.y * cos);

@@ -26,6 +26,7 @@ import {
   type BestiaryManager,
   BESTIARY_TIER_NAMES,
   BESTIARY_BOSS_ID,
+  ELITE_CODEX_LINES,
 } from '../game/bestiary';
 import {
   lootTableForBestiary,
@@ -266,6 +267,15 @@ export class BestiaryPanel {
       this.cardsEl.append(this.entryCard(doc, bestiary, def, tier));
     }
     this.countEl.textContent = `${unlocked} / ${defs.length} identified`;
+    // UPGRADE LOOP (elite-affixes): codex section for elite affixes —
+    // observe-only presentation of ELITE_AFFIX_DEFS (gold-tinted elites
+    // in the world carry these). Rendered for every codex open; no
+    // kill-count interaction, no behavior change.
+    const eliteHead = el(doc, 'div', `font-size:12px;font-weight:700;color:#ffd700;letter-spacing:0.06em;padding:10px 4px 2px`, 'ELITE AFFIXES — gold-tinted foes carry 1–2 of these');
+    this.cardsEl.append(eliteHead);
+    for (const line of ELITE_CODEX_LINES) {
+      this.cardsEl.append(el(doc, 'div', `font-size:12px;color:${TEXT};padding:4px 4px;line-height:1.45`, `${line.icon} ${line.name} — ${line.effect}`));
+    }
   }
 
   private entryCard(doc: Document, bestiary: BestiaryManager, def: BestiaryEntryDef, tier: number): HTMLElement {

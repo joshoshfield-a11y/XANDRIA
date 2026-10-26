@@ -38,6 +38,8 @@ import { deriveMapSeed, neighborOf, oppositeEdge, type MapCoord, type MapEdge } 
 import { PortalTrigger, type PortalEdge } from './PortalTrigger';
 import { PortalTransitionOverlay } from '../ui/PortalTransitionOverlay';
 import { PortalTransition, capturePlayerState, applyPlayerState, type PortalParts, type PlayerStateSnapshot } from './PortalState';
+import { FastTravelRegistry, fastTravelArrivalEdge, labelFor } from './FastTravel';
+import { resolveBiomeDef } from './Biomes';
 
 /** Everything workstream D needs to persist/regenerate across a transition. */
 export interface PortalTransitionContext {
@@ -112,6 +114,16 @@ export class PortalManager {
   coord: MapCoord = { mx: 0, my: 0 };
   transitions = 0;
   transitioning = false;
+  /**
+   * FAST-TRAVEL (upgrade loop): the discovered-portal registry. The origin
+   * map is recorded at construction (every run starts there — the Engine
+   * stamps the origin portalMap before attach); every completed transition
+   * records its destination. Persisted per world seed, so a reload on the
+   * same run restores the list. Labels only — travel itself always runs
+   * the full portal pipeline, so arrival state is identical to a walked
+   * arrival by construction.
+   */
+  readonly discovered: FastTravelRegistry;
   /** last completed arrival (e2e / debug introspection). */
   lastArrival: { coord: MapCoord; pos: THREE.Vector3; edge: PortalEdge } | null = null;
 
@@ -146,6 +158,12 @@ export class PortalManager {
     // build seed and must NOT be used for derivation. Falls back to
     // meta.seed only for pre-stamp specs (tests).
     this.worldSeed = engine.spec.custom?.portalMap?.worldSeed ?? engine.spec.meta.seed;
+    this.discovered = new FastTravelRegistry(this.worldSeed);
+    // Origin discovery: the run starts on (0,0) with the origin portalMap
+    // already stamped (Engine constructor stamps before attach), so the
+    // origin label is exact here — biome from the live spec (a Studio
+    // override wins), tier from the pure derivation (origin is always 1).
+    this.recordDiscovery({ mx: 0, my: 0 });
     this.trigger = new PortalTrigger({ half: engine.spec.world.terrain.size / 2 });
     this.overlay =
       typeof document !== 'undefined' ? new PortalTransitionOverlay(engine.container) : null;
@@ -200,7 +218,40 @@ export class PortalManager {
    * overrides spec.meta.seed after construction — the run's seed is the
    * world seed portal derivation must use).
    */
-  resetWorldSeed(seed: number): void { this.worldSeed = seed; }
+  resetWorldSeed(seed: number): void {
+    this.worldSeed = seed;
+    // FAST-TRAVEL: a reseed starts a new world — re-key the registry to
+    // that seed's persisted list, then record the origin the restarted run
+    // boots on (the spec is freshly origin-stamped by the caller first).
+    this.discovered.rekey(seed);
+    this.recordDiscovery({ mx: 0, my: 0 });
+  }
+
+  /**
+   * FAST-TRAVEL: record a map as discovered, with the labels the UI shows.
+   * Biome comes from the live spec (post-swap, so it is the arrival map's
+   * biome, Studio override included); tier comes from the engine's live
+   * world tier (applied pre-spawn by swapTerrainForPortal). Falls back to
+   * the pure derivation when the live values are unavailable (construction,
+   * before the first terrain build applies a tier).
+   */
+  private recordDiscovery(coord: MapCoord): void {
+    let biome: ReturnType<typeof resolveBiomeDef>['id'];
+    let tier: number;
+    try {
+      biome = resolveBiomeDef(this.engine.spec).id;
+    } catch {
+      biome = labelFor(this.worldSeed, coord).biome;
+    }
+    tier = Number.isFinite(this.engine.worldTier) && this.engine.worldTier >= 1
+      ? this.engine.worldTier
+      : labelFor(this.worldSeed, coord).tier;
+    // The origin's tier is definitionally 1 even before any terrain build
+    // applies it; the derivation agrees, but pin it explicitly so a stale
+    // deep-map tier can never label the origin map.
+    if (coord.mx === 0 && coord.my === 0) tier = 1;
+    this.discovered.record(coord, biome, tier);
+  }
 
   dispose(): void {
     this.detachHook?.();
@@ -245,18 +296,50 @@ export class PortalManager {
     if (edge) void this.beginTransition(edge);
   }
 
-  /** Arrival X/Z on the new map for a crossing of `edge` (y resolved post-build). */
-  private arrivalXZ(edge: PortalEdge, crossX: number, crossZ: number): { x: number; z: number; yaw: number } {
+  /**
+   * Arrival X/Z on the new map for an arrival at `arrivedEdge` (y resolved
+   * post-build). Walked arrivals pass oppositeEdge(crossedEdge); fast
+   * travel passes the edge computed from the direction of travel — both
+   * land on the same geometry: the arrival edge, facing inward, with the
+   * crossing coordinate clamped inside the map (fast travel has no
+   * crossing point, so it passes 0,0 and lands edge-center).
+   */
+  private arrivalXZ(arrivedEdge: PortalEdge, crossX: number, crossZ: number): { x: number; z: number; yaw: number } {
     const half = this.engine.spec.world.terrain.size / 2;
     const m = PORTAL_ARRIVAL_INSET;
     const cx = Math.max(-half + m, Math.min(half - m, crossX));
     const cz = Math.max(-half + m, Math.min(half - m, crossZ));
-    switch (edge) {
-      case 'N': return { x: cx, z: -half + m, yaw: yawForDirection(0, 1) };   // arrive at S edge, face north
-      case 'S': return { x: cx, z: half - m, yaw: yawForDirection(0, -1) };   // arrive at N edge, face south
-      case 'E': return { x: -half + m, z: cz, yaw: yawForDirection(1, 0) };   // arrive at W edge, face east
-      case 'W': return { x: half - m, z: cz, yaw: yawForDirection(-1, 0) };   // arrive at E edge, face west
+    switch (arrivedEdge) {
+      case 'S': return { x: cx, z: -half + m, yaw: yawForDirection(0, 1) };   // arrive at S edge, face north
+      case 'N': return { x: cx, z: half - m, yaw: yawForDirection(0, -1) };   // arrive at N edge, face south
+      case 'W': return { x: -half + m, z: cz, yaw: yawForDirection(1, 0) };   // arrive at W edge, face east
+      case 'E': return { x: half - m, z: cz, yaw: yawForDirection(-1, 0) };   // arrive at E edge, face west
     }
+  }
+
+  /**
+   * FAST-TRAVEL: travel to a discovered portal without walking there.
+   * Runs the exact same transition pipeline as a walked arrival (overlay,
+   * PortalTransition begin/finish, arrival placement, map-entity spawn),
+   * so landmarks, tier, and enemy bands on the destination are identical
+   * to a walked arrival. Cost-free: no currency or any other gate is read.
+   * Returns false (no state changed) when a transition is already running,
+   * the target is the current map, or the target was never discovered —
+   * undiscovered portals stay unreachable through this path.
+   */
+  async fastTravelTo(to: MapCoord): Promise<boolean> {
+    if (this.transitioning) return false;
+    if (to.mx === this.coord.mx && to.my === this.coord.my) return false;
+    if (!this.discovered.has(to)) return false;
+    const arrivedEdge = fastTravelArrivalEdge(this.coord, to);
+    if (!arrivedEdge) return false;
+    if (!this.player) {
+      this.player = bindPlayerAdapter(this.engine);
+      if (!this.player) return false;
+    }
+    const from = { ...this.coord };
+    await this.runTransition(from, to, oppositeEdge(arrivedEdge) as PortalEdge, arrivedEdge, 0, 0, 'Fast traveling');
+    return this.coord.mx === to.mx && this.coord.my === to.my;
   }
 
   private nextFrame(): Promise<void> {
@@ -264,15 +347,34 @@ export class PortalManager {
   }
 
   /**
-   * The full transition. Interrupt-safe: the trigger is locked for the whole
+   * Walked-arrival entry: crossing `edge` of the current map. Delegates to
+   * runTransition with the neighbor map and the opposite arrival edge;
+   * fast travel calls runTransition directly with its own target/edge.
+   * Interrupt-safe (see runTransition): the trigger is locked for the whole
    * flow and a post-transition cooldown + the 120m arrival inset make a
-   * straddled edge unable to double-fire. Stale async completions (id check)
-   * can never place the player twice.
-   *
-   * Stage timings are logged (console.debug) for workstream E's transition
-   * p95 report: cover → paint → swap (cache-hit or rebuild) → place → reveal.
+   * straddled edge unable to double-fire. Stale async completions (id
+   * check) can never place the player twice.
    */
   private async beginTransition(edge: PortalEdge): Promise<void> {
+    const from = { ...this.coord };
+    const to = neighborOf(from, edge as MapEdge);
+    const cross = this.player?.position();
+    await this.runTransition(
+      from, to, edge, oppositeEdge(edge as MapEdge) as PortalEdge,
+      cross?.x ?? 0, cross?.z ?? 0, 'Entering new territory',
+    );
+  }
+
+  /**
+   * The full transition, shared by walked and fast-travel arrivals — the
+   * ONLY path that moves the player between maps, so both arrival kinds
+   * get the identical pipeline (overlay → PortalTransition swap → arrival
+   * placement → map-entity spawn) and therefore identical arrival state.
+   */
+  private async runTransition(
+    from: MapCoord, to: MapCoord, crossedEdge: PortalEdge, arrivedEdge: PortalEdge,
+    crossX: number, crossZ: number, overlayTitle: string,
+  ): Promise<void> {
     if (this.transitioning || !this.player) return;
     const id = ++this.seq;
     this.transitioning = true;
@@ -285,18 +387,15 @@ export class PortalManager {
     };
     try {
       const player = this.player;
-      const from = { ...this.coord };
-      const to = neighborOf(from, edge as MapEdge);
       const mapSeed = deriveMapSeed(this.worldSeed, to.mx, to.my);
-      const cross = player.position();
       const prevVel = player.velocity().clone();
-      const axz = this.arrivalXZ(edge, cross.x, cross.z);
+      const axz = this.arrivalXZ(arrivedEdge, crossX, crossZ);
 
       const ctx: PortalTransitionContext = {
-        from,
+        from: { ...from },
         to: { ...to },
-        crossedEdge: edge,
-        arrivedEdge: oppositeEdge(edge as MapEdge) as PortalEdge,
+        crossedEdge,
+        arrivedEdge,
         worldSeed: this.worldSeed,
         mapSeed,
         arrivalPos: new THREE.Vector3(axz.x, 0, axz.z), // y resolved after the rebuild
@@ -307,7 +406,7 @@ export class PortalManager {
 
       console.debug('[portals] transition: cover');
       mark('cover-start');
-      await this.overlay?.cover('Entering new territory', `Map (${to.mx}, ${to.my})`);
+      await this.overlay?.cover(overlayTitle, `Map (${to.mx}, ${to.my})`);
       mark('covered');
       // let the loader paint before the (blocking) world swap
       await this.nextFrame();
@@ -355,6 +454,9 @@ export class PortalManager {
       this.coord = { ...to };
       this.transitions++;
       this.lastArrival = { coord: { ...to }, pos: arrival.clone(), edge: ctx.arrivedEdge };
+      // FAST-TRAVEL: first arrival on a map discovers its portal — walked
+      // and fast-travel arrivals record identically (same call site).
+      this.recordDiscovery(to);
 
       await this.hooks.onAfterTransition?.(ctx);
       console.debug('[portals] transition: reveal');

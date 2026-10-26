@@ -41,6 +41,9 @@ import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
 import { Modding } from './game/Modding';
+import { biomeMusicPattern } from './game/biomeMusic';
+import { wireAudioHooks } from './game/audioWiring';
+import { resolveBiomeDef } from './world/Biomes';
 import { TouchControls, isTouchDevice } from './game/TouchControls';
 import { TutorialManager } from './game/Tutorial';
 import type { QuestManager } from './game/quests';
@@ -52,7 +55,11 @@ import {
   applyLoadout,
   createSlot,
   deleteSlot,
+  isActiveSlotDead,
+  isActiveSlotIronman,
   loadProfile,
+  markActiveSlotDead,
+  markActiveSlotIronman,
   MAX_SLOTS,
   purchaseModifier,
   recordJournalEntry,
@@ -66,8 +73,10 @@ import {
   type ProfileData,
   type RunJournalEntry,
 } from './game/Profile';
+import { ironmanScoreMult } from './game/ironman';
 import type { Progression } from './game/Progression';
 import { JournalPanel } from './ui/JournalPanel';
+import { CustomizationPanel } from './ui/CustomizationPanel';
 /**
  * UPGRADE LOOP (difficulty-modes): DifficultyId/isDifficultyId are a pure
  * import — no cycle (difficulty.ts imports nothing).
@@ -261,12 +270,40 @@ export class Engine {
   progression: Progression | null = null;
   /** UPGRADE LOOP (run-journal): the journal panel (title screen entry). */
   readonly journalPanel: JournalPanel;
+  /**
+   * UPGRADE LOOP (character-customization): the customization panel
+   * (title-screen + pause-menu entry). Reads/writes the active slot's
+   * profile cosmetics; applyToLiveAvatar re-applies to the live avatar
+   * rig without a reload (no-op before the first avatar build).
+   */
+  readonly customizationPanel: CustomizationPanel;
   // Run-journal observe-only counters. Taps on the existing hook bus only —
   // they never influence gameplay. Reset per run by resetJournalRun().
   private journalKills = 0;
   private journalDeaths = 0;
   private journalPortals = 0;
   private journalBosses = 0;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): true while the live run is an
+   * ironman run. Set by startRun (from the active slot's flag) and
+   * startIronmanRun (after the title confirm step); cleared by
+   * startDailyRun/startGauntletRun (those modes are never ironman) and
+   * by toTitle. Deliberately NOT reset by restart(): an in-place restart
+   * of a live ironman run stays ironman, and a dead slot can never reach
+   * restart() anyway (the end screen hides RESTART, restart() guards).
+   * Read by PlayerAvatar.die() (no-respawn branch) and the
+   * run-completion path. No RNG reads here — mode is data, not chance.
+   */
+  private ironmanRun = false;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): true when the live ironman run
+   * ended by PLAYER DEATH (set by PlayerAvatar.die()'s ironman branch
+   * via noteIronmanDeath(), before engine.lose()). lose() has non-death
+   * callers (time-out, core destroyed) — only this flag marks the slot
+   * dead, so a timeout defeat ends the run but not the slot. Reset at
+   * every run start and on toTitle.
+   */
+  private ironmanDeath = false;
   /** ISO 8601 UTC, captured once at run start (never mid-run). */
   private journalStartUtc = '';
   /** world seed of the live run (daily runs: the challenge seed). */
@@ -388,6 +425,14 @@ export class Engine {
     this.audio = new AudioEngine(spec);
     this.audio.setVolume(this.settings.data.volume);
     this.audio.setMuted(this.settings.data.muted);
+    // UPGRADE LOOP (audio-system): per-bus settings + the boot map's biome
+    // loop. Settings are player-scoped (per save slot), so they survive
+    // reload and portal travel; the biome loop is re-derived per map below.
+    this.audio.setMusicEnabled(this.settings.data.musicEnabled);
+    this.audio.setSfxEnabled(this.settings.data.sfxEnabled);
+    this.audio.setMusicVolume(this.settings.data.musicVolume);
+    this.audio.setSfxVolume(this.settings.data.sfxVolume);
+    this.audio.setBiome(biomeMusicPattern(resolveBiomeDef(spec).id, spec.meta.seed));
     this.particles = new Particles(this.scene, spec.meta.seed ^ 0x9a77);
     this.juice = new Juice(container, this.particles);
     // DAMAGE-NUMBERS: apply the persisted toggle at boot (before any
@@ -395,6 +440,9 @@ export class Engine {
     // pause-menu changes and slot switches.
     this.juice.setFloatingTextEnabled(this.settings.data.floatingText !== false);
     this.hooks = new Modding(this);
+    // UPGRADE LOOP (audio-system): observe-only SFX taps (kill, level-up,
+    // craft, portal, quest turn-in). Idempotent — see audioWiring.
+    wireAudioHooks(this);
     this.hud = new HUD(container, spec);
     this.hud.attachEngine(this);
     // UPGRADE LOOP (minimap-fog): the minimap observes avatar/terrain/portal
@@ -552,6 +600,16 @@ export class Engine {
       container: this.container,
       journal: () => loadProfile().journal,
     });
+    // character-customization: preview uses the engine's material library
+    // (shared cache is never mutated — preview rigs clone owned materials).
+    this.customizationPanel = new CustomizationPanel({
+      container: this.container,
+      mats: this.mats,
+      seed: this.spec.meta.seed,
+      applyToLiveAvatar: (c) => {
+        try { this.portalsPlayerAvatar?.ctrl.applyCosmetics(c); } catch { /* pre-avatar: no-op */ }
+      },
+    });
   }
 
   onUpdate(fn: (dt: number) => void) { this.updateHooks.push(fn); return () => { this.updateHooks = this.updateHooks.filter((f) => f !== fn); }; }
@@ -704,6 +762,11 @@ export class Engine {
     // keep the opt-in asset packs grounded on the live terrain (same
     // private-field pattern as syncTerrainToSeed)
     (this.assetBridge as unknown as { terrain?: Terrain }).terrain = next;
+    // UPGRADE LOOP (audio-system): the arrival map's biome loop. The
+    // portalMap stamp above is already on the live spec, so
+    // resolveBiomeDef() returns the ARRIVAL biome here (not the origin's).
+    // The AudioContext survives travel — only the pattern swaps.
+    this.audio.setBiome(biomeMusicPattern(resolveBiomeDef(this.spec).id, mapSeed));
     // Tutorial wave: every portal transition funnels through here (LRU hit
     // or fresh build), so this is the single portal-arrival seam. Additive:
     // with no taps the emit is a no-op.
@@ -788,6 +851,10 @@ export class Engine {
     this.audio.setMuted(this.settings.data.muted);
     // DAMAGE-NUMBERS: keep Juice in step with the persisted toggle.
     this.juice.setFloatingTextEnabled(this.settings.data.floatingText !== false);
+    this.audio.setMusicEnabled(this.settings.data.musicEnabled);
+    this.audio.setSfxEnabled(this.settings.data.sfxEnabled);
+    this.audio.setMusicVolume(this.settings.data.musicVolume);
+    this.audio.setSfxVolume(this.settings.data.sfxVolume);
     const quality = this.effectiveQuality();
     // Graphics wave 2, workstream A: keep the ground detail layer in step
     // with pause-menu quality changes (uniform update — no recompile).
@@ -940,6 +1007,25 @@ export class Engine {
   }
 
   /**
+   * UPGRADE LOOP (hardcore-ironman): true while the live run is ironman.
+   * Test seam + the PlayerAvatar death branch read this (never a private
+   * field poke — the die() branch must survive refactors of the flag).
+   */
+  isIronmanRun(): boolean {
+    return this.ironmanRun === true;
+  }
+
+  /**
+   * UPGRADE LOOP (hardcore-ironman): called by PlayerAvatar.die() on
+   * the ironman death branch, immediately before engine.lose(). This
+   * is the death-only signal the run-completion path uses to mark the
+   * slot dead — lose() alone cannot distinguish death from defeat.
+   */
+  noteIronmanDeath(): void {
+    this.ironmanDeath = true;
+  }
+
+  /**
    * UPGRADE LOOP (new-game-plus): the player's prestige cycle, read from
    * the profile (player-scoped, persisted). 0 when the profile is
    * missing/corrupt. Blueprints wire this into EnemyManager via
@@ -979,6 +1065,13 @@ export class Engine {
   enterNgPlus(): { ok: boolean; cycle?: number; reason?: string } {
     if (this.state !== 'won' && this.state !== 'lost') {
       return { ok: false, reason: 'no completed run' };
+    }
+    // hardcore-ironman: entering NG+ rebuilds a run on this slot — a
+    // dead slot must never be resurrected through the NG+ button (the
+    // end screen hides the offer for dead slots; this is defense in
+    // depth for direct callers).
+    if (isActiveSlotDead()) {
+      return { ok: false, reason: 'slot dead' };
     }
     try {
       const p = loadProfile();
@@ -1035,6 +1128,9 @@ export class Engine {
     // autostart path, which never passes through beginPlay). Event-driven
     // and cached — a repeat call with the same cycle is a no-op.
     this.hud.setNgPlus(this.getNgPlusCycle());
+    // UPGRADE LOOP (hardcore-ironman): the IRONMAN chip starts hidden
+    // (boot has no live run; beginPlay re-syncs on run start).
+    this.hud.setIronman(false);
   }
 
   private showTitle() {
@@ -1062,6 +1158,13 @@ export class Engine {
     // UPGRADE LOOP (new-game-plus): the title line names the live cycle
     // once the player has prestiged (cycle 0 = base game, no suffix).
     const titleLine = profile.ngPlusCycle > 0 ? `${profileLine} · NG+ ${profile.ngPlusCycle}` : profileLine;
+    // UPGRADE LOOP (hardcore-ironman): the title line also names the
+    // slot's fate — an ironman slot, or a dead one (dead wins: a dead
+    // slot's ironman flag is history, its death is the news).
+    const ironmanActive = isActiveSlotIronman();
+    const slotDead = isActiveSlotDead();
+    const modeLine = slotDead ? `${titleLine} · SLOT DEAD`
+      : ironmanActive ? `${titleLine} · IRONMAN` : titleLine;
     const today = todayUtcDate();
     const challenge = generateDailyChallenge(today);
     const dailyResult = profile.dailyResults[today] ?? null;
@@ -1080,7 +1183,7 @@ export class Engine {
       premise: nar?.premise ?? this.spec.objective.description,
       controls,
       onStart: () => this.startRun(),
-      profileLine: titleLine,
+      profileLine: modeLine,
       slots: summaries,
       canNewSlot: summaries.length < MAX_SLOTS,
       onSelectSlot: (id) => { if (setActiveSlotId(id)) afterSlotSwitch(); this.showTitle(); },
@@ -1112,6 +1215,11 @@ export class Engine {
       gauntletBoard: gauntletOK ? gauntletBoard(profile, today) : undefined,
       onGauntlet: () => this.startGauntletRun(),
       onJournal: () => this.journalPanel.show(),
+      onCustomize: () => this.customizationPanel.show(),
+      // UPGRADE LOOP (hardcore-ironman): title-screen mode picker.
+      ironmanActive,
+      slotDead,
+      onStartIronman: () => this.startIronmanRun(),
     });
   }
 
@@ -1165,6 +1273,41 @@ export class Engine {
 
   startRun() {
     if (this.state !== 'title') return;
+    // UPGRADE LOOP (hardcore-ironman): a dead slot has no start path —
+    // re-render the title (which shows the dead notice) and stop. The
+    // mode comes from the slot: an ironman slot's runs are always
+    // ironman, so a reload or RESTART can never downgrade the mode.
+    if (isActiveSlotDead()) { this.showTitle(); return; }
+    this.ironmanRun = isActiveSlotIronman();
+    this.startRunFromTitle();
+  }
+
+  /**
+   * UPGRADE LOOP (hardcore-ironman): start an ironman run from the
+   * title screen, after the picker's explicit confirm step. Marks the
+   * active slot ironman (one-way, persisted) and then runs the exact
+   * startRun body — the mode flag is the only difference, so an
+   * ironman run is byte-identical to a normal run except for the
+   * death branch, the score multiplier, and the HUD chip.
+   */
+  startIronmanRun() {
+    if (this.state !== 'title') return;
+    if (isActiveSlotDead()) { this.showTitle(); return; }
+    markActiveSlotIronman();
+    this.ironmanRun = true;
+    this.startRunFromTitle();
+  }
+
+  /**
+   * Shared title-screen run start (startRun's body, minus the mode
+   * derivation — startRun derives from the slot, startIronmanRun sets
+   * the flag first). Kept as one function so the two entries can never
+   * drift apart.
+   */
+  private startRunFromTitle() {
+    // hardcore-ironman: a fresh run starts undead (the flag is set only
+    // by a death mid-run, never carried across runs).
+    this.ironmanDeath = false;
     // leave any gauntlet run behind: the title background is always the base game
     this.gauntlet?.disarm();
     this.gauntlet = null;
@@ -1200,6 +1343,11 @@ export class Engine {
    */
   startDailyRun(dateStr: string = todayUtcDate()) {
     if (this.state !== 'title') return;
+    // hardcore-ironman: daily runs are never ironman, and a dead slot
+    // starts nothing at all (the title re-render shows the dead notice).
+    if (isActiveSlotDead()) { this.showTitle(); return; }
+    this.ironmanRun = false;
+    this.ironmanDeath = false;
     if (!this.testMode && loadProfile().dailyResults[dateStr]) return; // attempt used
     const challenge = generateDailyChallenge(dateStr);
     this.dailyDate = dateStr;
@@ -1234,6 +1382,11 @@ export class Engine {
    */
   startGauntletRun(dateStr: string = todayUtcDate()) {
     if (this.state !== 'title') return;
+    // hardcore-ironman: gauntlet runs are never ironman; a dead slot
+    // starts nothing at all (see startDailyRun).
+    if (isActiveSlotDead()) { this.showTitle(); return; }
+    this.ironmanRun = false;
+    this.ironmanDeath = false;
     if (!gauntletSupported(this.spec.meta.genre)) return;
     const gauntlet: Gauntlet = generateGauntlet(gauntletSeedForDate(dateStr));
     // snapshot the base spec so toTitle()/startRun() can restore it
@@ -1291,6 +1444,9 @@ export class Engine {
     // chip unchanged — the cycle is a profile property, not a challenge
     // property — and the chip is cached, so this is a no-op when idle.
     this.hud.setNgPlus(this.getNgPlusCycle());
+    // UPGRADE LOOP (hardcore-ironman): sync the IRONMAN chip the same
+    // way — event-driven, cached, zero per-frame cost.
+    this.hud.setIronman(this.ironmanRun);
     // R5-M1: the avatar snapshots loadout values at construction (boot), but
     // the player may have bought/equipped modifiers in the title shop after
     // that. Re-sync its construction-time copies now that the spec carries
@@ -1341,6 +1497,8 @@ export class Engine {
       xpGained: Math.max(0, Math.floor(this.progression?.xp ?? 0)),
       bossesKilled: this.journalBosses,
       result: won ? 'won' : 'lost',
+      // hardcore-ironman: the journal records the mode it was played in.
+      ironman: this.ironmanRun,
     };
   }
 
@@ -1368,6 +1526,11 @@ export class Engine {
     this.audio.setIntensity(0.5);
     this.audio.setEngine(0, false);
     this.audio.resumeMusic(); // title screen is interactive — music resumes here too
+    // hardcore-ironman: leaving a run clears the mode + death flags and
+    // the chip (a fresh title has no live run; the next start re-derives).
+    this.ironmanRun = false;
+    this.ironmanDeath = false;
+    this.hud.setIronman(false);
     this.showTitle();
   }
 
@@ -1375,10 +1538,18 @@ export class Engine {
   private recordRunResult(won: boolean, stats: Partial<RunStats>): void {
     try {
       const p = loadProfile();
+      // UPGRADE LOOP (hardcore-ironman): a WON ironman run records the
+      // table-multiplied score (cycle = live NG+ cycle); a lost one
+      // records its raw score — the run is a tombstone, not a bonus.
+      // The multiplier is a pure table lookup: no RNG, no wall clock.
+      const ironmanMult = this.ironmanRun ? ironmanScoreMult(this.getNgPlusCycle()) : 1;
+      const recordedScore = this.ironmanRun && won
+        ? Math.round(this.score * ironmanMult)
+        : Math.round(this.score);
       recordRun(p, {
         genre: this.spec.meta.genre,
         won,
-        score: Math.round(this.score),
+        score: recordedScore,
         level: stats.level ?? 1,
         kills: stats.kills ?? 0,
         timeSeconds: this.elapsed,
@@ -1421,6 +1592,12 @@ export class Engine {
       // aggregate stats above are untouched). recordJournalEntry re-validates
       // and caps; a corrupt profile can never break the run-completion path.
       recordJournalEntry(p, this.buildJournalEntry(won));
+      // UPGRADE LOOP (hardcore-ironman): death ends the slot, observed
+      // here — not in lose() — so the run-completion path is the single
+      // place slots die. Marked BEFORE saveProfile: saveProfile reloads
+      // the store and overwrites only the slot's profile object, so the
+      // dead flag survives the save that follows.
+      if (this.ironmanRun && !won && this.ironmanDeath) markActiveSlotDead();
       saveProfile(p);
     } catch {
       /* profile is best-effort — a storage failure must never break the game */
@@ -1572,8 +1749,12 @@ export class Engine {
     // run-journal: the recap shows the same observed counts the journal
     // entry records (caller-provided stats still win on explicit overlap).
     const wonJournal = this.buildJournalEntry(true);
+    // hardcore-ironman: the end screen shows the multiplied score (the
+    // same value recordRunResult stored), unless the caller passed an
+    // explicit score — caller-provided stats still win, per convention.
+    const wonMult = this.ironmanRun ? ironmanScoreMult(this.getNgPlusCycle()) : 1;
     this.hud.showEnd(true, {
-      score: this.score,
+      score: this.ironmanRun && stats.score === undefined ? Math.round(this.score * wonMult) : this.score,
       time: this.elapsed,
       kills: wonJournal.kills,
       level: 1,
@@ -1584,6 +1765,8 @@ export class Engine {
       bossesKilled: wonJournal.bossesKilled,
       seed: wonJournal.seed,
       ...stats,
+      ironman: this.ironmanRun,
+      ironmanMult: this.ironmanRun ? wonMult : undefined,
     }, winText, { targetCycle: this.getNgPlusCycle() + 1, onEnter: () => this.enterNgPlus() });
   }
 
@@ -1595,6 +1778,12 @@ export class Engine {
     this.audio.play('lose');
     this.hooks.emit('onLose', { reason, stats });
     const lostJournal = this.buildJournalEntry(false);
+    // hardcore-ironman: a death-ended run marks the slot dead in
+    // recordRunResult (already run via the onLose tap above); the end
+    // screen hides RESTART and any NG+ offer for it — a dead slot has
+    // no next run to offer. Non-death defeats (time-out) keep the slot.
+    const ironmanDied = this.ironmanRun && this.ironmanDeath;
+    const lostMult = this.ironmanRun ? ironmanScoreMult(this.getNgPlusCycle()) : 1;
     this.hud.showEnd(false, {
       score: this.score,
       time: this.elapsed,
@@ -1608,7 +1797,10 @@ export class Engine {
       bossesKilled: lostJournal.bossesKilled,
       seed: lostJournal.seed,
       ...stats,
-    }, undefined, { targetCycle: this.getNgPlusCycle() + 1, onEnter: () => this.enterNgPlus() });
+      ironman: this.ironmanRun,
+      ironmanMult: this.ironmanRun ? lostMult : undefined,
+      ironmanDead: ironmanDied,
+    }, undefined, ironmanDied ? undefined : { targetCycle: this.getNgPlusCycle() + 1, onEnter: () => this.enterNgPlus() });
   }
 
   /**
@@ -1617,6 +1809,10 @@ export class Engine {
    * Falls back to a page reload when no run builder was registered.
    */
   restart() {
+    // hardcore-ironman: a dead slot never rebuilds — back to the title
+    // (which shows the dead notice) instead. The end screen hides
+    // RESTART for dead slots, so this is defense in depth (pause menu).
+    if (isActiveSlotDead()) { this.toTitle(); return; }
     if (!this.runBuilder) {
       // No blueprint builder was registered (runtime bootstrap skipped it):
       // the only option is a plain page reload. (R2-N12: the old

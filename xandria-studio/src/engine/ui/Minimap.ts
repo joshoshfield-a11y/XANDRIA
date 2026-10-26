@@ -316,6 +316,24 @@ export class Minimap {
     return this.engine.portalEntities.byId('events') as unknown as DynamicEventManager | undefined;
   }
 
+  /**
+   * UPGRADE LOOP (player-camp): the camp manager, observe-only. The
+   * minimap never writes camp state — it reads the current map's site
+   * (discovered on arrival) and draws the camp marker above the fog,
+   * like the event beacons.
+   */
+  private camp(): { site: { x: number; z: number } | null; discovered: boolean } | undefined {
+    return this.engine.portalEntities.byId('camp') as unknown as
+      { site: { x: number; z: number } | null; discovered: boolean } | undefined;
+  }
+
+  /** Test/introspection seam: the current map's camp marker (null = none). */
+  get campMarker(): { x: number; z: number } | null {
+    const c = this.camp();
+    if (!c || !c.discovered || !c.site) return null;
+    return { x: c.site.x, z: c.site.z };
+  }
+
   private getOrCreateState(key: string, worldSize: number): MapFogState {
     let s = this.fogByKey.get(key);
     if (!s) {
@@ -610,6 +628,18 @@ export class Minimap {
           ctx.moveTo(px, py - 5); ctx.lineTo(px + 4, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 4, py);
           ctx.closePath(); ctx.fill();
         }
+      }
+      // Camp marker (player-camp wave): green diamond above the fog,
+      // drawn only when the current map's site is discovered (arrival).
+      const camp = this.camp();
+      if (camp && camp.discovered && camp.site) {
+        const [px, py] = toPx(camp.site.x, camp.site.z);
+        ctx.fillStyle = '#4ade80';
+        ctx.strokeStyle = '#0a0e14';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
       }
       // Player marker: heading triangle from camYaw.
       const avatar = this.engine.portalsPlayerAvatar;

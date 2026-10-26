@@ -159,7 +159,13 @@ export class QuestTalkSession {
     const action = id.slice(0, sep);
     const questId = id.slice(sep + 1);
     if (action === 'accept') this.quests.accept(questId);
-    else if (action === 'turnin') this.quests.turnIn(questId);
+    else if (action === 'turnin') {
+      // UPGRADE LOOP (audio-system): observe-only turn-in seam — the
+      // audio wiring taps this for the quest SFX; gameplay is untouched.
+      if (this.quests.turnIn(questId)) {
+        this.engine.hooks.emit('onQuestTurnIn', { questId });
+      }
+    }
     // re-show: the action lists (and the greeting) changed
     this.showFor(npc);
   }

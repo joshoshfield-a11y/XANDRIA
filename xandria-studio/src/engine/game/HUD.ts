@@ -40,6 +40,19 @@ export interface RunStats {
   xpGained?: number;
   bossesKilled?: number;
   seed?: number;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): this run was played in ironman mode.
+   * showEnd renders the IRONMAN bonus bit in the recap when present.
+   */
+  ironman?: boolean;
+  /** Score multiplier applied to a won ironman run (from the ironman table). */
+  ironmanMult?: number;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): this ironman run ended in death, so
+   * the slot is permanently dead. showEnd renders the SLOT DEAD line and
+   * hides RESTART (and any NG+ offer) — there is no respawn path.
+   */
+  ironmanDead?: boolean;
 }
 
 const CSS = `
@@ -67,6 +80,8 @@ const CSS = `
    (desktop tracker top is 136px; the panel stays ~123px tall with the chip). */
 .xhud .tier { font-size:13px; margin-top:2px; color:var(--a11y-info, #7dd3fc); letter-spacing:.12em; font-weight:700; }
 .xhud .ngplus { font-size:13px; margin-top:2px; color:#fbbf24; letter-spacing:.12em; font-weight:700; }
+/* hardcore-ironman wave: the ironman chip in the score panel, same event-driven pattern as .ngplus */
+.xhud .ironman { font-size:13px; margin-top:2px; color:#ff5a5a; letter-spacing:.12em; font-weight:700; }
 .xhud .crosshair { position:absolute; left:50%; top:50%; width:14px; height:14px; transform:translate(-50%,-50%); }
 .xhud .crosshair::before, .xhud .crosshair::after { content:''; position:absolute; background:rgba(240,250,255,.9); }
 .xhud .crosshair::before { left:6px; top:0; width:2px; height:14px; }
@@ -175,6 +190,17 @@ const CSS = `
 .xhud .title-screen .slot-pick .slot-meta { font-size:11px; opacity:.7; overflow-wrap:anywhere; }
 .xhud .title-screen .slot-row.active .slot-pick { border-color:#ffd23f; background:rgba(60,48,16,.6); }
 .xhud .title-screen .slot-row.active .slot-name::before { content:'▸ '; color:#ffd23f; }
+/* hardcore-ironman wave: dead slots read as dead at a glance; ironman slots are marked */
+.xhud .title-screen .slot-row.dead .slot-pick { border-color:#ff5a5a; opacity:.75; }
+.xhud .title-screen .slot-row.dead .slot-name { color:#ff8a8a; }
+.xhud .title-screen .slot-row.ironman:not(.dead) .slot-pick { border-color:#ff8a5a; }
+/* hardcore-ironman wave: mode picker + confirm step + dead-slot notice */
+.xhud .title-screen .mode-picker { width:min(92%,460px); box-sizing:border-box; margin:0 auto 14px; text-align:center; }
+.xhud .title-screen .mode-label { font-size:11px; letter-spacing:.22em; opacity:.65; margin-right:10px; }
+.xhud .title-screen .slot-dead-notice { width:min(92%,460px); box-sizing:border-box; margin:0 auto 14px; text-align:center; font-size:13px; letter-spacing:.06em; color:#ff8a8a; border:1px solid rgba(255,90,90,.5); border-radius:10px; padding:10px 12px; background:rgba(60,10,10,.55); }
+.xhud .title-screen .ironman-confirm { margin-top:10px; border:1px solid rgba(255,138,90,.5); border-radius:10px; padding:10px 12px; background:rgba(60,20,10,.55); }
+.xhud .title-screen .ironman-confirm-text { font-size:13px; line-height:1.5; margin-bottom:8px; }
+.xhud .overlay .ironman-dead { font-size:14px; letter-spacing:.08em; color:#ff8a8a; margin-bottom:26px; }
 .xhud .title-screen .slot-btn { min-width:36px; min-height:36px; padding:4px 8px; border-radius:8px; border:1px solid rgba(140,180,220,.3); background:rgba(20,28,44,.7); color:#e8ecf1; cursor:pointer; font-size:14px; margin:0; }
 .xhud .title-screen .slot-btn:disabled { opacity:.35; cursor:default; }
 .xhud .title-screen .slot-btn.armed { border-color:#ff6a7a; color:#ff8a9a; }
@@ -182,11 +208,20 @@ const CSS = `
 .xhud .title-screen .slot-new { width:100%; min-height:36px; margin:4px 0 0; border-radius:8px; border:1px dashed rgba(140,180,220,.4); background:transparent; color:#9fb4d0; cursor:pointer; font-size:13px; letter-spacing:.1em; padding:6px 12px; }
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
 .xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
+/* UPGRADE LOOP (audio-system): the settings panel outgrew the viewport
+   (volume, quality, tier, difficulty, mute, audio buses, colorblind,
+   motion, text size, keybinds) — a centered overflow:hidden overlay
+   clipped the lower rows off-screen and made them unclickable. The
+   settings view scrolls from the top instead; other overlays keep the
+   centered layout (title-screen already scrolls via its own rule). */
+.xhud .overlay.settings-view { overflow-y:auto; justify-content:flex-start; }
 .xhud .settings-row { display:flex; align-items:center; gap:14px; font-size:13px; letter-spacing:.1em; }
 .xhud .settings-row span { width:110px; text-align:right; opacity:.8; }
-.xhud .settings-row input[type=range] { flex:1; accent-color:#ffd23f; }
+.xhud .settings-row input[type=range] { flex:1; accent-color:#ffd23f; min-height:28px; }
 .xhud .settings-row select { flex:1; background:#1a2536; color:#e8ecf1; border:1px solid rgba(140,180,220,.4); border-radius:8px; padding:8px 10px; font-size:13px; }
-.xhud .settings-row input[type=checkbox] { width:20px; height:20px; accent-color:#ffd23f; }
+/* UPGRADE LOOP (audio-system): settings toggles meet the 28px touch target
+   floor (skills-wave precedent, asserted in audio-system e2e). */
+.xhud .settings-row input[type=checkbox] { width:28px; height:28px; accent-color:#ffd23f; }
 @keyframes cardin { from { opacity:0; transform:translate(-50%,-10px); } }
 /* touch mode: keep HUD clear of the joystick (bottom-left) and buttons (bottom-right) */
 .xhud.touch .bars { left:12px; bottom:200px; width:190px; }
@@ -331,6 +366,15 @@ export class HUD {
    */
   private ngplusEl: HTMLDivElement;
   private lastNgPlus = -1;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): IRONMAN chip in the score panel.
+   * Mirrors setNgPlus exactly: hidden when inactive (the common case),
+   * updated ONLY via setIronman (engine calls it on run start, on title,
+   * and on boot) — zero per-frame cost; update() never touches it.
+   * Repeat calls with the same value are a cached no-op.
+   */
+  private ironmanEl: HTMLDivElement;
+  private lastIronman: boolean | null = null;
 
   constructor(private container: HTMLElement, private spec: GameSpec) {
     const style = document.createElement('style');
@@ -360,6 +404,7 @@ export class HUD {
         <div class="lives"></div>
         <div class="tier" style="display:none"></div>
         <div class="ngplus" style="display:none"></div>
+        <div class="ironman" style="display:none"></div>
       </div>
       <div class="vignette"></div>
       <div class="toast"></div>
@@ -392,6 +437,7 @@ export class HUD {
     this.bossFill = this.root.querySelector('.boss .bar > div')!;
     this.tierEl = this.root.querySelector('.score .tier')!;
     this.ngplusEl = this.root.querySelector('.score .ngplus')!;
+    this.ironmanEl = this.root.querySelector('.score .ironman')!;
     this.crosshair = document.createElement('div');
     this.crosshair.className = 'crosshair';
     this.crosshair.style.display = 'none';
@@ -479,6 +525,22 @@ export class HUD {
     } else {
       this.ngplusEl.style.display = '';
       this.ngplusEl.textContent = `NG+ ${c}`;
+    }
+  }
+  /**
+   * UPGRADE LOOP (hardcore-ironman): set the IRONMAN chip. Inactive
+   * hides it (the common case). Same cached no-op shape as setNgPlus.
+   */
+  setIronman(active: boolean) {
+    const on = active === true;
+    if (on === this.lastIronman) return;
+    this.lastIronman = on;
+    if (!on) {
+      this.ironmanEl.style.display = 'none';
+      this.ironmanEl.textContent = '';
+    } else {
+      this.ironmanEl.style.display = '';
+      this.ironmanEl.textContent = 'IRONMAN';
     }
   }
   setCrosshair(show: boolean) { this.crosshair.style.display = show ? '' : 'none'; }
@@ -870,6 +932,17 @@ export class HUD {
     onNewSlot?: () => void;
     /** run-journal wave: opens the run journal panel; renders the button */
     onJournal?: () => void;
+    /**
+     * UPGRADE LOOP (character-customization): opens the customization
+     * panel; renders the button next to the journal button.
+     */
+    onCustomize?: () => void;
+    /** hardcore-ironman: the active slot is an ironman slot (picker label) */
+    ironmanActive?: boolean;
+    /** hardcore-ironman: the active slot is dead — start is blocked */
+    slotDead?: boolean;
+    /** hardcore-ironman: confirmed ironman start (after the confirm step) */
+    onStartIronman?: () => void;
   }) {
     this.clearOverlays();
     const ov = document.createElement('div');
@@ -929,7 +1002,8 @@ export class HUD {
 
       for (const s of opts.slots) {
         const row = document.createElement('div');
-        row.className = 'slot-row' + (s.active ? ' active' : '');
+        row.className = 'slot-row' + (s.active ? ' active' : '')
+          + (s.dead ? ' dead' : '') + (s.ironman && !s.dead ? ' ironman' : '');
         row.setAttribute('data-slot-id', s.id);
         const pick = document.createElement('button');
         pick.className = 'slot-pick';
@@ -939,9 +1013,11 @@ export class HUD {
         nm.textContent = s.name;
         const meta = document.createElement('span');
         meta.className = 'slot-meta';
-        meta.textContent = s.runs > 0
+        const baseMeta = s.runs > 0
           ? `◆${s.merit} · ${s.runs} run${s.runs === 1 ? '' : 's'} · ${s.playtimeMin}m`
           : 'empty';
+        // hardcore-ironman: the slot's fate is visible in the picker row.
+        meta.textContent = baseMeta + (s.dead ? ' · DEAD' : s.ironman ? ' · IRONMAN' : '');
         pick.append(nm, meta);
         pick.addEventListener('click', (e) => { e.stopPropagation(); opts.onSelectSlot?.(s.id); });
         row.appendChild(pick);
@@ -1043,6 +1119,56 @@ export class HUD {
       ov.appendChild(mods);
     }
 
+    // UPGRADE LOOP (hardcore-ironman): mode picker with an explicit
+    // confirm step, and the dead-slot notice. Every control
+    // stopPropagation()s like the slot picker: touching the picker is
+    // not starting a run. On an already-ironman slot the IRONMAN button
+    // just starts (no second confirm — the slot is already ironman).
+    // On a dead slot there is no picker at all: the notice replaces it,
+    // the start button is disabled below, and the overlay click-to-start
+    // is not bound — a dead slot has no start path.
+    if (opts.slotDead) {
+      const dead = document.createElement('div');
+      dead.className = 'slot-dead-notice';
+      dead.id = 'xandria-slot-dead-notice';
+      dead.textContent = 'THIS SLOT IS DEAD — death ended its ironman run permanently. Switch slots or create a new one.';
+      ov.appendChild(dead);
+    } else if (opts.onStartIronman) {
+      const mp = document.createElement('div');
+      mp.className = 'mode-picker';
+      const label = document.createElement('span');
+      label.className = 'mode-label';
+      label.textContent = opts.ironmanActive ? 'MODE: IRONMAN' : 'MODE: NORMAL';
+      const confirm = document.createElement('div');
+      confirm.className = 'ironman-confirm';
+      confirm.id = 'xandria-ironman-confirm';
+      confirm.style.display = 'none';
+      const ct = document.createElement('div');
+      ct.className = 'ironman-confirm-text';
+      ct.textContent = 'IRONMAN: one life. Death ends this slot permanently — no respawn, no revive. Survive and your score is multiplied.';
+      const ok = document.createElement('button');
+      ok.className = 'ironman-confirm-ok';
+      ok.textContent = 'CONFIRM IRONMAN';
+      ok.addEventListener('click', (e) => { e.stopPropagation(); opts.onStartIronman!(); });
+      const cancel = document.createElement('button');
+      cancel.className = 'ironman-confirm-cancel';
+      cancel.textContent = 'CANCEL';
+      cancel.addEventListener('click', (e) => { e.stopPropagation(); confirm.style.display = 'none'; });
+      confirm.append(ct, ok, cancel);
+      const ib = document.createElement('button');
+      ib.className = 'mode-ironman-btn';
+      ib.id = 'xandria-ironman-btn';
+      ib.textContent = opts.ironmanActive ? 'IRONMAN ✓' : 'IRONMAN';
+      ib.setAttribute('aria-label', 'Start an ironman run');
+      ib.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (opts.ironmanActive) { opts.onStart(); return; }
+        confirm.style.display = confirm.style.display === 'none' ? '' : 'none';
+      });
+      mp.append(label, ib, confirm);
+      ov.appendChild(mp);
+    }
+
     const cl = document.createElement('div');
     cl.className = 'controls';
     for (const c of opts.controls) {
@@ -1055,6 +1181,9 @@ export class HUD {
     const b = document.createElement('button');
     b.className = 'start-btn';
     b.textContent = 'CLICK TO START';
+    // hardcore-ironman: a dead slot's start button is inert (the overlay
+    // click is also unbound below — defense in depth, engine guards too).
+    if (opts.slotDead) b.disabled = true;
     let started = false;
     const go = () => {
       if (started) return;
@@ -1191,7 +1320,24 @@ export class HUD {
       ov.appendChild(jr);
     }
 
-    ov.addEventListener('click', go);
+    // character-customization: same row pattern as the journal button.
+    if (opts.onCustomize) {
+      const cr = document.createElement('div');
+      cr.className = 'journal-row';
+      const cb = document.createElement('button');
+      cb.className = 'journal-btn';
+      cb.id = 'xandria-customize-open';
+      cb.textContent = '✦ CUSTOMIZE';
+      cb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        opts.onCustomize!();
+      });
+      cr.appendChild(cb);
+      ov.appendChild(cr);
+    }
+
+    // hardcore-ironman: no click-to-start on a dead slot (see picker above).
+    if (!opts.slotDead) ov.addEventListener('click', go);
     this.root.appendChild(ov);
     this.overlay = ov;
   }
@@ -1215,6 +1361,7 @@ export class HUD {
     };
     btns.append(
       mk('RESUME', () => eng?.togglePause()),
+      mk('CUSTOMIZE', () => eng?.customizationPanel?.show()),
       mk('RESTART', () => eng?.restart()),
       mk('SETTINGS', () => this.showSettings(ov)),
       mk('QUIT TO TITLE', () => eng?.toTitle()),
@@ -1228,11 +1375,14 @@ export class HUD {
   /** Settings panel rendered inside the pause overlay. */
   private showSettings(ov: HTMLDivElement) {
     const eng = this.eng;
+    // className (not classList): the unit-test DOM stub exposes className
+    // only, and the real DOM accepts the same string form.
+    if (!ov.className.includes('settings-view')) ov.className = `${ov.className} settings-view`.trim();
     ov.innerHTML = '';
     const h = document.createElement('h1');
     h.textContent = 'SETTINGS';
     h.style.fontSize = '30px';
-    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const, tier: 'auto' as const, floatingText: true };
+    const s = eng?.settings.data ?? { volume: 0.8, muted: false, quality: 'auto' as const, tier: 'auto' as const, floatingText: true, musicEnabled: true, sfxEnabled: true, musicVolume: 0.8, sfxVolume: 0.8 };
     const wrap = document.createElement('div');
     wrap.className = 'settings';
 
@@ -1360,6 +1510,48 @@ export class HUD {
       eng?.applySettings();
     });
     frow.append(flab, fcb);
+    // UPGRADE LOOP (audio-system): per-bus toggles + volumes. Persisted
+    // per save slot via settings.set; applySettings() pushes them to the
+    // audio buses live. Rows reuse .settings-row so touch targets match
+    // the existing settings controls (>= 28px, asserted in e2e). The rows
+    // join the final append below (after MUTE) so the existing row order
+    // — volume, quality, tier, difficulty, mute — is unchanged.
+    const mkToggle = (label: string, aria: string, checked: boolean, onChange: (v: boolean) => void) => {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      const lab = document.createElement('span');
+      lab.textContent = label;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = checked;
+      cb.setAttribute('aria-label', aria);
+      cb.addEventListener('change', () => {
+        onChange(cb.checked);
+        eng?.applySettings();
+      });
+      row.append(lab, cb);
+      return row;
+    };
+    const mkSlider = (label: string, aria: string, value01: number, onInput: (v: number) => void) => {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      const lab = document.createElement('span');
+      lab.textContent = label;
+      const sl = document.createElement('input');
+      sl.type = 'range'; sl.min = '0'; sl.max = '100';
+      sl.value = String(Math.round(value01 * 100));
+      sl.setAttribute('aria-label', aria);
+      sl.addEventListener('input', () => {
+        onInput(Number(sl.value) / 100);
+        eng?.applySettings();
+      });
+      row.append(lab, sl);
+      return row;
+    };
+    const musicRow = mkToggle('MUSIC', 'Music', s.musicEnabled !== false, (v) => eng?.settings.set({ musicEnabled: v }));
+    const sfxRow = mkToggle('SOUND FX', 'Sound effects', s.sfxEnabled !== false, (v) => eng?.settings.set({ sfxEnabled: v }));
+    const musicVolRow = mkSlider('MUSIC VOLUME', 'Music volume', s.musicVolume ?? 0.8, (v) => eng?.settings.set({ musicVolume: v }));
+    const sfxVolRow = mkSlider('SFX VOLUME', 'SFX volume', s.sfxVolume ?? 0.8, (v) => eng?.settings.set({ sfxVolume: v }));
 
     // ACCESSIBILITY PASS: colorblind palette, reduced motion, HUD text
     // scale, keybinds — all persisted in the profile (see Engine.
@@ -1505,7 +1697,7 @@ export class HUD {
       if (typeof window !== 'undefined') window.removeEventListener('keydown', onCaptureKey, true);
       eng?.audio.play('click'); this.showPause();
     });
-    wrap.append(vrow, qrow, trow, drow, mrow, frow, arow, rrow, xrow, kbWrap);
+    wrap.append(vrow, qrow, trow, drow, mrow, frow, musicRow, sfxRow, musicVolRow, sfxVolRow, arow, rrow, xrow, kbWrap);
     ov.append(h, wrap, back);
     this.overlay = ov;
   }
@@ -1551,6 +1743,15 @@ export class HUD {
     if (stats.bossesKilled !== undefined) recapBits.push(`BOSSES ${stats.bossesKilled}`);
     if (stats.xpGained !== undefined) recapBits.push(`XP +${Math.round(stats.xpGained)}`);
     if (stats.seed !== undefined) recapBits.push(`SEED ${stats.seed}`);
+    // hardcore-ironman: the bonus multiplier rides in the recap, and a
+    // dead slot says so plainly. RESTART (and any NG+ offer) are omitted
+    // below when the slot died — there is no respawn path to offer.
+    if (stats.ironman && stats.ironmanMult !== undefined) {
+      const m = stats.ironmanMult;
+      recapBits.push(`IRONMAN ×${m.toFixed(m % 1 === 0 ? 1 : 2)}`);
+    } else if (stats.ironman) {
+      recapBits.push('IRONMAN');
+    }
     const btnWrap = document.createElement('div');
     const again = document.createElement('button');
     again.textContent = 'RESTART';
@@ -1558,8 +1759,9 @@ export class HUD {
     const title = document.createElement('button');
     title.textContent = 'TITLE';
     title.addEventListener('click', () => this.eng?.toTitle());
-    btnWrap.append(again, title);
-    if (ngPlus) {
+    if (!stats.ironmanDead) btnWrap.append(again, title);
+    else btnWrap.append(title);
+    if (ngPlus && !stats.ironmanDead) {
       const ng = document.createElement('button');
       ng.className = 'ngplus-btn';
       ng.setAttribute('data-cycle', String(ngPlus.targetCycle));
@@ -1576,6 +1778,15 @@ export class HUD {
       this.overlay.append(h, sub, statsEl, recap, btnWrap);
     } else {
       this.overlay.append(h, sub, statsEl, btnWrap);
+    }
+    // hardcore-ironman: the dead-slot line sits under the buttons, with
+    // its own id so e2e can assert it exactly.
+    if (stats.ironmanDead) {
+      const dead = document.createElement('div');
+      dead.className = 'ironman-dead';
+      dead.id = 'xandria-ironman-dead';
+      dead.textContent = 'SLOT PERMANENTLY DEAD — NO RESPAWN';
+      this.overlay.appendChild(dead);
     }
     this.root.appendChild(this.overlay);
   }

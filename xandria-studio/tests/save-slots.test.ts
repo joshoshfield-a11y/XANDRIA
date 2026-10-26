@@ -241,7 +241,7 @@ describe('deleteSlot', () => {
 
 describe('per-slot settings', () => {
   it('each slot owns its settings; switching swaps them', () => {
-    saveSlotSettings({ volume: 0.2, muted: true, quality: 'retro', tier: 's25', floatingText: false });
+    saveSlotSettings({ volume: 0.2, muted: true, quality: 'retro', tier: 's25', floatingText: false, musicEnabled: true, sfxEnabled: true, musicVolume: 0.8, sfxVolume: 0.8 });
     expect(loadSlotSettings()).toMatchObject({ volume: 0.2, muted: true, quality: 'retro', tier: 's25' });
     setActiveSlotId('slot-2');
     // slot 2 was never touched: clean defaults

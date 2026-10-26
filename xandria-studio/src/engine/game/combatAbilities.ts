@@ -15,7 +15,11 @@
  *   - Determinism: damage variance draws from a manager-owned Rng seeded
  *     with (seed ^ ABILITY_SALT) — never engine.rng, never Math.random /
  *     Date.now for gameplay. Same seed + same cast sequence -> identical
- *     damage. Ability logic itself is state-driven (cooldowns, energy).
+ *     damage. CRIT-SYSTEM: each damage roll consumes a second draw from
+ *     the same stream for the crit roll (CRIT_TABLE in crit.ts); a crit
+ *     multiplies the variance value, a non-crit is bit-identical to the
+ *     pre-crit formula. Ability logic itself is state-driven (cooldowns,
+ *     energy).
  *   - Player-scoped: one manager per blueprint build (blueprints are not
  *     rebuilt on portal transitions, so cooldowns/energy survive travel
  *     by construction; portalSnapshot/portalRestore exist for the seam).
@@ -38,16 +42,10 @@ import type { EnemyManager } from './EnemyAI';
 import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import type { FloatingTextKind } from './floatingText';
+import { BASE_CRIT_CTX, rollCrit, type CritCtx } from './crit';
 
 /** Salt for the ability variance stream — off the loot/enemy streams. */
 export const ABILITY_SALT = 0xab17;
-
-/**
- * DAMAGE-NUMBERS: top-decile cutoff for the display-only crit highlight.
- * A seeded variance draw u >= 0.9 (damage multiplier >= 1.08) renders
- * with crit styling; the damage value itself is unchanged.
- */
-export const CRIT_VARIANCE_CUTOFF = 0.9;
 
 export type AbilityId = 'dash-strike' | 'shockwave-slam' | 'mend';
 export const ABILITY_IDS: readonly AbilityId[] = [
@@ -209,6 +207,8 @@ export interface AbilityManagerOpts {
   seed?: number;
   /** multiplicative damage bonus (Progression.damageMult etc.); default 1 */
   damageMult?: () => number;
+  /** crit context (equipped weapon tier + smithing rank); default base table */
+  critCtx?: () => CritCtx;
   /** pooled VFX; unit tests pass a recorder, live wiring passes engine fx */
   fx?: AbilityFx | null;
   /** spec toggle; default true (see resolveAbilitiesEnabled) */
@@ -234,18 +234,20 @@ export class AbilityManager {
   private dashSpeed = 0;
   private readonly rng: Rng;
   private readonly damageMult: () => number;
+  private readonly critCtx: () => CritCtx;
   private readonly fx: AbilityFx | null;
   private readonly avatar: AbilityAvatar;
   private readonly enemies: AbilityEnemies;
   readonly enabled: boolean;
-  /** last cast, for e2e exact assertions (damage incl. variance) */
-  lastCast: { id: AbilityId; damageDealt: number; targets: number } | null = null;
+  /** last cast, for e2e exact assertions (damage incl. variance + crits) */
+  lastCast: { id: AbilityId; damageDealt: number; targets: number; crits: number } | null = null;
 
   constructor(opts: AbilityManagerOpts) {
     this.avatar = opts.avatar;
     this.enemies = opts.enemies;
     this.rng = new Rng(((opts.seed ?? 0) ^ ABILITY_SALT) >>> 0);
     this.damageMult = opts.damageMult ?? (() => 1);
+    this.critCtx = opts.critCtx ?? (() => BASE_CRIT_CTX);
     this.fx = opts.fx ?? null;
     this.enabled = opts.enabled ?? true;
     for (const d of ABILITY_DEFS) this.cooldowns.set(d.id, 0);
@@ -281,6 +283,7 @@ export class AbilityManager {
     const origin = this.avatar.ctrl?.position.clone() ?? new THREE.Vector3();
     let damageDealt = 0;
     let targets = 0;
+    let crits = 0;
     if (def.kind === 'dash-damage') {
       const dir = (aimDir ?? new THREE.Vector3(0, 0, 1)).clone().setY(0);
       if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
@@ -296,6 +299,7 @@ export class AbilityManager {
         this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
         damageDealt += dmg.dmg;
         targets++;
+        if (dmg.crit) crits++;
       }
       // mobility: dash velocity is applied per-frame by update() (after
       // the controller's own velocity write) for dashTime seconds.
@@ -314,6 +318,7 @@ export class AbilityManager {
         const dmg = this.rollDamage(def);
         e.damage(dmg.dmg, origin);
         this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
+        if (dmg.crit) crits++;
         if (e.body && d > 0.001) {
           const push = to.normalize().multiplyScalar(def.knockback);
           e.body.applyImpulse({ x: push.x, y: def.knockback * 0.25, z: push.z });
@@ -330,7 +335,7 @@ export class AbilityManager {
       this.hotHealed = 0;
       this.fx?.burst(origin.clone().add(new THREE.Vector3(0, 1.2, 0)), def.color);
     }
-    this.lastCast = { id, damageDealt, targets };
+    this.lastCast = { id, damageDealt, targets, crits };
     return { ok: true, damageDealt, targets, healed: 0 };
   }
 
@@ -376,17 +381,21 @@ export class AbilityManager {
     this.hotPerSec = 0;
   }
 
-  /** Seeded damage roll: base * damageMult * uniform[0.9, 1.1]. */
+  /**
+   * CRIT-SYSTEM: seeded damage roll. First draw is the variance draw
+   * (base * damageMult * uniform[0.9, 1.1], identical to before — a
+   * non-crit result is bit-identical to the pre-crit formula); the
+   * second draw is the crit roll per the CRIT_TABLE. A crit multiplies
+   * the already-computed variance value, it never re-rolls it.
+   */
   private rollDamage(def: AbilityDef): { dmg: number; crit: boolean } {
     const u = this.rng.next();
-    return {
-      dmg: Math.round(def.damage * this.damageMult() * (0.9 + u * 0.2)),
-      // DAMAGE-NUMBERS: crit is DISPLAY ONLY — the game has no crit
-      // mechanic, so no damage is ever altered here. A top-decile seeded
-      // variance roll (u >= 0.9, i.e. multiplier >= 1.08) merely renders
-      // with crit styling; dmg above is the exact same value as before.
-      crit: u >= CRIT_VARIANCE_CUTOFF,
-    };
+    const base = def.damage * this.damageMult() * (0.9 + u * 0.2);
+    const ctx = this.critCtx();
+    const roll = rollCrit(this.rng.next(), ctx.tier, ctx.skillRank);
+    // Non-crit keeps the exact pre-crit rounding; crit rounds once after
+    // multiplying the already-computed variance value.
+    return { dmg: roll.crit ? Math.round(base * roll.multiplier) : Math.round(base), crit: roll.crit };
   }
 }
 
@@ -509,7 +518,7 @@ export function wireCombatAbilities(
   spec: GameSpec,
   avatar: AbilityAvatar & { ctrl?: AbilityAvatar['ctrl'] },
   enemies: EnemyManager,
-  opts: { damageMult?: () => number } = {},
+  opts: { damageMult?: () => number; critCtx?: () => CritCtx } = {},
 ): WiredAbilities {
   const enabled = resolveAbilitiesEnabled(spec);
   const manager = new AbilityManager({
@@ -517,6 +526,7 @@ export function wireCombatAbilities(
     enemies: enemies as unknown as AbilityEnemies,
     seed: spec.meta.seed,
     damageMult: opts.damageMult,
+    critCtx: opts.critCtx,
     enabled,
     fx: {
       burst: (pos, color) => {

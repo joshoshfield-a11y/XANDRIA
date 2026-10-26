@@ -36,6 +36,7 @@ import { attachLightShafts } from '../engine/gfx/LightShafts';
 import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { PlayerAvatar } from './common';
 import { buildItemKit, type BlueprintItemKit } from './itemKit';
+import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit } from '../engine/game/crit';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import {
   resolveCraftingEnabled,
@@ -156,10 +157,12 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
   const avatar = new PlayerAvatar(engine, spec, new THREE.Vector3(6, terrain.heightAt(6, 0) + 2, 0), enemies, projectiles);
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
 
+  // CRIT-SYSTEM: friendly projectiles roll crits on their own seeded stream.
+  const projCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_PROJECTILE_SALT) >>> 0);
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage, point); combatPulse(); engine.juice.spawnText(engine.camera, point, 'playerDamage', p.damage); }
+      if (target) { const raw = p.damage; const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: 0 }); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }

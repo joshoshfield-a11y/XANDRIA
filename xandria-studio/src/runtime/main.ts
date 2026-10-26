@@ -51,6 +51,22 @@ import {
   applyEnemyScaling,
 } from '../engine/game/enemyScaling';
 /**
+ * UPGRADE LOOP (elite-affixes): pure affix functions for the e2e
+ * replication assertions (same shipped code the spawn path uses).
+ */
+import {
+  ELITE_SALT,
+  ELITE_AFFIX_DEFS,
+  ELITE_DOUBLE_CHANCE,
+  VOLATILE_RADIUS,
+  VOLATILE_DAMAGE_FRAC,
+  resolveEliteChance,
+  rollEliteAffixes,
+  eliteModsFor,
+  applyEliteAffixes,
+  eliteLabel,
+} from '../engine/game/eliteAffixes';
+/**
  * UPGRADE LOOP (difficulty-modes): pure difficulty functions for the e2e
  * table assertions (same shipped code the spawn path uses).
  */
@@ -117,6 +133,35 @@ import {
   rollDeployTickMagnitude,
 } from '../engine/game/deployables';
 import {
+  COMPANION_SALT,
+  COMPANION_WOUND_BONUS,
+  COMPANION_DEFS,
+  CompanionsManager,
+  Companion,
+  companionDefOf,
+  rollCompanionDamage,
+  rollCompanionHeal,
+  rollFollowOffset,
+  pickCompanionTarget,
+} from '../engine/game/companions';
+import {
+  CAMP_SALT,
+  CAMP_STRUCTURE_DEFS,
+  CampManager,
+  CampProp,
+  campSitePosition,
+  campStructureDefOf,
+  WORKBENCH_DAMAGE_MULT,
+  WORKBENCH_BUFF_DURATION_S,
+} from '../engine/game/camp';
+import {
+  MOUNT_DEFS,
+  MountState,
+  MountManager,
+  mountDefOf,
+  buildMountVisual,
+} from '../engine/game/mounts';
+import {
   VENDOR_SALT,
   CURRENCY_SALT,
   CURRENCY_NAME,
@@ -160,6 +205,17 @@ import {
   QUEST_SALT,
 } from '../engine/game/quests';
 import { SIDE_QUEST_SALT, buildSideQuestPool } from '../engine/game/sidequests';
+import { biomeMusicPattern, AUDIO_SALT } from '../engine/game/biomeMusic';
+import {
+  RADIANT_SALT,
+  RADIANT_TEMPLATES,
+  buildRadiantOffers,
+  radiantOfferAt,
+  radiantTierForLevel,
+  resolveRadiantCount,
+  eligibleRadiantTemplates,
+  RadiantBoard,
+} from '../engine/game/radiantQuests';
 import {
   CURATED_STORY_REWARDS,
   CURATED_SIDE_REWARDS,
@@ -194,6 +250,8 @@ import {
   resolveSkillsXpMultiplier,
 } from '../engine/game/skills';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
+import { FastTravelPanel } from '../engine/ui/FastTravelPanel';
+import { FastTravelRegistry, fastTravelArrivalEdge, FAST_TRAVEL_STORAGE_KEY } from '../engine/world/FastTravel';
 import {
   ABILITY_DEFS,
   ABILITY_IDS,
@@ -429,10 +487,39 @@ function boot() {
   const blueprint = build(engine, spec);
   // Preserve the pre-boot modding API when publishing the booted state.
   window.__XANDRIA__ = { ...window.__XANDRIA__, engine, spec, blueprint, errors: window.__XANDRIA_ERRORS };
+  // FAST-TRAVEL (upgrade loop): the world-map panel, built once per boot
+  // (not per blueprint rebuild — the PortalManager persists across
+  // restarts, so the panel's live reads stay valid). Only when portals are
+  // enabled: portal-off specs get no chip, no key handler, no per-frame
+  // work. isModalOpen reads the blueprint's own panels defensively —
+  // other blueprints may not build every panel.
+  let fastTravelPanel: FastTravelPanel | null = null;
+  if (engine.portalManager) {
+    const pm = engine.portalManager;
+    const bp = blueprint as unknown as Record<string, { isOpen?: boolean } | null | undefined>;
+    fastTravelPanel = new FastTravelPanel({
+      container: engine.container,
+      discovered: () => pm.discovered.list(),
+      current: () => ({ ...pm.coord }),
+      onTravel: (c) => pm.fastTravelTo(c),
+      isModalOpen: () => !!(bp.skillsPanel?.isOpen || bp.bestiaryPanel?.isOpen
+        || bp.achievementsPanel?.isOpen || bp.shopPanel?.isOpen),
+    });
+  }
   // NPCs wave (workstream C): test-mode seam. The e2e and perf harnesses
   // spawn NPCs against A's API directly (spawnNpcsForMap) and register the
   // interactables manually — workstream B's manager is not on this path.
   if (engine.testMode) {
+    // FAST-TRAVEL (upgrade loop): test-mode seam for the fast-travel e2e.
+    (window.__XANDRIA__ as Record<string, unknown>).fastTravelTest = {
+      FastTravelRegistry,
+      fastTravelArrivalEdge,
+      FAST_TRAVEL_STORAGE_KEY,
+      /** Test seam: the live world-map panel (null when portals disabled). */
+      livePanel: (): FastTravelPanel | null => fastTravelPanel,
+      /** Test seam: the live discovered-portal registry (null when portals disabled). */
+      liveRegistry: (): FastTravelRegistry | null => engine.portalManager?.discovered ?? null,
+    };
     (window.__XANDRIA__ as Record<string, unknown>).npcTest = {
       spawnNpcsForMap,
       registerNpcInteractables,
@@ -492,6 +579,21 @@ function boot() {
         MAX_NG_PLUS_CYCLE,
         ngPlusByCycle,
         applyNgPlusScaling,
+      },
+      // UPGRADE LOOP (elite-affixes): pure affix table + roll + apply fn
+      // for the e2e per-affix combat assertions (same shipped code the
+      // spawn path uses). Live managers read eliteChance from the spec.
+      eliteAffixes: {
+        ELITE_SALT,
+        ELITE_AFFIX_DEFS,
+        ELITE_DOUBLE_CHANCE,
+        VOLATILE_RADIUS,
+        VOLATILE_DAMAGE_FRAC,
+        resolveEliteChance,
+        rollEliteAffixes,
+        eliteModsFor,
+        applyEliteAffixes,
+        eliteLabel,
       },
       /** Test seam: submit never-ticked enemies once (instances persist). */
       submitStaticEnemies: (enemies: Enemy[]) => {
@@ -658,6 +760,65 @@ function boot() {
       liveEnemies: (): { enemies: Array<{ alive: boolean; health: number; position: unknown; lureTarget: unknown; damage(n: number, from?: unknown): void }> } | null =>
         (blueprint as { enemies?: { enemies: Array<{ alive: boolean; health: number; position: unknown; lureTarget: unknown; damage(n: number, from?: unknown): void }> } }).enemies ?? null,
     };
+    // UPGRADE LOOP (companion-system): test-mode seam for the companion
+    // e2e + perf harnesses — the defs table, salts, pure rolls/pick,
+    // and the live blueprint manager + panel.
+    (window.__XANDRIA__ as Record<string, unknown>).companionTest = {
+      COMPANION_SALT,
+      COMPANION_WOUND_BONUS,
+      COMPANION_DEFS,
+      CompanionsManager,
+      Companion,
+      companionDefOf,
+      rollCompanionDamage,
+      rollCompanionHeal,
+      rollFollowOffset,
+      pickCompanionTarget,
+      /** Test seam: the live companions manager from the blueprint build. */
+      liveManager: (): CompanionsManager | null =>
+        (blueprint as { companions?: CompanionsManager }).companions ?? null,
+      /** Test seam: the live companion panel from the blueprint build. */
+      livePanel: (): { isOpen: boolean; show(): void; hide(): void; toggle(): void; refresh(): void } | null =>
+        (blueprint as { companionPanel?: { isOpen: boolean; show(): void; hide(): void; toggle(): void; refresh(): void } }).companionPanel ?? null,    };
+    // UPGRADE LOOP (player-camp): test-mode seam for the camp e2e + perf
+    // harnesses — the defs table, salt, pure site computation, and the
+    // live blueprint manager + session.
+    (window.__XANDRIA__ as Record<string, unknown>).campTest = {
+      CAMP_SALT,
+      CAMP_STRUCTURE_DEFS,
+      CampManager,
+      CampProp,
+      campSitePosition,
+      campStructureDefOf,
+      WORKBENCH_DAMAGE_MULT,
+      WORKBENCH_BUFF_DURATION_S,
+      /** Test seam: the live camp manager from the blueprint build. */
+      liveManager: (): CampManager | null =>
+        (blueprint as { camp?: CampManager }).camp ?? null,
+      /** Test seam: the live camp session from the blueprint build. */
+      liveSession: (): { isPanelOpen: boolean; open: () => boolean; promptedCamp: boolean } | null =>
+        (blueprint as { campSession?: { isPanelOpen: boolean; open: () => boolean; promptedCamp: boolean } }).campSession ?? null,    };
+    // UPGRADE LOOP (mounts): test-mode seam for the mounts e2e + perf
+    // harnesses — the defs table, pure state class, visual builder, and
+    // the live blueprint manager + panel.
+    (window.__XANDRIA__ as Record<string, unknown>).mountsTest = {
+      MOUNT_DEFS,
+      MountState,
+      MountManager,
+      mountDefOf,
+      buildMountVisual,
+      /** Test seam: the live mounts manager from the blueprint build. */
+      liveManager: (): MountManager | null =>
+        (blueprint as { mounts?: MountManager }).mounts ?? null,
+      /** Test seam: the live mounts panel from the blueprint build. */
+      livePanel: (): { isOpen: boolean; show: () => void; hide: () => void } | null =>
+        (blueprint as { mountsPanel?: { isOpen: boolean; show: () => void; hide: () => void } }).mountsPanel ?? null,
+      /** Test seam: shared-instancer diagnostics for the perf leg. */
+      instancerStats: (): { buckets: number; instances: number } => {
+        const s = NpcInstancer.for(engine).stats();
+        return { buckets: s.buckets, instances: s.instances };
+      },
+    };
     // Vendor-economy wave: test-mode seam for the economy e2e harness —
     // salts, catalog, pure builders, the Wallet class, and the live
     // blueprint handles (wallet, NPC manager, shop panel).
@@ -777,6 +938,23 @@ function boot() {
       /** Test seam: the live quest manager from the blueprint build (null when disabled). */
       liveManager: (): QuestManager | null =>
         (blueprint as { quests?: QuestManager | null }).quests ?? null,
+      // Radiant-quests wave: the salt, the template table, the pure
+      // offer generators (batch + single-slot replication), the tier
+      // function, and the live board/panel handles for the radiant e2e.
+      RADIANT_SALT,
+      RADIANT_TEMPLATES,
+      buildRadiantOffers,
+      radiantOfferAt,
+      radiantTierForLevel,
+      resolveRadiantCount,
+      eligibleRadiantTemplates,
+      RadiantBoard,
+      /** Test seam: the live radiant board from the blueprint build (null when disabled). */
+      liveRadiantBoard: (): RadiantBoard | null =>
+        (blueprint as { radiantBoard?: RadiantBoard | null }).radiantBoard ?? null,
+      /** Test seam: open the radiant board panel (the real UI path, not a manager call). */
+      openRadiantBoard: (): void =>
+        (blueprint as { radiantBoardPanel?: { show: () => void } | null }).radiantBoardPanel?.show(),
       /** Test seam: the live talk session from the blueprint build (null when absent). */
       liveTalkSession: (): QuestTalkSession | null =>
         (blueprint as { talkSession?: QuestTalkSession | null }).talkSession ?? null,
@@ -804,6 +982,17 @@ function boot() {
       /** Test seam: the live boss bar from the blueprint build (null when absent). */
       liveBar: (): BossBar | null =>
         (blueprint as { bossBar?: BossBar }).bossBar ?? null,
+    };
+    // UPGRADE LOOP (audio-system): test-mode seam for the audio e2e —
+    // the pure per-biome pattern fn (so e2e can replicate the loop
+    // independently) and the live engine's biome setter for determinism
+    // assertions. Production audio never touches this seam.
+    (window.__XANDRIA__ as Record<string, unknown>).audioTest = {
+      biomeMusicPattern,
+      AUDIO_SALT,
+      setBiome: (biomeId: string, mapSeed: number) =>
+        engine.audio.setBiome(biomeMusicPattern(biomeId, mapSeed)),
+      currentBiomePattern: () => engine.audio.currentBiomePattern(),
     };
     // Skills wave: test-mode seam for the skills e2e harness — the system,
     // defs, resolvers, and the live blueprint handles.

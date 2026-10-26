@@ -2,12 +2,14 @@
  * DAMAGE-NUMBERS (upgrade loop) — live player page e2e.
  *
  * Desktop: boot the deterministic "Forgotten Valley" tp-action scene
- * (seed 9 — chosen so the FIRST ability variance draw is a top-decile
- * crit: mulberry32((9 ^ 0xab17)) first draw u = 0.9221, dash-strike
- * damage 43 at damageMult 1) -> melee number (exact "25", playerDamage
- * style) -> dash-strike crit number -> enemy-damage + heal numbers ->
- * kill numbers incl. "+20 XP" -> toggle off clears + suppresses ->
- * reload restores the setting.
+ * (seed 9 — mulberry32((9 ^ 0xab17)) first variance draw u = 0.9221,
+ * dash-strike damage 43 at damageMult 1; CRIT-SYSTEM: the second draw
+ * u = 0.2828 is NOT a crit, so leg 2 now asserts the plain 43 — real
+ * crits are covered by the crit-system spec at crit seeds 15/23)
+ * -> melee number (exact "25", playerDamage style) -> dash-strike
+ * number -> enemy-damage + heal numbers -> kill numbers incl.
+ * "+20 XP" -> toggle off clears + suppresses -> reload restores the
+ * setting.
  *
  * ATOMICITY RULE (learned the hard way): placement, action, and DOM
  * read share ONE page.evaluate call per leg, and each leg starts with
@@ -39,7 +41,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const RAW = readFileSync(resolve(HERE, 'fixtures/npcs.b64'), 'utf8').trim();
 
 // Same deterministic scene, empty item table (parity with the skills
-// spec), and seed 9 for the guaranteed first-cast crit (see header).
+// spec), and seed 9 (see header for the exact seeded values).
 // Enemy HP stays at the default 30 so the kill leg can finish a walker
 // with two 25-damage melees.
 const B64 = (() => {
@@ -98,7 +100,7 @@ async function readDrawCalls(page: any): Promise<number> {
 
 
 test.describe('damage numbers', () => {
-  test('seeded combat produces the exact number sequence incl. crit styling', async ({ page }) => {
+  test('seeded combat produces the exact number sequence', async ({ page }) => {
     const errors: string[] = [];
     await boot(page, errors);
 
@@ -128,9 +130,12 @@ test.describe('damage numbers', () => {
     });
     expect(melee).toEqual([{ text: '25', color: 'rgb(255, 210, 63)', fontSize: '18px' }]);
 
-    // Leg 2 — ability crit: first manager draw is the seeded top-decile
-    // roll (u = 0.9221 -> 43 damage, crit style). cast() with no aimDir
-    // defaults to (0,0,1) — exactly toward the placed enemy.
+    // Leg 2 — ability damage: first manager draw is the seeded variance
+    // roll (u = 0.9221 -> 43 damage); the second draw (u = 0.2828) is
+    // NOT a crit under the CRIT_TABLE, so the number is plain
+    // playerDamage style. Real crits live in the crit-system spec.
+    // cast() with no aimDir defaults to (0,0,1) — exactly toward the
+    // placed enemy.
     const crit = await page.evaluate(() => {
       const X = (window as unknown as { __XANDRIA__?: any }).__XANDRIA__;
       X.engine.juice.reset();
@@ -149,7 +154,7 @@ test.describe('damage numbers', () => {
       // the same-turn projection sees the new orientation.
       X.engine.camera.lookAt(p.x, p.y + 1, p.z);
       X.engine.camera.updateMatrixWorld();
-      // Raise HP so the 43-damage crit does NOT kill (a kill would add
+      // Raise HP so the 43 damage does NOT kill (a kill would add
       // a "+20 XP" number to this leg's exact assertion).
       target.health = 1000;
       const m = X.abilitiesTest.liveManager();
@@ -157,10 +162,11 @@ test.describe('damage numbers', () => {
       const els = Array.from(document.querySelectorAll('.xjuice .dmgnum')) as HTMLElement[];
       const nums = els.filter((el) => parseFloat(el.style.opacity || '0') > 0)
         .map((el) => ({ text: el.textContent ?? '', color: el.style.color, fontSize: el.style.fontSize }));
-      return { damageDealt: res.damageDealt, nums };
+      return { damageDealt: res.damageDealt, crits: m.lastCast?.crits ?? null, nums };
     });
     expect(crit.damageDealt).toBe(43);
-    expect(crit.nums).toEqual([{ text: '43!', color: 'rgb(255, 138, 92)', fontSize: '27px' }]);
+    expect(crit.crits).toBe(0);
+    expect(crit.nums).toEqual([{ text: '43', color: 'rgb(255, 210, 63)', fontSize: '18px' }]);
 
     // Leg 3 — damage taken + heal: enemyDamage ('−' prefix, danger
     // role) then heal ('+' prefix, good role, actual restored only:

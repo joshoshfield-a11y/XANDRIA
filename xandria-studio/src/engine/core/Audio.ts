@@ -4,10 +4,13 @@
  */
 import type { GameSpec } from '@spec';
 import { Rng } from './Rng';
+/** Type-only: biomeMusic lives in the game layer; Audio never imports it at runtime. */
+import type { BiomeMusicPattern } from '../game/biomeMusic';
 
 export type Sfx =
   | 'jump' | 'land' | 'hit' | 'hurt' | 'shoot' | 'laser' | 'explosion' | 'pickup' | 'coin' | 'swing'
-  | 'dash' | 'die' | 'kill' | 'levelup' | 'chapter' | 'roar' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step' | 'thunder';
+  | 'dash' | 'die' | 'kill' | 'levelup' | 'chapter' | 'roar' | 'win' | 'lose' | 'checkpoint' | 'engine' | 'boost' | 'click' | 'powerup' | 'alarm' | 'step' | 'thunder'
+  | 'craft' | 'quest' | 'portal';
 
 const SCALES: Record<string, number[]> = {
   major: [0, 2, 4, 5, 7, 9, 11],
@@ -34,10 +37,59 @@ export class AudioEngine {
   /** master volume 0..1 (from settings) */
   volume = 0.8;
   private intensity = 0.5;
+  // UPGRADE LOOP (audio-system): per-bus user settings (persisted per save
+  // slot via Settings). Stored pre-unlock and applied when buses exist.
+  private musicEnabled = true;
+  private sfxEnabled = true;
+  private userMusicVolume = 0.8;
+  private userSfxVolume = 0.8;
+  // UPGRADE LOOP (audio-system): live music pattern. Defaults mirror the
+  // legacy generative loop (spec mode/key/tempo, mood chord prog, rng motif
+  // + bass in the original draw order); setBiome() replaces them with the
+  // seeded per-biome pattern without restarting the AudioContext.
+  private musicMode: string;
+  private musicKey: number;
+  private musicTempo: number;
+  private musicChordProg: number[];
+  private musicMotif: number[];
+  private musicBassPat: number[];
+  /** Last biome pattern applied via setBiome (null until the first call). */
+  private biomePattern: BiomeMusicPattern | null = null;
 
   constructor(spec: GameSpec) {
     this.spec = spec.audio;
     this.rng = new Rng(spec.meta.seed ^ 0xa0d10);
+    this.musicMode = this.spec.mode;
+    this.musicKey = this.spec.key;
+    this.musicTempo = this.spec.tempo;
+    const dark = ['dark', 'tense', 'mysterious', 'aggressive'].includes(this.spec.mood);
+    this.musicChordProg = dark ? [0, 5, 3, 6] : [0, 3, 4, 5];
+    const scaleLen = (SCALES[this.spec.mode] ?? SCALES.minor).length;
+    this.musicMotif = Array.from({ length: 32 }, () => (this.rng.chance(0.7) ? this.rng.int(0, scaleLen * 2 - 1) : -1));
+    this.musicBassPat = Array.from({ length: 16 }, (_, i) => (i % 4 === 0 ? 0 : this.rng.chance(0.35) ? this.rng.int(0, 2) : -1));
+  }
+
+  /**
+   * UPGRADE LOOP (audio-system): switch the generative loop to a biome's
+   * seeded pattern (see biomeMusicPattern). The scheduler restarts on the
+   * new tempo when music is already running; the step counter keeps going
+   * so the swap lands mid-phrase instead of hard-cutting. No-op fields when
+   * the context is not unlocked yet — the pattern applies at startMusic().
+   */
+  setBiome(pattern: BiomeMusicPattern): void {
+    this.biomePattern = pattern;
+    this.musicMode = pattern.mode;
+    this.musicKey = pattern.key;
+    this.musicTempo = pattern.tempo;
+    this.musicChordProg = [...pattern.chordProg];
+    this.musicMotif = [...pattern.motif];
+    this.musicBassPat = [...pattern.bassPat];
+    if (this.musicTimer !== null) { this.pauseMusic(); this.resumeMusic(); }
+  }
+
+  /** The last biome pattern applied via setBiome (null before the first call). */
+  currentBiomePattern(): BiomeMusicPattern | null {
+    return this.biomePattern;
   }
 
   /** Must be called from a user gesture (click/keydown). Safe to call repeatedly. */
@@ -50,8 +102,8 @@ export class AudioEngine {
     this.master = c.createGain();
     this.comp = c.createDynamicsCompressor();
     this.comp.threshold.value = -12; this.comp.ratio.value = 4;
-    this.sfxBus = c.createGain(); this.sfxBus.gain.value = this.spec.sfxVolume;
-    this.musicBus = c.createGain(); this.musicBus.gain.value = this.spec.musicVolume * 0.6;
+    this.sfxBus = c.createGain(); this.sfxBus.gain.value = this.sfxBusGain();
+    this.musicBus = c.createGain(); this.musicBus.gain.value = this.musicBusGain();
     this.sfxBus.connect(this.comp); this.musicBus.connect(this.comp);
     this.comp.connect(this.master); this.master.connect(c.destination);
     this.master.gain.value = this.muted ? 0 : this.volume;
@@ -60,6 +112,26 @@ export class AudioEngine {
   }
 
   setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : this.volume; }
+
+  // UPGRADE LOOP (audio-system): per-bus user controls. Each setter stores
+  // the value and, when buses exist, recomputes the bus gain immediately;
+  // pre-unlock calls are honored by unlock()'s bus-gain init. Bus gain =
+  // spec volume × user volume × enabled flag — muting a bus never touches
+  // the other bus or the master gain.
+  private sfxBusGain(): number {
+    return this.spec.sfxVolume * this.userSfxVolume * (this.sfxEnabled ? 1 : 0);
+  }
+  private musicBusGain(): number {
+    return this.spec.musicVolume * 0.6 * this.userMusicVolume * (this.musicEnabled ? 1 : 0);
+  }
+  private applyBusGains(): void {
+    if (this.sfxBus) this.sfxBus.gain.value = this.sfxBusGain();
+    if (this.musicBus) this.musicBus.gain.value = this.musicBusGain();
+  }
+  setMusicEnabled(on: boolean) { this.musicEnabled = on; this.applyBusGains(); }
+  setSfxEnabled(on: boolean) { this.sfxEnabled = on; this.applyBusGains(); }
+  setMusicVolume(v: number) { this.userMusicVolume = Math.max(0, Math.min(1, v)); this.applyBusGains(); }
+  setSfxVolume(v: number) { this.userSfxVolume = Math.max(0, Math.min(1, v)); this.applyBusGains(); }
   /** Master volume 0..1. Applies live. */
   setVolume(v: number) {
     this.volume = Math.max(0, Math.min(1, v));
@@ -142,6 +214,12 @@ export class AudioEngine {
       case 'alarm': this.tone(880, 0.15, 'square', 0.2 * v, b); this.tone(660, 0.15, 'square', 0.2 * v, b, { when: this.ctx.currentTime + 0.17 }); break;
       // UPGRADE LOOP (weather-cycles): lightning thunder — low rumble.
       case 'thunder': this.noise(1.2, 0.7 * v, b, 300); this.tone(55, 0.9, 'sine', 0.5 * v, b, { slide: 0.3 }); break;
+      // UPGRADE LOOP (audio-system): craft complete — hammer-anvil strike + rising triad.
+      case 'craft': this.noise(0.12, 0.6 * v, b, 3500); this.tone(220 * p, 0.1, 'square', 0.3 * v, b, { slide: 0.5 }); [0, 4, 7].forEach((s, i) => this.tone(523 * Math.pow(2, s / 12) * p, 0.2, 'triangle', 0.28 * v, b, { when: this.ctx!.currentTime + 0.1 + i * 0.07 })); break;
+      // UPGRADE LOOP (audio-system): quest turn-in — warm major arpeggio + chime.
+      case 'quest': [0, 4, 7, 12, 16].forEach((s, i) => this.tone(440 * Math.pow(2, s / 12) * p, 0.3, 'triangle', 0.3 * v, b, { when: this.ctx!.currentTime + i * 0.09 })); this.tone(1760 * p, 0.5, 'sine', 0.15 * v, b, { when: this.ctx!.currentTime + 0.45 }); break;
+      // UPGRADE LOOP (audio-system): portal travel — rising sweep + shimmer tail.
+      case 'portal': this.tone(180 * p, 0.7, 'sine', 0.35 * v, b, { slide: 4, filter: 3000 }); this.noise(0.6, 0.25 * v, b, 5000, this.ctx.currentTime + 0.1, 'bandpass'); this.tone(1440 * p, 0.4, 'sine', 0.12 * v, b, { when: this.ctx!.currentTime + 0.55 }); break;
       case 'engine': break; // continuous, see setEngine
     }
   }
@@ -164,15 +242,17 @@ export class AudioEngine {
   // ---------- generative music ----------
   private startMusic() {
     const c = this.ctx!;
-    const beat = 60 / this.spec.tempo / 2; // 8th notes
-    const scale = SCALES[this.spec.mode] ?? SCALES.minor;
-    const root = 110 * Math.pow(2, this.spec.key / 12); // A2-based root
+    // UPGRADE LOOP (audio-system): tempo/mode/key/chordProg/motif/bass all
+    // come from the live pattern fields — spec defaults at construction,
+    // per-biome pattern after setBiome(). Mood still comes from the spec.
+    const beat = 60 / this.musicTempo / 2; // 8th notes
+    const scale = SCALES[this.musicMode] ?? SCALES.minor;
+    const root = 110 * Math.pow(2, this.musicKey / 12); // A2-based root
     const mood = this.spec.mood;
     const dark = mood === 'dark' || mood === 'tense' || mood === 'mysterious' || mood === 'aggressive';
-    const chordProg = dark ? [0, 5, 3, 6] : [0, 3, 4, 5];
-    // pre-generate a 32-step melody motif per seed
-    const motif = Array.from({ length: 32 }, () => (this.rng.chance(0.7) ? this.rng.int(0, scale.length * 2 - 1) : -1));
-    const bassPat = Array.from({ length: 16 }, (_, i) => (i % 4 === 0 ? 0 : this.rng.chance(0.35) ? this.rng.int(0, 2) : -1));
+    const chordProg = this.musicChordProg;
+    const motif = this.musicMotif;
+    const bassPat = this.musicBassPat;
     let nextTime = c.currentTime + 0.1;
     const lookahead = 0.25;
     const tick = () => {

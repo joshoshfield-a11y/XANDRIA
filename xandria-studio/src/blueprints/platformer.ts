@@ -35,7 +35,10 @@ import {
 import { ShopPanel } from '../engine/ui/ShopPanel';
 import { buildSideQuestPool } from '../engine/game/sidequests';
 import { QuestTracker } from '../engine/ui/QuestTracker';
+import { RadiantBoard } from '../engine/game/radiantQuests';
+import { RadiantBoardPanel } from '../engine/ui/RadiantBoardPanel';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import { resolveEliteChance } from '../engine/game/eliteAffixes';
 import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Pickups } from '../engine/game/Pickups';
 import { Objectives } from '../engine/game/Objectives';
@@ -228,6 +231,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
     ngPlus: () => engine.getNgPlusCycle(),
+    // UPGRADE LOOP (elite-affixes): spec elite chance (default 0 = no elites).
+    eliteChance: () => resolveEliteChance(spec),
 
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
@@ -238,6 +243,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // COMBAT-ABILITIES: same wiring as tpAction (melee-convention aim).
   const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
     damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
+    // CRIT-SYSTEM: ability crits scale with equipped weapon tier + smithing rank.
+    critCtx: () => ({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }),
   });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
@@ -280,6 +287,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   ensureEnchantItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar, {
     sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
+    // CRIT-SYSTEM: inventory panel's CRIT STATS section reads smithing rank here.
+    smithingRank: () => skills.rankOf('smithing'),
   });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -308,6 +317,10 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // UPGRADE LOOP (blueprint-rollout): hoisted for the shop panel's
   // isModalOpen chain (assigned below, after the panel is constructed).
   let talkSession: QuestTalkSession | null = null;
+  // radiant-quests wave: hoisted so the manager's onQuestsChanged thunk
+  // (which syncs the board) can reference them before construction.
+  let radiantBoard: RadiantBoard | null = null;
+  let radiantBoardPanel: RadiantBoardPanel | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -331,9 +344,33 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
         worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
         autoAccept: true,
         onLevelUp: (gain) => notifyLevelUp(gain),
+        onQuestsChanged: () => { radiantBoard?.sync(); radiantBoardPanel?.render(); },
       })
     : null;
   engine.questManager = quests;
+  // radiant-quests wave: the endless board over the same manager. Offers
+  // generate from the live player level + portal world seed (not the spec
+  // seed alone), register as available radiant defs, and re-roll
+  // deterministically when a slot is abandoned or turned in. Accept /
+  // abandon / turn-in all ride the manager's existing methods, so the
+  // story/side lifecycle is untouched.
+  radiantBoard = questsEnabled && quests
+    ? new RadiantBoard({
+        manager: quests,
+        spec,
+        getPlayerLevel: () => prog.level,
+        getMapSeed: () => engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onChanged: () => radiantBoardPanel?.render(),
+      })
+    : null;
+  radiantBoardPanel = questsEnabled && radiantBoard
+    ? new RadiantBoardPanel({
+        container: engine.container,
+        board: () => radiantBoard,
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+      })
+    : null;
+
   // achievements wave: player-scoped achievement manager (observe-only).
   // Built here so the station session's onCrafted chain below can feed it
   // crafts; the codex panel is constructed after the modal sessions.
@@ -665,5 +702,5 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession , abilities: abilities.manager, abilityBar: abilities.bar };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel };
 }

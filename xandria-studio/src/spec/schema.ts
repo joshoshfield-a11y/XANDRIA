@@ -714,6 +714,11 @@ export interface CustomSpec {
    */
   bestiary?: BestiaryCustom;
   /**
+   * UPGRADE LOOP (elite-affixes): elite spawn chance (default 0 = no
+   * elites). Config-only — never touches the seed.
+   */
+  eliteAffixes?: EliteAffixesCustom;
+  /**
    * UPGRADE LOOP (weather-cycles): Studio-authored weather-cycle controls.
    * Master toggle + a forced weather for testing. Config-only — never
    * touches the seed. Read by resolveWeatherCyclesEnabled /
@@ -857,6 +862,12 @@ export interface QuestsCustom {
    */
   sideQuestCount?: number;
   /**
+   * Radiant-quests wave: radiant board size 1..5 (default 3, the brief's
+   * rotating offers). Only the count is authored — which offers appear
+   * is seeded per (player level, map seed) via RADIANT_SALT.
+   */
+  radiantCount?: number;
+  /**
    * Curated-quest-rewards wave: per-quest reward overrides, keyed by quest
    * template slug (e.g. 'first_blood', 'spare_parts'). {xp?, items?} merge
    * over the curated tables (engine/game/questRewards); unknown slugs are
@@ -879,6 +890,19 @@ export interface SkillsTuningCustom {
    * fast through the ranks; 0 = frozen ranks.
    */
   xpMultiplier?: number;
+}
+
+/**
+ * UPGRADE LOOP (elite-affixes): Studio-authored elite chance. All fields
+ * optional; absent = 0 (no elites). Config-only — never touches the
+ * seed. Read by resolveEliteChance (engine/game/eliteAffixes).
+ */
+export interface EliteAffixesCustom {
+  /**
+   * Per-spawn elite chance, 0..1 (default 0). Elites carry 1-2 affixes
+   * from ELITE_AFFIX_DEFS, rolled from Rng(spawnSeed ^ ELITE_SALT).
+   */
+  chance?: number;
 }
 
 /** Bestiary wave: codex tuning. All fields optional; absent = defaults. */
@@ -1686,6 +1710,8 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
             err('custom.quests.questCount', 'must be an integer 1..8');
           if (qu.sideQuestCount !== undefined && !(Number.isInteger(qu.sideQuestCount) && (qu.sideQuestCount as number) >= 1 && (qu.sideQuestCount as number) <= 12))
             err('custom.quests.sideQuestCount', 'must be an integer 1..12');
+          if (qu.radiantCount !== undefined && !(Number.isInteger(qu.radiantCount) && (qu.radiantCount as number) >= 1 && (qu.radiantCount as number) <= 5))
+            err('custom.quests.radiantCount', 'must be an integer 1..5');
           if (qu.rewardOverrides !== undefined) {
             if (!isObj(qu.rewardOverrides)) err('custom.quests.rewardOverrides', 'must be an object');
             else for (const [slug, ov] of Object.entries(qu.rewardOverrides)) {

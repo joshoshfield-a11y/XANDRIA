@@ -304,13 +304,13 @@ describe('HUD flow screens', () => {
     const ov = findOverlay(root);
     const btnWrap = ov.children[ov.children.length - 1];
     const labels = btnWrap.children.map((b: any) => b.textContent);
-    expect(labels).toEqual(['RESUME', 'RESTART', 'SETTINGS', 'QUIT TO TITLE']);
+    expect(labels).toEqual(['RESUME', 'CUSTOMIZE', 'RESTART', 'SETTINGS', 'QUIT TO TITLE']);
     btnWrap.children[0].__fire('click');
     expect(eng.togglePause).toHaveBeenCalled();
     expect(eng.audio.play).toHaveBeenCalledWith('click');
-    btnWrap.children[1].__fire('click');
+    btnWrap.children[2].__fire('click');
     expect(eng.restart).toHaveBeenCalled();
-    btnWrap.children[3].__fire('click');
+    btnWrap.children[4].__fire('click');
     expect(eng.toTitle).toHaveBeenCalled();
   });
 
@@ -319,14 +319,16 @@ describe('HUD flow screens', () => {
     hud.showPause();
     const ov = findOverlay(root);
     const btnWrap = ov.children[ov.children.length - 1];
-    btnWrap.children[2].__fire('click'); // SETTINGS
+    btnWrap.children[3].__fire('click'); // SETTINGS (CUSTOMIZE sits at index 1)
     const wrap = ov.children.find((c: any) => c.className === 'settings');
     // graphics wave 2 (E): volume, quality, PERF TIER, mute
     // UPGRADE LOOP (difficulty-modes): + DIFFICULTY row (index 3)
     // DAMAGE-NUMBERS: + DAMAGE NUMBERS row (index 5)
-    // UPGRADE LOOP (accessibility-pass): + COLORBLIND (6), REDUCED MOTION
-    // (7), HUD TEXT SIZE (8), KEYBINDS section (9)
-    expect(wrap.children).toHaveLength(10);
+    // UPGRADE LOOP (audio-system): + MUSIC (6), SOUND FX (7),
+    // MUSIC VOLUME (8), SFX VOLUME (9)
+    // UPGRADE LOOP (accessibility-pass): + COLORBLIND (10), REDUCED MOTION
+    // (11), HUD TEXT SIZE (12), KEYBINDS section (13)
+    expect(wrap.children).toHaveLength(14);
     const vslider = wrap.children[0].children[1];
     vslider.value = '25';
     vslider.__fire('input');
@@ -365,19 +367,35 @@ describe('HUD flow screens', () => {
     fcheck.__fire('change');
     expect(eng.settings.data.floatingText).toBe(false);
     expect(eng.applySettings).toHaveBeenCalled();
+    // AUDIO-SYSTEM rows: music/sfx toggles + volume sliders, in order.
+    const musicCheck = wrap.children[6].children[1];
+    expect(musicCheck.tag).toBe('input');
+    expect(musicCheck.checked).toBe(true);
+    musicCheck.checked = false;
+    musicCheck.__fire('change');
+    expect(eng.settings.data.musicEnabled).toBe(false);
+    expect(eng.applySettings).toHaveBeenCalled();
+    const sfxCheck = wrap.children[7].children[1];
+    expect(sfxCheck.checked).toBe(true);
+    const musicVol = wrap.children[8].children[1];
+    musicVol.value = '50';
+    musicVol.__fire('input');
+    expect(eng.settings.data.musicVolume).toBeCloseTo(0.5);
+    const sfxVol = wrap.children[9].children[1];
+    expect(sfxVol.tag).toBe('input');
     // ACCESSIBILITY PASS rows: palette select, reduced-motion checkbox,
     // text-size slider, keybinds section (head + 15 action rows + note).
-    const aselect = wrap.children[6].children[1];
+    const aselect = wrap.children[10].children[1];
     expect(aselect.tag).toBe('select');
     expect(aselect.children.map((o: any) => o.value)).toEqual(['none', 'protanopia', 'deuteranopia', 'tritanopia']);
-    const rcheck = wrap.children[7].children[1];
+    const rcheck = wrap.children[11].children[1];
     expect(rcheck.tag).toBe('input');
     expect(rcheck.checked).toBe(false);
-    const xslider = wrap.children[8].children[1];
+    const xslider = wrap.children[12].children[1];
     expect(xslider.tag).toBe('input');
     expect(xslider.min).toBe('85');
     expect(xslider.max).toBe('150');
-    const kbWrap = wrap.children[9];
+    const kbWrap = wrap.children[13];
     expect(kbWrap.children).toHaveLength(17);
     expect(kbWrap.children[1].children[0].textContent).toBe('FORWARD');
   });

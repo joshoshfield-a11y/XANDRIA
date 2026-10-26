@@ -47,6 +47,11 @@ export class DialoguePanel {
     root.style.cssText = [
       'position:absolute', 'left:50%', 'bottom:12%', 'transform:translateX(-50%)',
       'z-index:9500', 'min-width:280px', 'max-width:min(480px,86%)',
+      // Radiant-quests wave: the action list grows with every quest wave
+      // (story + side + radiant offers), and an uncapped panel overflows
+      // the viewport top on 720p — the first Accept button lands off-screen
+      // and no click can reach it. Cap + scroll instead of overflowing.
+      'max-height:80vh', 'overflow-y:auto',
       'background:rgba(8,10,16,0.94)', 'border:1px solid rgba(255,181,69,0.45)',
       'border-radius:10px', 'padding:14px 18px 12px',
       'font-family:system-ui,-apple-system,sans-serif', 'color:#e8ecf4',

@@ -102,6 +102,17 @@ export interface QuestDef {
    */
   side?: boolean;
   /**
+   * radiant-quests wave: endless repeatable quests from the radiant board.
+   * A radiant def is registered after construction (registerRadiantDefs),
+   * starts 'available', never chains, never carries a standing gate, and
+   * is the ONLY kind the manager's abandon()/removeRadiantDef() touch.
+   * At accept/progress/complete/turn-in time a radiant def is a plain
+   * QuestDef — the grant path makes no distinction, so radiant turn-ins
+   * feed XP, inventory, standings, and achievements exactly like any
+   * other quest's.
+   */
+  radiant?: boolean;
+  /**
    * factions-reputation wave: optional standing gate. The quest stays
    * 'locked' (and accept() refuses it) until the player's standing with
    * the faction reaches min. Honored by the accept path ONLY — it never
@@ -508,6 +519,70 @@ export class QuestManager {
   /** All quest defs in line order. */
   get defs(): QuestDef[] {
     return this.quests.map((q) => q.def);
+  }
+
+  /**
+   * Radiant-quests wave: register radiant defs AFTER construction (the
+   * radiant board generates them from the live player level / map seed,
+   * which do not exist at construction time). Additive only: a def is
+   * accepted only when it passes validateQuestDef, carries radiant: true,
+   * has no chain and no standing gate, and is not already registered;
+   * anything else is skipped (never throws — the board must survive a
+   * bad offer without taking the manager down). Registered defs start
+   * 'available' and are never auto-accepted, even in autoAccept genres
+   * (auto-accept runs at construction only, by design — the board's
+   * Accept button is the accept path for radiant quests everywhere).
+   */
+  registerRadiantDefs(defs: QuestDef[]): void {
+    let changed = false;
+    for (const def of defs) {
+      if (!def || def.radiant !== true) continue;
+      if (validateQuestDef(def).length > 0) continue;
+      if (def.requiresQuests && def.requiresQuests.length > 0) continue;
+      if (def.minStanding !== undefined) continue;
+      if (this.byId.has(def.id)) continue;
+      const runtime: QuestRuntime = { def, status: 'available', progress: def.objectives.map(() => 0) };
+      this.quests.push(runtime);
+      this.byId.set(def.id, runtime);
+      changed = true;
+    }
+    if (changed) this.refreshTracker();
+  }
+
+  /**
+   * Radiant-quests wave: drop a radiant def from the roster. Only
+   * radiant defs in 'available', 'turned-in', or 'unknown' states are
+   * removable this way — an active/complete radiant quest must go
+   * through abandon()/turnIn() so progress is never silently discarded.
+   * Unknown ids and non-radiant defs are no-ops. The board calls this
+   * when it re-rolls a slot (turned-in or stale def out, fresh offer in).
+   */
+  removeRadiantDef(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.def.radiant !== true) return false;
+    if (q.status !== 'available' && q.status !== 'turned-in') return false;
+    this.quests.splice(this.quests.indexOf(q), 1);
+    this.byId.delete(id);
+    this.refreshTracker();
+    return true;
+  }
+
+  /**
+   * Radiant-quests wave: abandon an ACTIVE radiant quest. The def leaves
+   * the roster entirely (progress discarded — the board re-rolls the
+   * slot deterministically, so the player is never left with a dead
+   * slot). Returns false for unknown ids, non-radiant defs, and
+   * non-active statuses: story/side quests can never be abandoned, so
+   * their lifecycle is exactly unchanged by this method's existence.
+   */
+  abandon(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.def.radiant !== true || q.status !== 'active') return false;
+    this.quests.splice(this.quests.indexOf(q), 1);
+    this.byId.delete(id);
+    this.opts.toast(`Quest abandoned: ${q.def.name}`);
+    this.refreshTracker();
+    return true;
   }
 
   /** Status of a quest ('unknown' when the id is not in this pool). */

@@ -12,6 +12,7 @@ import { EQUIP_SLOTS, type EquipSlot, type GameSpec, type ItemDef } from '@spec'
 import { Inventory } from '../engine/game/items/Inventory';
 import { InventoryHUD, type InventorySellHooks } from '../engine/ui/InventoryHUD';
 import { buildSetUiReport } from '../engine/game/setBonuses';
+import { critStatsFor } from '../engine/game/crit';
 import { wireItems } from '../engine/game/items/wireItems';
 import { type ItemWorld } from '../engine/game/items/ItemWorld';
 import { ItemModelForge } from '../engine/gfx/ItemModels';
@@ -31,7 +32,7 @@ export class BlueprintItemKit {
   private buffUntil = 0;
   private buffMult = 1;
 
-  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar, opts?: { sell?: InventorySellHooks | null }) {
+  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar, opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number }) {
     this.engine = engine;
     this.spec = spec;
     this.avatar = avatar;
@@ -47,6 +48,12 @@ export class BlueprintItemKit {
       input: engine.input,
       sell: opts?.sell ?? null,
       setReport: () => buildSetUiReport(this.inventory),
+      // CRIT-SYSTEM: the inventory panel's CRIT STATS section reads live
+      // equipped-weapon tier + smithing rank through this resolver.
+      critReport: () => critStatsFor({
+        tier: this.equippedWeaponRarity(),
+        skillRank: opts?.smithingRank?.() ?? 0,
+      }),
     });
 
     // single loot path: drops → magnet → onPickup → inventory.add (no double-count)
@@ -86,6 +93,17 @@ export class BlueprintItemKit {
 
     // test hook: A's e2e spec looks for blueprint.itemWorld ?? engine.itemWorld
     (engine as unknown as Record<string, unknown>).itemWorld = world;
+  }
+
+  /**
+   * CRIT-SYSTEM: rarity of the equipped weapon (null = none equipped).
+   * The crit table reads this for the per-tier crit bonus; a missing
+   * rarity field on the def defaults to common via the crit table.
+   */
+  equippedWeaponRarity(): import('@spec').ItemRarity | null {
+    const id = this.inventory.getEquipped('weapon');
+    if (!id) return null;
+    return this.defs[id]?.rarity ?? null;
   }
 
   /** Outgoing damage multiplier from equipped damage stat + active set bonuses + active buffs. */
@@ -145,7 +163,7 @@ export function buildItemKit(
   engine: Engine,
   spec: GameSpec,
   avatar: PlayerAvatar,
-  opts?: { sell?: InventorySellHooks | null },
+  opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number },
 ): BlueprintItemKit | null {
   if (!spec.custom?.items) return null;
   const kit = new BlueprintItemKit(engine, spec, avatar, opts);

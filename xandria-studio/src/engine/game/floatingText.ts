@@ -19,10 +19,11 @@
  *   crit          '!' suffix + 1.5x size
  *   xp            '+' prefix + ' XP' suffix, slightly smaller
  *
- * Display only: formatting never feeds the simulation. Crit styling is a
- * display-only highlight (see CRIT_VARIANCE_CUTOFF in combatAbilities.ts):
- * the game has no crit mechanic, so no damage value is ever altered to
- * produce a crit — the style only marks a top-decile seeded variance roll.
+ * Display only: formatting never feeds the simulation. CRIT-SYSTEM: the
+ * crit kind now marks a REAL crit — the damage value was multiplied per
+ * the CRIT_TABLE (crit.ts) before this number was spawned. The old
+ * display-only rule (top-decile variance highlight, value unchanged) was
+ * retired by the crit-system phase; see its REPORT.md.
  */
 import { themeColor, type ThemeRole } from './accessibility';
 

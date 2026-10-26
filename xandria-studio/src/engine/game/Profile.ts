@@ -48,6 +48,21 @@ import {
   defaultAccessibilitySettings, validateAccessibilitySettings,
   type AccessibilitySettings,
 } from './accessibility';
+/**
+ * UPGRADE LOOP (companion-system): type-only import (erased at compile)
+ * — companions.ts imports Engine types, never Profile, so no cycle.
+ */
+import type { CompanionSave } from './companions';
+/**
+ * UPGRADE LOOP (character-customization): cosmetic selection lives in the
+ * profile (player-scoped, per save slot) so it survives reload and portal
+ * travel. Cosmetics-only — never stats, hitboxes, or behavior. Import is
+ * runtime-safe: cosmetics.ts imports gfx + spec types only, no Profile
+ * cycle (it never imports Profile).
+ */
+import {
+  defaultCosmetics, validateCosmetics, type CosmeticSelection,
+} from './cosmetics';
 
 export const PROFILE_KEY = 'xandria.profile.v1';
 /** Bump when the stored shape changes; migrateProfile() handles old versions. */
@@ -107,6 +122,12 @@ export interface RunJournalEntry {
   xpGained: number;
   bossesKilled: number;
   result: 'won' | 'lost';
+  /**
+   * UPGRADE LOOP (hardcore-ironman): true when this run was played in
+   * ironman mode. Absent (or false) on pre-ironman entries — the journal
+   * migration coerces it to a boolean, never throws.
+   */
+  ironman?: boolean;
 }
 
 /**
@@ -204,6 +225,41 @@ export interface ProfileData {
   tutorialSeen: boolean;
   /** accessibility-pass settings (keybinds, palette, reduced motion, text scale) */
   accessibility: AccessibilitySettings;
+  /**
+   * UPGRADE LOOP (companion-system): the player's companion roster —
+   * active companion id + per-companion { defId, custom name, hp }.
+   * Player-scoped, persisted, survives portal travel and save/reload.
+   * Additive field — missing keys default to null via ...base, and the
+   * manager re-validates def ids / clamps hp on restore, no version bump.
+   */
+  companions: CompanionSave | null;
+  /**
+   * character-customization: the player's cosmetic selection (visor glow,
+   * outfit skin, scarf/hood, pauldron trim). Cosmetics only — the game
+   * never reads this for stats, hitboxes, or behavior. Additive field —
+   * missing keys default via validateCosmetics, no version bump.
+   */
+  cosmetics: CosmeticSelection;
+  /**
+   * UPGRADE LOOP (player-camp): the player-scoped storage chest contents
+   * (itemId -> count). Player-scoped, persisted, survives portal travel
+   * and save/reload — the chest follows the player, not the map.
+   */
+  campChest: Record<string, number>;
+  /**
+   * UPGRADE LOOP (player-camp): structures built per map (map seed ->
+   * structure ids). Per-map, persisted, so revisiting a map restores
+   * its camp. Missing keys default to [] via migrateProfile.
+   */
+  campBuilt: Record<string, string[]>;
+  /**
+   * UPGRADE LOOP (mounts): the player's active mount + per-mount stamina.
+   * Player-scoped, persisted, survives portal travel and save/reload.
+   * All three seeded mounts are owned from the start (no unlock grind
+   * in this phase); `active` null = on foot. Unknown ids are dropped by
+   * migrateProfile; stamina is clamped by the mount state on load.
+   */
+  mounts: { active: string | null; stamina: Record<string, number> };
 }
 
 /** Merit earned for finishing a run. Wins pay more; every level adds a bonus. */
@@ -234,6 +290,11 @@ export function defaultProfile(): ProfileData {
     journal: [],
     tutorialSeen: false,
     accessibility: defaultAccessibilitySettings(),
+    companions: null,
+    cosmetics: defaultCosmetics(),
+    campChest: {},
+    campBuilt: {},
+    mounts: { active: null, stamina: {} },
   };
 }
 
@@ -330,7 +391,44 @@ export function migrateProfile(raw: unknown): ProfileData {
     journal: journalRec(r.journal),
     tutorialSeen: r.tutorialSeen === true,
     accessibility: validateAccessibilitySettings(r.accessibility),
+    // companion-system: kept verbatim here; the manager validates def
+    // ids / clamps hp on restore, so a stale save can never lock out a
+    // companion or crash the roster.
+    companions: (r.companions && typeof r.companions === 'object' && !Array.isArray(r.companions)
+      ? r.companions as unknown as CompanionSave : null),
+    cosmetics: validateCosmetics(r.cosmetics),
+    campChest: numRec(r.campChest),
+    campBuilt: campBuiltRec(r.campBuilt),
+    mounts: mountsRec(r.mounts),
   };
+}
+
+/** Validate the per-map camp-built record; drop malformed entries, never throw. */
+function campBuiltRec(v: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (!Array.isArray(x)) continue;
+    out[k] = x.filter((s): s is string => typeof s === 'string');
+  }
+  return out;
+}
+
+/** Validate the mounts record; unknown mount ids are dropped, never throws. */
+function mountsRec(v: unknown): { active: string | null; stamina: Record<string, number> } {
+  const out = { active: null as string | null, stamina: {} as Record<string, number> };
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  const r = v as Record<string, unknown>;
+  // NOTE: the id whitelist lives in mounts.ts to avoid a Profile<->mounts
+  // import cycle; migrateProfile keeps any string id here and MountState
+  // drops unknown ids on load. Stamina values are numbers only.
+  if (typeof r.active === 'string') out.active = r.active;
+  if (r.stamina && typeof r.stamina === 'object' && !Array.isArray(r.stamina)) {
+    for (const [k, x] of Object.entries(r.stamina as Record<string, unknown>)) {
+      if (typeof x === 'number' && isFinite(x)) out.stamina[k] = x;
+    }
+  }
+  return out;
 }
 
 /** Validate the daily-results record; drop malformed entries, never throw. */
@@ -411,6 +509,8 @@ function journalRec(v: unknown): RunJournalEntry[] {
       xpGained: Math.max(0, Math.floor(num(e.xpGained))),
       bossesKilled: Math.max(0, Math.floor(num(e.bossesKilled))),
       result: e.result === 'won' ? 'won' : 'lost',
+      // hardcore-ironman: coerce, never throw; pre-ironman entries read false.
+      ironman: e.ironman === true,
     });
     if (out.length >= JOURNAL_CAP) break;
   }
@@ -471,6 +571,16 @@ export function setLoadout(p: ProfileData, ids: string[]): ProfileData {
 
 export function getLoadout(p: ProfileData): string[] {
   return [...p.loadout];
+}
+
+/**
+ * UPGRADE LOOP (character-customization): replace the player's cosmetic
+ * selection (validated — unknown ids drop to the identity default, never
+ * stored raw). Callers persist with saveProfile(). Cosmetics only.
+ */
+export function setCosmetics(p: ProfileData, partial: Partial<CosmeticSelection>): ProfileData {
+  p.cosmetics = validateCosmetics({ ...p.cosmetics, ...partial });
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +698,20 @@ export interface SaveSlot {
   profile: ProfileData;
   /** this slot's own settings (volume/mute/quality/perf tier) */
   settings: SettingsData;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): true once this slot has started an
+   * ironman run (confirmed on the title screen). An ironman slot's runs
+   * are always ironman — the mode is a property of the slot, not of one
+   * run, so a reload or a RESTART can never silently downgrade it.
+   */
+  ironman: boolean;
+  /**
+   * UPGRADE LOOP (hardcore-ironman): true once an ironman run on this
+   * slot has ended in death. A dead slot can never start a run again
+   * (the engine guards every run start); the player switches slots or
+   * creates a new one. Never cleared — permadeath is permanent.
+   */
+  dead: boolean;
   /** wall-clock metadata for the picker UI only — not gameplay */
   createdAt: number;
   updatedAt: number;
@@ -610,11 +734,15 @@ export interface SlotSummary {
   runs: number;
   playtimeMin: number;
   updatedAt: number;
+  /** hardcore-ironman: this slot's runs are ironman runs. */
+  ironman: boolean;
+  /** hardcore-ironman: this slot died in an ironman run — unstartable. */
+  dead: boolean;
 }
 
 function makeSlot(id: string, name: string, profile: ProfileData, settings: SettingsData): SaveSlot {
   const now = Date.now();
-  return { id, name, profile, settings, createdAt: now, updatedAt: now };
+  return { id, name, profile, settings, ironman: false, dead: false, createdAt: now, updatedAt: now };
 }
 
 function freshSlotStore(): SlotStore {
@@ -639,7 +767,16 @@ function migrateLegacySettings(raw: unknown): SettingsData {
   // DAMAGE-NUMBERS: this normalizer also runs on every load of a current
   // store, so it must PRESERVE a stored floatingText:false — defaulting
   // here would silently re-enable the toggle on every reload.
-  return { volume: vol, muted: r.muted === true, quality, tier, floatingText: r.floatingText !== false };
+  // UPGRADE LOOP (audio-system): per-bus controls migrate like volume —
+  // missing keys default, out-of-range volumes clamp, garbage booleans off.
+  const busVol = (v: unknown, d: number) =>
+    typeof v === 'number' && isFinite(v) ? Math.max(0, Math.min(1, v)) : d;
+  return {
+    volume: vol, muted: r.muted === true, quality, tier, floatingText: r.floatingText !== false,
+    musicEnabled: r.musicEnabled !== false, sfxEnabled: r.sfxEnabled !== false,
+    musicVolume: busVol(r.musicVolume, base.musicVolume),
+    sfxVolume: busVol(r.sfxVolume, base.sfxVolume),
+  };
 }
 
 /**
@@ -696,6 +833,10 @@ function normalizeSlotStore(raw: unknown): SlotStore | null {
     try { settings = migrateLegacySettings(e.settings); } catch { /* defaults */ }
     slots.push({
       id, name, profile, settings,
+      // hardcore-ironman: strict booleans — a truthy non-boolean in a
+      // hand-edited store must never resurrect or kill a slot.
+      ironman: e.ironman === true,
+      dead: e.dead === true,
       createdAt: typeof e.createdAt === 'number' ? e.createdAt : 0,
       updatedAt: typeof e.updatedAt === 'number' ? e.updatedAt : 0,
     });
@@ -751,6 +892,63 @@ export function setActiveSlotId(id: string): boolean {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// hardcore-ironman: per-slot mode + death state
+// ---------------------------------------------------------------------------
+
+/** True when the active slot is an ironman slot (its runs are ironman). */
+export function isActiveSlotIronman(): boolean {
+  try {
+    return getActiveSlot().ironman === true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the active slot died in an ironman run — it can never start again. */
+export function isActiveSlotDead(): boolean {
+  try {
+    return getActiveSlot().dead === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mark the active slot as ironman (title-screen confirm step). One-way
+ * for the life of the slot: there is no un-mark — downgrading an ironman
+ * slot would let a player dodge permadeath after seeing the run.
+ */
+export function markActiveSlotIronman(): void {
+  try {
+    const st = loadSlots();
+    const active = getActiveSlot(st);
+    if (active.ironman === true) return;
+    active.ironman = true;
+    active.updatedAt = Date.now();
+    saveSlots(st);
+  } catch {
+    /* storage unavailable — best-effort like every other slot write */
+  }
+}
+
+/**
+ * Mark the active slot dead (ironman run ended in death). One-way and
+ * permanent: no API in this module clears `dead`.
+ */
+export function markActiveSlotDead(): void {
+  try {
+    const st = loadSlots();
+    const active = getActiveSlot(st);
+    if (active.dead === true) return;
+    active.dead = true;
+    active.updatedAt = Date.now();
+    saveSlots(st);
+  } catch {
+    /* storage unavailable — best-effort like every other slot write */
+  }
+}
+
 export function listSlots(): SaveSlot[] {
   return loadSlots().slots;
 }
@@ -765,6 +963,8 @@ export function slotSummaries(): SlotSummary[] {
     runs: Object.values(s.profile.runsPlayed).reduce((a, b) => a + (b || 0), 0),
     playtimeMin: Math.floor(Math.max(0, s.profile.totalPlaytime) / 60),
     updatedAt: s.updatedAt,
+    ironman: s.ironman === true,
+    dead: s.dead === true,
   }));
 }
 
@@ -876,7 +1076,10 @@ export function saveSlotSettings(s: SettingsData): void {
  * import cycle. Settings.ts merges these over its own defaults anyway.
  */
 function defaultSlotSettings(): SettingsData {
-  return { volume: 0.8, muted: false, quality: 'auto', tier: 'auto', floatingText: true };
+  return {
+    volume: 0.8, muted: false, quality: 'auto', tier: 'auto', floatingText: true,
+    musicEnabled: true, sfxEnabled: true, musicVolume: 0.8, sfxVolume: 0.8,
+  };
 }
 
 /** Local calendar date as YYYY-MM-DD (local timezone — "today" for the player). */

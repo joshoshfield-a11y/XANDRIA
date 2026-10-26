@@ -8,6 +8,7 @@ import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import { resolveEliteChance } from '../engine/game/eliteAffixes';
 import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
@@ -27,7 +28,7 @@ import {
   registerEnemyAssets,
 } from './campaign';
 import { AssetRegistry } from '../engine/game/Assets';
-import { snapshotLoadoutBase } from '../engine/game/Profile';
+import { snapshotLoadoutBase, loadProfile, saveProfile } from '../engine/game/Profile';
 import { isTouchDevice } from '../engine/game/TouchControls';
 import {
   VariantDirector,
@@ -50,6 +51,8 @@ import { QuestManager, buildQuestPool, resolveQuestsEnabled } from '../engine/ga
 import { buildSideQuestPool } from '../engine/game/sidequests';
 import { QuestTalkSession } from '../engine/game/questTalk';
 import { QuestTracker } from '../engine/ui/QuestTracker';
+import { RadiantBoard } from '../engine/game/radiantQuests';
+import { RadiantBoardPanel } from '../engine/ui/RadiantBoardPanel';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
@@ -57,7 +60,13 @@ import { ensureSetItemDefs } from '../engine/game/setBonuses';
 import { ensureEnchantItemDefs } from '../engine/game/enchantments';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { DeployablesManager } from '../engine/game/deployables';
+import { CompanionsManager } from '../engine/game/companions';
+import { CompanionPanel } from '../engine/ui/CompanionPanel';
+import { CampManager, CampInteractionSession } from '../engine/game/camp';
+import { MountManager } from '../engine/game/mounts';
+import { MountPanel } from '../engine/ui/MountPanel';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit } from '../engine/game/crit';
 import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
@@ -260,6 +269,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
     ngPlus: () => engine.getNgPlusCycle(),
+    // UPGRADE LOOP (elite-affixes): spec elite chance (default 0 = no elites).
+    eliteChance: () => resolveEliteChance(spec),
 
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
@@ -276,6 +287,24 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // the melee convention (ctrl.yaw + PI), matching avatar.melee().
   const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
     damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
+    // CRIT-SYSTEM: ability crits scale with equipped weapon tier + smithing rank.
+    critCtx: () => ({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }),
+  });
+  // UPGRADE LOOP (mounts): player-scoped mount manager — rides the live
+  // object across portal transitions (NOT a portal entity; the avatar
+  // persists across transitions) and persists active mount + stamina to
+  // the save-slot profile (ProfileData.mounts) so save/reload restores
+  // the ride. The panel is built below (after skillsPanel) so its modal
+  // guard can reference the other panels; the hoisted binding lets the
+  // earlier update loop reference it too.
+  let mountsPanel: MountPanel | null = null;
+  const mounts = new MountManager({
+    engine,
+    playerPos: () => avatar.ctrl.position,
+    playerYaw: () => avatar.ctrl.yaw,
+    loadPersist: () => loadProfile().mounts,
+    savePersist: (p) => { const prof = loadProfile(); prof.mounts = p; saveProfile(prof); },
+    toast: (m) => engine.hud.toast(m),
   });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
@@ -297,6 +326,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // is player-scoped, so sell credits land in the same balance the shop
     // and kill-drops use.
     sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
+    // CRIT-SYSTEM: inventory panel's CRIT STATS section reads smithing rank here.
+    smithingRank: () => skills.rankOf('smithing'),
   });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -343,6 +374,10 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // references it, and the manager notifies during its own construction
   // (refreshTracker in the constructor), so the binding must exist first.
   let talkSession: QuestTalkSession | null = null;
+  // radiant-quests wave: hoisted so the manager's onQuestsChanged thunk
+  // (which syncs the board) can reference them before construction.
+  let radiantBoard: RadiantBoard | null = null;
+  let radiantBoardPanel: RadiantBoardPanel | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -373,10 +408,33 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         // quest wave: an open quest dialogue live-refreshes when its quest
         // completes underneath it (talk objective fired on open). The thunk
         // is lazy — talkSession is constructed just below.
-        onQuestsChanged: () => talkSession?.refreshOpenDialogue(),
+        onQuestsChanged: () => { talkSession?.refreshOpenDialogue(); radiantBoard?.sync(); radiantBoardPanel?.render(); },
       })
     : null;
   engine.questManager = quests;
+  // radiant-quests wave: the endless board over the same manager. Offers
+  // generate from the live player level + portal world seed (not the spec
+  // seed alone), register as available radiant defs, and re-roll
+  // deterministically when a slot is abandoned or turned in. Accept /
+  // abandon / turn-in all ride the manager's existing methods, so the
+  // story/side lifecycle is untouched.
+  radiantBoard = questsEnabled && quests
+    ? new RadiantBoard({
+        manager: quests,
+        spec,
+        getPlayerLevel: () => prog.level,
+        getMapSeed: () => engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onChanged: () => radiantBoardPanel?.render(),
+      })
+    : null;
+  radiantBoardPanel = questsEnabled && radiantBoard
+    ? new RadiantBoardPanel({
+        container: engine.container,
+        board: () => radiantBoard,
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+      })
+    : null;
+
   // achievements wave: player-scoped achievement manager (observe-only).
   // Built here so the station session's onCrafted chain below can feed it
   // crafts; the codex panel is constructed after the modal sessions.
@@ -439,16 +497,62 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // time-limited; the consumed kits are already gone from the inventory).
   // The deployable item defs + recipes ride ensureCraftingItemDefs above
   // (craftedItemDefs), so this manager only exists when crafting is on.
+  // UPGRADE LOOP (companion-system): the companion manager is built
+  // BEFORE the deployables manager so the campfire heal callback can
+  // also heal the following companion (the heal-at-campfire hook).
+  // The manager itself is constructed after deployables (it reads the
+  // live campfire roster); the heal callback below closes over the
+  // `companions` binding, which is assigned before any tick runs.
+  let companions: CompanionsManager | null = null;
   const deployables = new DeployablesManager(engine, {
     getPlayerPos: () => avatar.ctrl.position,
     getEnemies: () => enemies.enemies,
-    healPlayer: (n) => avatar.heal(n),
+    healPlayer: (n) => { avatar.heal(n); companions?.healActive(n); },
     toast: (m) => engine.hud.toast(m),
     inventory: () => itemKit?.inventory ?? null,
     enabled: craftingEnabled,
     mapSeed: spec.meta.seed,
   });
   engine.portalEntities.register(deployables);
+  // UPGRADE LOOP (companion-system): data-driven companion followers.
+  // Roster is player-scoped (profile, active save slot) and survives
+  // portal travel + save/reload; only the rendered follower is
+  // map-local (portalEntities id 'companions'). Initial spawn runs
+  // here for the first map; PortalTransition calls spawnForMap on
+  // later arrivals.
+  let restoredCompanions: import('../engine/game/companions').CompanionSave | null = null;
+  try { restoredCompanions = loadProfile().companions; } catch { restoredCompanions = null; }
+  companions = new CompanionsManager(engine, {
+    getPlayerPos: () => avatar.ctrl.position,
+    getEnemies: () => enemies.enemies,
+    healPlayer: (n) => avatar.heal(n),
+    toast: (m) => engine.hud.toast(m),
+    campfireLive: () => deployables.deployables.some((d) => d.def.id === 'campfire' && !d.retiring),
+    onChange: (save) => {
+      try { const p = loadProfile(); p.companions = save; saveProfile(p); } catch { /* never break play */ }
+    },
+    initial: restoredCompanions,
+    mapSeed: spec.meta.seed,
+  });
+  engine.portalEntities.register(companions);
+  companions.spawnForMap(spec.meta.seed);
+  // UPGRADE LOOP (player-camp): one camp site per map (seeded position,
+  // discovered on arrival), data-driven structures paid from materials,
+  // player-scoped storage chest in the save-slot profile, rest point,
+  // workbench buff. Map-local lifecycle via engine.portalEntities
+  // (id 'camp') — departure despawns the props, arrival rebuilds the
+  // identical site + persisted structures; the chest contents never
+  // despawn (profile). The session is built below (after talkSession)
+  // so its modal chain can reference it; the hoisted binding lets the
+  // earlier sessions' chains reference it too.
+  let campSession: CampInteractionSession | null = null;
+  const camp = new CampManager(engine, {
+    inventory: () => itemKit?.inventory ?? null,
+    restoreHealth: () => avatar.heal(avatar.maxHealth),
+    toast: (m) => engine.hud.toast(m),
+  });
+  engine.portalEntities.register(camp);
+  camp.spawnForMap(spec.meta.seed);
   const stationSession = craftingEnabled
     ? new CraftingInteractionSession(engine, stations, {
         recipes: () => buildRecipePool(spec),
@@ -470,7 +574,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         toast: (m) => engine.hud.toast(m),
         // quest wave: the quest dialogue owns E while open so the panel
         // can't open behind it
-        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+        // player-camp wave: the camp panel likewise owns input
+        isModalOpen: () => (talkSession?.isDialogueOpen ?? false) || (campSession?.isPanelOpen ?? false),
       })
     : null;
   // vendor-economy wave: the shop panel (buy/sell tabs, seeded per-map
@@ -486,7 +591,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     defs: () => spec.custom?.items?.defs ?? {},
     vendorDefs: () => vendorDefs,
     toast: (m) => engine.hud.toast(m),
-    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false),
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false) || (campSession?.isPanelOpen ?? false),
     // factions-reputation wave: vendor -> faction mapping for the
     // standing price factor, and the trade hook for standing gains.
     standingOf: (vendorId) => {
@@ -533,8 +638,17 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         }),
       })
     : null;
-  const gatheringSession = new GatheringInteractionSession(engine, gathering, {
+  // UPGRADE LOOP (player-camp): the [E] Visit camp prompt + camp panel.
+  // Built after talkSession (its chain references the dialogue) and
+  // before the gathering/event sessions (their chains reference it).
+  campSession = new CampInteractionSession(engine, camp, {
+    inventory: () => itemKit?.inventory ?? null,
+    backpackItems: () => [...new Set((itemKit?.inventory?.getBackpack() ?? []).filter((s) => s).map((s) => s!.itemId))],
+    defName: (id) => spec.custom?.items?.defs?.[id]?.name ?? id,
     isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false) || shopPanel.isOpen,
+  });
+  const gatheringSession = new GatheringInteractionSession(engine, gathering, {
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false) || (talkSession?.isDialogueOpen ?? false) || shopPanel.isOpen || (campSession?.isPanelOpen ?? false),
   });
   // dynamic-events wave: seeded world events (ambushes, wandering
   // merchants, supply caches, elite patrols), map-local lifecycle via
@@ -555,7 +669,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   events.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
   const eventSession = new EventInteractionSession(engine, events, {
     isModalOpen: () => (stationSession?.isPanelOpen ?? false)
-      || (talkSession?.isDialogueOpen ?? false) || tradePanel.isOpen,
+      || (talkSession?.isDialogueOpen ?? false) || tradePanel.isOpen || (campSession?.isPanelOpen ?? false),
     openTrade: (defId, index) => {
       const ev = events.events.find((e) => e.plan.defId === defId && e.plan.index === index);
       if (!ev?.merchant || !ev.def.merchant || !itemKit?.inventory) return;
@@ -592,6 +706,13 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         isModalOpen: () => stationSession?.isPanelOpen ?? false,
       })
     : null;
+  // UPGRADE LOOP (companion-system): the companion panel (N key /
+  // COMPANIONS chip). Never opens while the crafting panel owns input.
+  const companionPanel = new CompanionPanel({
+    container: engine.container,
+    manager: () => companions,
+    isModalOpen: () => stationSession?.isPanelOpen ?? false,
+  });
   // achievements wave: the achievement codex panel (J key / trophy chip).
   // Never opens while the crafting panel (or quest dialogue, where one
   // exists) owns input.
@@ -609,16 +730,28 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     isModalOpen: () => stationSession?.isPanelOpen ?? false,
     otherOpen: () => skillsPanel?.isOpen ?? false,
   });
+  // UPGRADE LOOP (mounts): the mounts panel (N key / MOUNTS chip toggle).
+  // Never opens while another modal owns input; the manager above owns
+  // the state, this panel is only the view.
+  mountsPanel = new MountPanel({
+    container: engine.container,
+    mounts: () => mounts,
+    isModalOpen: () => (stationSession?.isPanelOpen ?? false)
+      || (talkSession?.isDialogueOpen ?? false) || shopPanel.isOpen
+      || (skillsPanel?.isOpen ?? false) || (bestiaryPanel?.isOpen ?? false),
+  });
   assets.register('player.body', { kind: 'player', roots: [avatar.ctrl.rig.group] });
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
   wrapShieldDamage(engine, avatar, fx); // aegis shield pickup absorbs damage
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
   // Campaign: projectile damage scales with the damage upgrade multiplier.
+  // CRIT-SYSTEM: friendly projectiles roll crits on their own seeded stream.
+  const projCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_PROJECTILE_SALT) >>> 0);
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); engine.juice.spawnText(engine.camera, point, 'playerDamage', p.damage * prog.damageMult()); }
+      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -757,6 +890,15 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // (+sin,+cos): offset by PI so W walks away from the camera
     avatar.ctrl.camYaw = camRig.yaw + Math.PI;
     avatar.update(dt, t);
+    // UPGRADE LOOP (mounts): stamina tick + speed scalar. Moving = any
+    // movement-axis input; the scalar is the mount's only movement
+    // effect (stacks with sprint/boost in the controller).
+    {
+      const ax = engine.input.axes;
+      const moving = Math.hypot(ax.x, ax.y) > 0.1;
+      mounts.update(dt, moving);
+      avatar.ctrl.speedScalar = mounts.speedMultiplier();
+    }
     // COMBAT-ABILITIES: tick after the controller's velocity write so the
     // dash-strike velocity override survives the frame; poll hotkeys/touch.
     abilities.update(dt);
@@ -769,6 +911,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     eventSession.update(); // dynamic-events wave: [E] Open cache / Trade prompt
     stationSession?.update(dt); // crafting wave (C): [E] Use prompt + crafting panel
     talkSession?.update(dt); // quest wave: [E] Talk prompt + quest dialogue + requires/produces refresh
+    campSession?.update(); // player-camp wave: [E] Visit camp prompt + camp panel
     quests?.update(dt); // quest wave: explore objectives read the portal transition counter
     // vendor-economy wave: shop stock is map-local (seeded per map), so a
     // portal arrival ALWAYS closes the shop — unconditional (not
@@ -778,10 +921,12 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       shopPanel.hide();
     }
 
-    // attack input (melee damage scales with the damage upgrade multiplier)
+    // attack input (melee damage scales with the damage upgrade multiplier;
+    // player-camp wave: the workbench buff adds +10% while active, 1.0
+    // otherwise — byte-identical behavior with no buff)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
       if (spec.player.weapon === 'sword' || spec.player.weapon === 'none') {
-        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult() * (itemKit?.damageMult() ?? 1));
+        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult() * (itemKit?.damageMult() ?? 1) * camp.workbenchDamageMult(), { tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') });
       } else {
         // shoot toward camera forward
         const dir = new THREE.Vector3();
@@ -801,6 +946,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     if (engine.input.justPressed('deploy') && engine.state === 'playing'
       && !(stationSession?.isPanelOpen ?? false)
       && !(talkSession?.isDialogueOpen ?? false)
+      && !(campSession?.isPanelOpen ?? false)
+      && !(mountsPanel?.isOpen ?? false)
       && !shopPanel.isOpen) {
       deployables.tryDeploy();
     }
@@ -815,12 +962,18 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // auras and assigns lure targets before EnemyManager.update reads
     // them, and submits deployable instances into the same buckets.
     deployables.update(dt);
+    // UPGRADE LOOP (companion-system): companion follow/attack/heal ticks
+    // run before EnemyManager.update so companion kills land through the
+    // existing onDeath path before the enemy roster sweep.
+    companions?.update(dt);
     enemies.update(dt, avatar.ctrl.position, t);
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
     vendorManager.update(dt); // vendor-economy wave: merchants tick (same instancer frame)
     gathering.update(dt); // crafting wave (B): static node submits into the shared instancer frame
     stations.update(dt); // crafting wave (C): static station submits into the shared instancer frame
     events.update(dt); // dynamic-events wave: merchant/cache submits into the shared instancer frame
+    camp.update(); // player-camp wave: site + built-structure submits into the shared instancer frame
+    mounts.submitFrame(); // mounts wave: the ridden mount submits into the shared instancer frame
     inst.endFrame();
     variants.update(dt, avatar.ctrl.position, t);
     projectiles.update(dt);
@@ -874,5 +1027,5 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather, deployables, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather, deployables, companions, companionPanel, camp, campSession, mounts, mountsPanel, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel };
 }

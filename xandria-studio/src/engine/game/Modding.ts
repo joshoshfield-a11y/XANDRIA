@@ -70,6 +70,12 @@ export interface HookPayloads {
    * portal transition goes through).
    */
   onPortalArrive: { mapSeed: number };
+  /**
+   * UPGRADE LOOP (audio-system): a completed quest was turned in.
+   * Emitted by QuestTalkSession after a successful turnIn — observe-only,
+   * zero taps means zero behavior change.
+   */
+  onQuestTurnIn: { questId: string };
 }
 
 export type HookName = keyof HookPayloads;

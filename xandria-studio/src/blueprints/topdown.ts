@@ -14,6 +14,7 @@ import { ensureSetItemDefs } from '../engine/game/setBonuses';
 import { ensureEnchantItemDefs } from '../engine/game/enchantments';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
+import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit } from '../engine/game/crit';
 import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
@@ -35,9 +36,12 @@ import {
 import { ShopPanel } from '../engine/ui/ShopPanel';
 import { buildSideQuestPool } from '../engine/game/sidequests';
 import { QuestTracker } from '../engine/ui/QuestTracker';
+import { RadiantBoard } from '../engine/game/radiantQuests';
+import { RadiantBoardPanel } from '../engine/ui/RadiantBoardPanel';
 import { FactionStandings, localStorageFactionsAdapter } from '../engine/game/factions';
 import { StandingsPanel } from '../engine/ui/StandingsPanel';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
+import { resolveEliteChance } from '../engine/game/eliteAffixes';
 import { NpcInstancer } from '../engine/game/npcInstancing';
 import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
@@ -216,6 +220,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
     ngPlus: () => engine.getNgPlusCycle(),
+    // UPGRADE LOOP (elite-affixes): spec elite chance (default 0 = no elites).
+    eliteChance: () => resolveEliteChance(spec),
 
     density: resolveEnemyDensity(spec, engine.tiers.tier),
   });
@@ -228,6 +234,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   // cursor (set in onUpdate), so the melee-convention aim is the aim dir.
   const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
     damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
+    // CRIT-SYSTEM: ability crits scale with equipped weapon tier + smithing rank.
+    critCtx: () => ({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }),
   });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
@@ -270,6 +278,8 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   ensureEnchantItemDefs(spec);
   const itemKit: BlueprintItemKit | null = buildItemKit(engine, spec, avatar, {
     sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
+    // CRIT-SYSTEM: inventory panel's CRIT STATS section reads smithing rank here.
+    smithingRank: () => skills.rankOf('smithing'),
   });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -298,6 +308,10 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
   // UPGRADE LOOP (blueprint-rollout): hoisted for the shop panel's
   // isModalOpen chain (assigned below, after the panel is constructed).
   let talkSession: QuestTalkSession | null = null;
+  // radiant-quests wave: hoisted so the manager's onQuestsChanged thunk
+  // (which syncs the board) can reference them before construction.
+  let radiantBoard: RadiantBoard | null = null;
+  let radiantBoardPanel: RadiantBoardPanel | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -324,6 +338,7 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
         // factions-reputation wave: standing gate + turn-in reward.
         standingOf: (factionId) => standings.standingOf(factionId),
         onQuestTurnedIn: (def) => standings.onQuestComplete(def),
+        onQuestsChanged: () => { radiantBoard?.sync(); radiantBoardPanel?.render(); },
       })
     : null;
   // factions-reputation wave: the standings panel (event-driven) + the
@@ -337,6 +352,29 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     quests?.refreshStandingGates();
   };
   engine.questManager = quests;
+  // radiant-quests wave: the endless board over the same manager. Offers
+  // generate from the live player level + portal world seed (not the spec
+  // seed alone), register as available radiant defs, and re-roll
+  // deterministically when a slot is abandoned or turned in. Accept /
+  // abandon / turn-in all ride the manager's existing methods, so the
+  // story/side lifecycle is untouched.
+  radiantBoard = questsEnabled && quests
+    ? new RadiantBoard({
+        manager: quests,
+        spec,
+        getPlayerLevel: () => prog.level,
+        getMapSeed: () => engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onChanged: () => radiantBoardPanel?.render(),
+      })
+    : null;
+  radiantBoardPanel = questsEnabled && radiantBoard
+    ? new RadiantBoardPanel({
+        container: engine.container,
+        board: () => radiantBoard,
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+      })
+    : null;
+
   // achievements wave: player-scoped achievement manager (observe-only).
   // Built here so the station session's onCrafted chain below can feed it
   // crafts; the codex panel is constructed after the modal sessions.
@@ -501,10 +539,12 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
 
   // FIX 1: wire projectile impacts to damage (guns dealt zero damage — onHit was never assigned).
   // Campaign: projectile damage scales with the damage upgrade multiplier.
+  // CRIT-SYSTEM: friendly projectiles roll crits on their own seeded stream.
+  const projCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_PROJECTILE_SALT) >>> 0);
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult() * (itemKit?.damageMult() ?? 1), point); combatPulse(); engine.juice.spawnText(engine.camera, point, 'playerDamage', p.damage * prog.damageMult() * (itemKit?.damageMult() ?? 1)); }
+      if (target) { const raw = p.damage * prog.damageMult() * (itemKit?.damageMult() ?? 1); const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -659,5 +699,5 @@ export function buildTopDown(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel };
 }

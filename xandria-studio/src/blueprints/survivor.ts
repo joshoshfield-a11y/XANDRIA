@@ -17,6 +17,7 @@ import { Projectiles } from '../engine/game/Projectiles';
 import { Pickups } from '../engine/game/Pickups';
 import { Progression } from '../engine/game/Progression';
 import { wireCombatAbilities } from '../engine/game/combatAbilities';
+import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit, BASE_CRIT_CTX } from '../engine/game/crit';
 import type { LevelGain } from '../engine/game/progressionCurve';
 import {
   makeCampaignObjectives,
@@ -124,10 +125,12 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   notifyLevelUp = makeLevelUpFlow(engine, spec, prog, avatar);
 
   // friendly projectiles damage enemies (scaled by damage upgrades)
+  // CRIT-SYSTEM: friendly projectiles roll crits on their own seeded stream.
+  const projCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_PROJECTILE_SALT) >>> 0);
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { target.damage(p.damage * prog.damageMult(), point); combatPulse(); engine.juice.spawnText(engine.camera, point, 'playerDamage', p.damage * prog.damageMult()); }
+      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll(BASE_CRIT_CTX); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
