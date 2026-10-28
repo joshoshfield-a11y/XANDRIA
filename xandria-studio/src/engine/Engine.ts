@@ -35,8 +35,11 @@ import { deriveWorldTier } from './world/worldTiers';
 import { portalsEnabled } from '@spec';
 import { cameraFarForWorldSize, cameraNearForWorldSize, FAR_TERRAIN_MIN_SIZE } from './gfx/FarField';
 import { HUD, type RunStats } from './game/HUD';
+import { PhotoModeController } from './game/PhotoMode';
 /** UPGRADE LOOP (minimap-fog): observe-only minimap with seeded fog-of-war. */
 import { Minimap } from './ui/Minimap';
+/** UPGRADE LOOP (quest-waypoints): observe-only quest waypoint presentation. */
+import { QuestWaypoints } from './game/questWaypoints';
 import { AssetBridge } from './gfx/AssetBridge';
 import { Settings } from './game/Settings';
 import { Juice } from './game/Juice';
@@ -49,6 +52,7 @@ import { TutorialManager } from './game/Tutorial';
 import type { QuestManager } from './game/quests';
 import type { Wallet } from './game/economy';
 import type { AchievementManager } from './game/achievements';
+import type { DialogueState } from './game/dialogue';
 import { showIntroCard } from '../blueprints/campaign';
 import type { PlayerAvatar } from '../blueprints/common';
 import {
@@ -74,6 +78,12 @@ import {
   type RunJournalEntry,
 } from './game/Profile';
 import { ironmanScoreMult } from './game/ironman';
+/**
+ * UPGRADE LOOP (save-export-import): backup serialization + strict
+ * import validation. Pure logic in SaveExport.ts — the engine only
+ * triggers the browser download and surfaces the result status.
+ */
+import { importSaveExport, serializeActiveSlot } from './game/SaveExport';
 import type { Progression } from './game/Progression';
 import { JournalPanel } from './ui/JournalPanel';
 import { CustomizationPanel } from './ui/CustomizationPanel';
@@ -105,6 +115,12 @@ import {
   todayUtcDate,
   type DailyChallenge,
 } from './game/dailyChallenges';
+import {
+  combineMutatorEffects,
+  mutatorLabel,
+  mutatorsForDate,
+  type MutatorEffect,
+} from './game/dailyMutators';
 import {
   GauntletDirector,
   gauntletBoard,
@@ -147,12 +163,27 @@ export class Engine {
   readonly particles: Particles;
   readonly hud: HUD;
   /**
+   * UPGRADE LOOP (photo-mode): presentation-only orbit camera + HUD-free
+   * framing. Active only while a run plays; entering freezes the sim
+   * deterministically (see PhotoMode.ts) and exiting restores the exact
+   * prior camera and overlay state. Never affects gameplay.
+   */
+  readonly photoMode: PhotoModeController;
+  /**
    * UPGRADE LOOP (minimap-fog): observe-only minimap (terrain shape, player
    * marker, discovered landmarks, event beacons, portal exits) with seeded
    * fog-of-war. Created once at construction like the HUD; fog state is
    * per-map and cleared by resetRun(). Never affects gameplay.
    */
   readonly minimap: Minimap;
+  /**
+   * UPGRADE LOOP (quest-waypoints): observe-only quest waypoint + compass
+   * presentation (in-world beacon, minimap marker, edge compass). Created
+   * once at construction like the minimap; cleared by resetRun(). The
+   * QuestManager itself is blueprint-owned and may be null until the
+   * blueprint builds — the waypoints read it lazily every scan tick.
+   */
+  waypoints: QuestWaypoints | null = null;
   readonly rng: Rng;
   readonly postfx: PostFX;
   readonly settings: Settings;
@@ -247,6 +278,15 @@ export class Engine {
    */
   questManager: QuestManager | null = null;
   /**
+   * Dialogue-branching wave: the player-scoped dialogue state. Set by
+   * the blueprint when quests/dialogue are enabled; null otherwise.
+   * Deliberately NOT part of portalEntities — visited nodes, choices
+   * and flags are player-scoped, not map-local, so they survive portal
+   * travel by construction (see engine/game/dialogue.ts). Read by
+   * PortalManager.portalParts for snapshot/restore.
+   */
+  dialogueState: DialogueState | null = null;
+  /**
    * Vendor-economy wave: the player-scoped currency wallet. Set by the
    * blueprint; null when the economy is off. Deliberately NOT part of
    * portalEntities — the balance is player-scoped, not map-local, so it
@@ -295,6 +335,13 @@ export class Engine {
    * run-completion path. No RNG reads here — mode is data, not chance.
    */
   private ironmanRun = false;
+  /**
+   * UPGRADE LOOP (save-export-import): outcome of the last slot
+   * export/import, shown on the title screen's backup status line.
+   * Cleared only by the next export/import — slot switches keep it, so
+   * an import's confirmation survives the re-render that follows it.
+   */
+  private slotBackupStatus: string | null = null;
   /**
    * UPGRADE LOOP (hardcore-ironman): true when the live ironman run
    * ended by PLAYER DEATH (set by PlayerAvatar.die()'s ironman branch
@@ -347,6 +394,14 @@ export class Engine {
   private challenge: DailyChallenge | null = null;
   /** goal tracker for the active challenge run; null outside challenge runs */
   private challengeTracker: ChallengeGoalTracker | null = null;
+  /**
+   * UPGRADE LOOP (daily-mutators): the active daily run's mutator ids,
+   * derived from dailyDate at startDailyRun time (dailyMutators.ts).
+   * Empty outside daily runs — blueprints read this via
+   * getDailyMutators() at spawn time, so a stale set can never leak into
+   * a normal run; startRunFromTitle/toTitle clear it with the challenge.
+   */
+  private dailyMutators: string[] = [];
   /** UTC YYYY-MM-DD key while a gauntlet run is active; null otherwise */
   private gauntletDate: string | null = null;
   /**
@@ -448,6 +503,10 @@ export class Engine {
     // UPGRADE LOOP (minimap-fog): the minimap observes avatar/terrain/portal
     // entities via the engine — construction is side-effect-free beyond DOM.
     this.minimap = new Minimap(container, this);
+    // UPGRADE LOOP (quest-waypoints): waypoint presentation observes the
+    // blueprint's QuestManager lazily; construction is side-effect-free
+    // beyond DOM + beacon meshes (see game/questWaypoints.ts).
+    this.waypoints = new QuestWaypoints(container, this);
     // Tutorial wave: observe-only first-run guide (profile-gated, Studio
     // force/skip via custom.tutorial.mode). Taps engine.hooks, which
     // survive restart(), so mid-run restarts keep tutorial progress.
@@ -459,6 +518,17 @@ export class Engine {
     this.applyAccessibility();
     this.touch = new TouchControls(container, this.input, spec.meta.genre);
     this.hud.setTouchMode(this.touch.active);
+    // UPGRADE LOOP (photo-mode): presentation-only orbit camera. Built
+    // after the HUD/touch overlays exist so its hide-snapshot covers them;
+    // the avatar is read lazily (null until the blueprint builds it).
+    this.photoMode = new PhotoModeController({
+      container,
+      camera: this.camera,
+      canvas: this.renderer.domElement,
+      getTarget: () => this.playerAvatar?.ctrl.position ?? null,
+      canEnter: () => this.state === 'playing' && this.playerAvatar !== null,
+      clearInput: () => this.input.reset(),
+    });
     this.postfx = new PostFX(this.renderer, this.scene, this.camera, spec, {
       // Graphics wave 2 (E): desktop tier gets the heavier-post bloom look.
       bloomBoost: this.tiers.flags.bloomBoost,
@@ -970,6 +1040,25 @@ export class Engine {
   }
 
   /**
+   * UPGRADE LOOP (daily-mutators): the live daily run's mutator ids
+   * (a copy — callers never mutate engine state). Empty outside daily
+   * runs. Blueprints wire this into EnemyManager via
+   * `mutators: () => engine.getDailyMutators()`.
+   */
+  getDailyMutators(): string[] {
+    return [...this.dailyMutators];
+  }
+
+  /**
+   * UPGRADE LOOP (daily-mutators): the combined effect of the live daily
+   * run's mutators (identity outside daily runs). Pure table product —
+   * no RNG, no wall clock.
+   */
+  getDailyMutatorEffect(): MutatorEffect {
+    return combineMutatorEffects(this.dailyMutators);
+  }
+
+  /**
    * UPGRADE LOOP (difficulty-modes): true when any live enemy is hostile
    * (chasing/attacking). Duck-typed off portalEntities so Engine never
    * imports EnemyAI (EnemyAI already imports Engine — a value import would
@@ -1190,6 +1279,10 @@ export class Engine {
       onRenameSlot: (id, name) => { renameSlot(id, name); this.showTitle(); },
       onDeleteSlot: (id) => { deleteSlot(id); afterSlotSwitch(); this.showTitle(); },
       onNewSlot: () => { createSlot(); afterSlotSwitch(); this.showTitle(); },
+      // UPGRADE LOOP (save-export-import): backup row on the slot picker.
+      slotBackupStatus: this.slotBackupStatus ?? undefined,
+      onExportSlot: () => this.exportActiveSlot(),
+      onImportSlot: (text) => this.importBackupSlot(text),
       merit: profile.merit,
       modifiers: MODIFIERS.map((m) => ({
         id: m.id,
@@ -1205,8 +1298,12 @@ export class Engine {
         ? `PLAYED — ${dailyResult.score.toLocaleString('en-US')} PTS`
         : `DAILY ${today} — ${goalLabel(challenge.goal)}`,
       dailyPlayed: !!dailyResult,
-      dailyChallengeLine: `${goalLabel(challenge.goal)} · ${loadoutLabel(challenge.loadout)}`,
-      dailyBoard: challengeBoard(profile, today),
+      dailyChallengeLine: `${goalLabel(challenge.goal)} · ${loadoutLabel(challenge.loadout)} · ⚡ ${mutatorLabel(mutatorsForDate(today))}`,
+      dailyBoard: challengeBoard(profile, today).map((r) => ({
+        ...r,
+        mutators: mutatorsForDate(r.date),
+        mutatorText: mutatorLabel(mutatorsForDate(r.date)),
+      })),
       onDaily: () => this.startDailyRun(),
       gauntletLabel: gauntlet ? `GAUNTLET ${today}` : undefined,
       gauntletLine: gauntlet
@@ -1221,6 +1318,51 @@ export class Engine {
       slotDead,
       onStartIronman: () => this.startIronmanRun(),
     });
+  }
+
+  /**
+   * UPGRADE LOOP (save-export-import): download the active slot as a
+   * JSON backup file. The download is a plain anchor click (no dialog
+   * APIs — WebView-safe); failures surface on the backup status line
+   * instead of throwing into the title screen.
+   */
+  private exportActiveSlot(): void {
+    try {
+      const { filename, text } = serializeActiveSlot();
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.slotBackupStatus = `Exported ${filename}`;
+    } catch {
+      this.slotBackupStatus = 'Export failed: the backup could not be created.';
+    }
+    this.showTitle();
+  }
+
+  /**
+   * UPGRADE LOOP (save-export-import): import backup text as a new slot.
+   * Validation + the new-slot landing live in SaveExport.importSaveExport
+   * (strict, never overwrites, never corrupts existing slots). A valid
+   * import activates the new slot, so its settings must be reloaded like
+   * any other slot switch; a rejected file leaves the picker exactly as
+   * it was, with the reason on the backup status line.
+   */
+  private importBackupSlot(text: string): void {
+    const res = importSaveExport(text);
+    if (res.ok) {
+      this.slotBackupStatus = `Imported as “${res.slot.name}”.`;
+      this.settings.reload();
+      this.applySettings();
+    } else {
+      this.slotBackupStatus = `Import failed: ${res.error}`;
+    }
+    this.showTitle();
   }
 
   /** Equip/unequip a purchased modifier, then re-render the title. */
@@ -1315,6 +1457,7 @@ export class Engine {
     this.restoreBaseSpec();
     this.dailyDate = null;
     this.challenge = null;
+    this.dailyMutators = [];
     this.challengeTracker?.disarm();
     this.challengeTracker = null;
     this.spec.meta.seed = this.baseSeed;
@@ -1352,6 +1495,9 @@ export class Engine {
     const challenge = generateDailyChallenge(dateStr);
     this.dailyDate = dateStr;
     this.challenge = challenge;
+    // UPGRADE LOOP (daily-mutators): the day's mutator set, derived from
+    // the same pinned date (dailyMutators.ts) — same set for every player.
+    this.dailyMutators = mutatorsForDate(dateStr);
     this.challengeTracker?.disarm();
     this.challengeTracker = new ChallengeGoalTracker(this, challenge);
     this.challengeTracker.arm();
@@ -1513,6 +1659,7 @@ export class Engine {
     this.gauntletDate = null;
     this.restoreBaseSpec();
     this.challenge = null;
+    this.dailyMutators = [];
     this.challengeTracker?.disarm();
     this.challengeTracker = null;
     this.spec.meta.seed = this.baseSeed;
@@ -1560,8 +1707,13 @@ export class Engine {
       // out of dailyResults. The attempt is consumed either way: disarm the
       // goal tracker.
       if (this.dailyDate && this.challenge) {
+        // UPGRADE LOOP (daily-mutators): the attempt's recorded score is
+        // the mutator-multiplied score (table product, daily branch
+        // only). The live engine.score, the goal tracker, and the generic
+        // run history above stay raw — the multiplier prices the day's
+        // hardship on the board, it does not rewrite the run.
         recordDailyResult(p, this.dailyDate, {
-          score: Math.round(this.score),
+          score: Math.round(this.score * this.getDailyMutatorEffect().scoreMult),
           kills: this.challengeTracker?.kills ?? stats.kills ?? 0,
           timeSeconds: this.elapsed,
           damageTaken: Math.round(this.damageTaken),
@@ -1622,7 +1774,13 @@ export class Engine {
     // (an Escape/P edge still pauses in ?test=1) working.
     const pauseEdge = this.input.justPressed('pause');
     const confirmEdge = this.input.justPressed('confirm');
-    if (this.state === 'playing' && !this.juice.hitStopActive()) {
+    // UPGRADE LOOP (photo-mode): while photo mode is active the sim is
+    // frozen — no physics, hooks, particles, HUD updates or clock
+    // advance — and the camera is driven by the photo controller below.
+    // The freeze is deterministic: nothing gameplay-related runs, so the
+    // state on exit is identical to the state on entry.
+    const photoFrozen = this.photoMode.active;
+    if (this.state === 'playing' && !photoFrozen && !this.juice.hitStopActive()) {
       // testMode: advance many sim steps per rendered frame so headless/SwiftShader
       // runs at full simulation speed regardless of render rate.
       const substeps = this.testMode ? 10 : 1;
@@ -1649,8 +1807,10 @@ export class Engine {
       this.hooks.emit('onTick', { dt, t: this.elapsed });
     }
     if (this.state === 'title' && confirmEdge) this.startRun();
-    if (pauseEdge) this.togglePause();
-    this.touch.setVisible(this.state === 'playing');
+    // UPGRADE LOOP (photo-mode): Escape/P exits photo mode instead of
+    // pausing — the pause menu must never open over a frozen frame.
+    if (pauseEdge) { if (photoFrozen) this.photoMode.exit(); else this.togglePause(); }
+    this.touch.setVisible(this.state === 'playing' && !photoFrozen);
     this.juice.update(dt, this.camera);
     this.sky.update(dt, this.camera.getWorldPosition(new THREE.Vector3()));
     // Stage-1 B: chunk streaming follows the player every frame (all states —
@@ -1661,11 +1821,18 @@ export class Engine {
       const ss = this.terrain.getStreamStats();
       perf.sampleStream(ss.loaded, ss.buildMs, ss.queue);
     }
+    // UPGRADE LOOP (photo-mode): drive the frozen-frame camera from the
+    // orbit state (the sim rig is skipped with the sim block above).
+    if (photoFrozen) this.photoMode.updateCamera();
     // screenshake: offset around the render only, never accumulates into the camera
     const off = this.juice.shakeOffset(this.shakeVec);
     this.camera.position.add(off);
     if (sampling) this.renderer.info?.reset();
     this.postfx.render();
+    // UPGRADE LOOP (photo-mode): screenshot capture reads the canvas in
+    // this same task, right after the render, so the drawing buffer is
+    // valid without preserveDrawingBuffer. No-op unless queued.
+    this.photoMode.consumeCapture();
     this.camera.position.sub(off);
     if (sampling) perf.sample(performance.now() - frameStart, physicsMs, this.renderer.info);
     this.input.endFrame();
@@ -1833,6 +2000,10 @@ export class Engine {
    * particles cleared, physics/scene/hooks restored.
    */
   private resetRun() {
+    // UPGRADE LOOP (photo-mode): a rebuild must never strand the frozen
+    // frame — exit first so overlays and the camera are restored before
+    // the blueprint tears the world down.
+    this.photoMode?.exit();
     // run-journal: drop the stale Progression ref before the rebuild — the
     // blueprint re-publishes engine.progression on build; genres without an
     // XP side leave it null so no XP leaks across runs.
@@ -1873,6 +2044,9 @@ export class Engine {
     // UPGRADE LOOP (minimap-fog): a fresh run replays the identical
     // exploration, so every map's fog + landmark discovery state is dropped.
     this.minimap.resetRun();
+    // UPGRADE LOOP (quest-waypoints): a fresh run re-resolves its
+    // waypoint from the fresh quest state.
+    this.waypoints?.resetRun();
     this.juice.reset();
     this.input.reset();
     // audio
@@ -1925,6 +2099,9 @@ export class Engine {
     this.audio.dispose();
     // UPGRADE LOOP (minimap-fog): remove the minimap DOM + key listener + hook tap.
     this.minimap.dispose();
+    // UPGRADE LOOP (quest-waypoints): remove compass DOM + beacon meshes.
+    this.waypoints?.dispose();
+    this.waypoints = null;
     this.journalPanel.dispose();
     this.assetBridge.dispose();
     // PORTALS-B: tear down the portal overlay + update hook.

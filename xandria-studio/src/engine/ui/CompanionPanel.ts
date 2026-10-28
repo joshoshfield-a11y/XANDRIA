@@ -20,6 +20,11 @@ import {
   companionDefOf,
   type CompanionsManager,
 } from '../game/companions';
+import {
+  COMPANION_REVIVE_COST,
+  COMPANION_STANCES,
+  type CompanionStance,
+} from '../game/companionCombat';
 
 export interface CompanionPanelOpts {
   container: HTMLElement;
@@ -29,6 +34,18 @@ export interface CompanionPanelOpts {
   manager: () => CompanionsManager | null;
   /** true while another modal owns input */
   isModalOpen?: () => boolean;
+  /**
+   * Revive price in scrap (companion-combat-depth). Defaults to
+   * COMPANION_REVIVE_COST; the blueprint passes the same constant.
+   */
+  reviveCost?: () => number;
+  /**
+   * Charge the revive price (blueprint wires Wallet.spend). Must
+   * return true only when the price was actually charged — the panel
+   * revives ONLY on a true return, so a failed payment never revives.
+   * Absent = revive button renders disabled (never free).
+   */
+  spendForRevive?: (cost: number) => boolean;
 }
 
 const AMBER = '#ffb545';
@@ -206,6 +223,27 @@ export class CompanionPanel {
       summon.setAttribute('data-companion-summon', entry.defId);
       if (!active) summon.addEventListener('click', () => { mgr.summon(entry.defId); this.renderCards(); });
       btnRow.append(summon);
+      // Stance row is built inside the active branch below and appended
+      // after btnRow so card order stays row -> desc -> buttons -> stance.
+      let stanceRow: HTMLElement | null = null;
+      // Fallen companions (0 HP, dismissed) revive from the panel for
+      // scrap — never auto-summoned, never free (see opts.spendForRevive).
+      if (!active && entry.hp <= 0) {
+        const cost = this.opts.reviveCost?.() ?? COMPANION_REVIVE_COST;
+        const revive = el(doc, 'button', [
+          'background:transparent', 'color:#8fe3a8', 'border:1px solid rgba(143,227,168,0.5)',
+          'border-radius:6px', 'padding:6px 12px', 'font-size:13px', 'font-weight:700',
+          'cursor:pointer', 'font-family:inherit', 'min-height:28px',
+        ].join(';'), `REVIVE (${cost} scrap)`);
+        revive.setAttribute('data-companion-revive', entry.defId);
+        const canPay = !!this.opts.spendForRevive;
+        if (!canPay) (revive as HTMLButtonElement).disabled = true;
+        else revive.addEventListener('click', () => {
+          if (this.opts.spendForRevive!(cost)) mgr.revive(entry.defId);
+          this.renderCards();
+        });
+        btnRow.append(revive);
+      }
       if (active) {
         const dismiss = el(doc, 'button', [
           'background:transparent', `color:${DIM}`, 'border:1px solid rgba(154,164,184,0.4)',
@@ -222,8 +260,32 @@ export class CompanionPanel {
         heal.setAttribute('data-companion-heal', entry.defId);
         heal.addEventListener('click', () => { mgr.healAtCampfire(); this.renderCards(); });
         btnRow.append(dismiss, heal);
+        // Stance row (companion-combat-depth): taunt draws aggro, guard
+        // halves damage and stops attacking, normal is the default.
+        stanceRow = el(doc, 'div', 'display:flex;gap:8px;flex-wrap:wrap;align-items:center');
+        const stanceLabel = el(doc, 'span', `font-size:12px;color:${DIM}`, `Stance: ${mgr.activeStance}`);
+        stanceLabel.setAttribute('data-companion-stance-label', entry.defId);
+        stanceRow.append(stanceLabel);
+        for (const stance of COMPANION_STANCES) {
+          const current = mgr.activeStance === stance;
+          const btn = el(doc, 'button', [
+            'background:transparent', `color:${current ? AMBER : DIM}`,
+            `border:1px solid ${current ? AMBER : 'rgba(154,164,184,0.4)'}`,
+            'border-radius:6px', 'padding:6px 12px', 'font-size:13px',
+            `font-weight:${current ? 700 : 400}`,
+            'cursor:pointer', 'font-family:inherit', 'min-height:28px',
+            'text-transform:uppercase',
+          ].join(';'), stance);
+          btn.setAttribute('data-companion-stance', stance);
+          if (!current) btn.addEventListener('click', () => {
+            mgr.setStance(stance as CompanionStance);
+            this.renderCards();
+          });
+          stanceRow.append(btn);
+        }
       }
-      card.append(row, desc, btnRow);
+      if (stanceRow) card.append(row, desc, btnRow, stanceRow);
+      else card.append(row, desc, btnRow);
       this.cardsEl.append(card);
     }
   }

@@ -221,3 +221,36 @@ describe('SkillsPanel', () => {
     expect(() => h.panel.dispose()).not.toThrow();
   });
 });
+
+describe('SkillsPanel synergies section', () => {
+  it('renders a SYNERGIES section with all rows LOCKED at rank 1', () => {
+    const h = makeHarness();
+    h.panel.show();
+    const t = texts(h.root).join('\n');
+    expect(t).toContain('SYNERGIES');
+    expect(t).toContain('LOCKED — Field Smith');
+    expect(t).toContain('LOCKED — Workshop Flow');
+    expect(t).toContain('LOCKED — Herbal Edge');
+    expect(t).toContain('LOCKED — Tempered Edge');
+    expect(t).toContain('LOCKED — Grand Artisan');
+    h.panel.dispose();
+  });
+
+  it('flips rows to ACTIVE when both ranks are reached, back to LOCKED on drop', () => {
+    const h = makeHarness();
+    h.panel.show();
+    h.skills.addXp('foraging', 60);
+    h.skills.addXp('smithing', 80);
+    h.panel.refresh();
+    let t = texts(h.root).join('\n');
+    expect(t).toContain('ACTIVE — Field Smith');
+    expect(t).toContain('LOCKED — Workshop Flow');
+    // Drop below the required ranks via the portal seam: the row flips back.
+    h.skills.portalRestore({ xp: { foraging: 0, smithing: 0, alchemy: 0 } });
+    h.panel.refresh();
+    t = texts(h.root).join('\n');
+    expect(t).toContain('LOCKED — Field Smith');
+    expect(t).not.toContain('ACTIVE — Field Smith');
+    h.panel.dispose();
+  });
+});

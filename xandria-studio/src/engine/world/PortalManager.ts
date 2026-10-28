@@ -189,6 +189,10 @@ export class PortalManager {
       // quests are disabled) — snapshot/restore keeps quest progress across
       // transitions even if a future flow ever rebuilds the blueprint.
       quests: this.engine.questManager,
+      // dialogue-branching wave: the blueprint's player-scoped dialogue
+      // state (null when dialogue is disabled) — snapshot/restore keeps
+      // visited nodes, choices and flags across blueprint rebuilds.
+      dialogue: this.engine.dialogueState,
       skills: null,
       // vendor-economy wave: the blueprint's player-scoped currency wallet
       // (null = economy off) — snapshot/restore keeps the balance across

@@ -23,6 +23,7 @@ import {
 import {
   type SkillDef,
   type SkillSystem,
+  SYNERGY_DEFS,
 } from '../game/skills';
 
 export interface SkillsPanelOpts {
@@ -213,6 +214,29 @@ export class SkillsPanel {
     for (const def of skills.defs()) {
       this.cardsEl.append(this.skillCard(doc, skills, def));
     }
+    this.cardsEl.append(this.synergySection(doc, skills));
+  }
+
+  /**
+   * SKILL-SYNERGIES: one additive section after the skill cards — every
+   * synergy in the table, ACTIVE when all its rank requirements hold,
+   * LOCKED otherwise. No new panel; rows only. Re-rendered with the
+   * cards on every show()/refresh(), so a rank-up flips a row live.
+   */
+  private synergySection(doc: Document, skills: SkillSystem): HTMLElement {
+    const section = el(doc, 'div', [
+      'border:1px solid rgba(255,255,255,0.09)', 'border-radius:8px',
+      'padding:10px 12px', 'display:flex', 'flex-direction:column', 'gap:6px',
+      'background:rgba(255,255,255,0.025)',
+    ].join(';'));
+    section.append(el(doc, 'div', `font-size:11px;font-weight:700;color:${DIM};letter-spacing:0.08em`, 'SYNERGIES'));
+    const active = new Set(skills.activeSynergies().map((d) => d.id));
+    for (const def of SYNERGY_DEFS) {
+      const isActive = active.has(def.id);
+      section.append(el(doc, 'div', `font-size:11.5px;color:${isActive ? UNLOCKED : DIM}`,
+        `${isActive ? 'ACTIVE' : 'LOCKED'} — ${def.name} (${def.requirementLine}) — ${def.effectLine}`));
+    }
+    return section;
   }
 
   private skillCard(doc: Document, skills: SkillSystem, def: SkillDef): HTMLElement {

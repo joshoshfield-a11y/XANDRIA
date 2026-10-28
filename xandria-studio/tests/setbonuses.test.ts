@@ -344,7 +344,7 @@ describe('master recipe (additive)', () => {
   });
 
   it('catalog grew by exactly one (no check-order or pool changes beyond the addition)', () => {
-    // 10 base + 3 tier-2 + 4 master + 1 set + 3 deployables = 21
-    expect(RECIPE_CATALOG_SIZE).toBe(21);
+    // 10 base + 3 tier-2 + 4 master + 1 set + 3 deployables + 2 gathering = 23
+    expect(RECIPE_CATALOG_SIZE).toBe(23);
   });
 });

@@ -55,7 +55,7 @@ import { voxelBoxCacheFor, paletteFor, voxelPart, type VoxelPalette, type VoxelG
 import type { Interactable } from './Interaction';
 import { InteractionPrompt } from '../ui/InteractionPrompt';
 import type { InventoryLike } from './items/Inventory';
-import { MAT_ORE, MAT_FIBER, MAT_SCRAP } from './crafting';
+import { MAT_ORE, MAT_FIBER, MAT_SCRAP, MAT_HERB, MAT_CRYSTAL } from './crafting';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 
 /**
@@ -68,36 +68,67 @@ import type { MapLocalEntitySystem } from '../world/MapEntities';
 export const GATHER_SALT = 0x43524146;
 
 /**
+ * THE node tuning table (upgrade loop, gathering-nodes phase): every
+ * per-kind number lives here and nowhere else — label, material, yield
+ * range, respawn interval, minimap color. Kinds, yields and respawn
+ * rules are data, not code paths.
+ *
+ * Respawn rule: a harvested node collapses (0.6s, no pop), waits
+ * respawnSeconds, then regrows (0.6s) and becomes harvestable again —
+ * in-map, no portal trip required. Portal trips preserve the wait:
+ * despawn snapshots each non-live node's remaining wait per mapSeed
+ * and spawnForMap restores it, so portal-hopping never refreshes a
+ * node early (this supersedes the crafting wave's "depleted state is
+ * NOT persisted" note — that note predates timed respawn, under which
+ * non-persistence would make the table meaningless).
+ */
+export interface NodeDef {
+  /** prompt + UI label */
+  label: string;
+  /** material item id granted on harvest */
+  materialId: string;
+  /** yield = base + rng.int(0, variance), deterministic per node */
+  yieldBase: number;
+  yieldVariance: number;
+  /** seconds from full collapse to regrow start */
+  respawnSeconds: number;
+  /** minimap marker color (Minimap.ts reads this table) */
+  minimapColor: string;
+}
+
+export const NODE_DEFS = {
+  ore: { label: 'ore vein', materialId: MAT_ORE, yieldBase: 2, yieldVariance: 1, respawnSeconds: 120, minimapColor: '#eab308' },
+  fiber: { label: 'fiber thicket', materialId: MAT_FIBER, yieldBase: 2, yieldVariance: 1, respawnSeconds: 90, minimapColor: '#a3e635' },
+  herb: { label: 'herb patch', materialId: MAT_HERB, yieldBase: 2, yieldVariance: 1, respawnSeconds: 45, minimapColor: '#34d399' },
+  crystal: { label: 'crystal cluster', materialId: MAT_CRYSTAL, yieldBase: 1, yieldVariance: 1, respawnSeconds: 180, minimapColor: '#67e8f9' },
+  scrap: { label: 'salvage cache', materialId: MAT_SCRAP, yieldBase: 1, yieldVariance: 1, respawnSeconds: 120, minimapColor: '#fb923c' },
+} as const satisfies Record<string, NodeDef>;
+
+export type NodeKind = keyof typeof NODE_DEFS;
+const NODE_KINDS: NodeKind[] = ['ore', 'fiber', 'herb', 'crystal', 'scrap'];
+
+/**
  * Material item ids — FIXED CONTRACT defined by workstream A
- * (engine/game/crafting: MAT_ORE/MAT_FIBER/MAT_SCRAP). Do not rename.
+ * (engine/game/crafting: MAT_*). Do not rename. Derived from NODE_DEFS
+ * so the kind->material map can never drift from the tuning table.
  */
 export const MATERIAL_IDS = {
   ore: MAT_ORE,
   fiber: MAT_FIBER,
+  herb: MAT_HERB,
+  crystal: MAT_CRYSTAL,
   scrap: MAT_SCRAP,
 } as const;
 
-export type NodeKind = keyof typeof MATERIAL_IDS; // 'ore' | 'fiber' | 'scrap'
-const NODE_KINDS: NodeKind[] = ['ore', 'fiber', 'scrap'];
-
-const NODE_LABELS: Record<NodeKind, string> = {
-  ore: 'ore vein',
-  fiber: 'fiber plant',
-  scrap: 'salvage cache',
-};
-
-/** Yield range per kind: base + rng.int(0, variance), deterministic per node. */
-const NODE_YIELD: Record<NodeKind, { base: number; variance: number }> = {
-  ore: { base: 2, variance: 1 },
-  fiber: { base: 2, variance: 1 },
-  scrap: { base: 1, variance: 1 },
-};
-
-/** Depletion collapse duration (seconds) — shrink, never pop. */
+/** Depletion collapse / regrow duration (seconds) — shrink/grow, never pop. */
 const DEPLETE_TIME = 0.6;
 
-/** Default node count per map (before density scaling). */
-export const DEFAULT_NODE_COUNT = 18;
+/** Default node count per map (before density scaling). Gathering-nodes
+ * phase: 30, not 18 — the kind count grew from 3 to 5, and holding 18
+ * would starve each kind (the 18-node split left only 2 fiber nodes,
+ * below the crafting spec's fiber quota). 30 restores ~6 nodes per kind,
+ * the density the crafting wave shipped with. */
+export const DEFAULT_NODE_COUNT = 30;
 
 /** Salt for the POI-anchor stream — keeps it off the roster stream. */
 const GATHER_POI_SALT = 0x90c;
@@ -117,6 +148,11 @@ export interface GatheringManagerOpts {
   density?: number;
   /** exact node count (overrides density) */
   count?: number;
+  /**
+   * Multiplier on NODE_DEFS respawnSeconds (default 1). Deterministic —
+   * tests accelerate regrow with it; production never sets it.
+   */
+  respawnScale?: number;
   /** where harvested materials land (blueprint passes itemKit?.inventory); null = harvest depletes the node but grants nothing */
   inventory?: InventoryLike | null;
   /**
@@ -179,6 +215,37 @@ function buildFiberPlant(ctx: BuildCtx, g: THREE.Group): void {
   voxelPart(ctx, g, 0.18, 0.18, 0.18, '', 0.3, 0, 1.08, 0, { amber: true });
 }
 
+/** Herb patch: low leafy tufts on a soil mound + amber buds. Reuses the
+ *  stem/leaf roles (no new emissive roles, no new buckets). */
+function buildHerbPatch(ctx: BuildCtx, g: THREE.Group): void {
+  const p = ctx.pal;
+  voxelPart(ctx, g, 0.9, 0.16, 0.8, p.rockDark, 0.9, 0, 0.08, 0);
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 + ctx.rng.next() * 0.5;
+    const r = 0.22 + ctx.rng.next() * 0.12;
+    voxelPart(ctx, g, 0.1, 0.55, 0.1, p.stem, 0.75,
+      Math.cos(a) * r, 0.35, Math.sin(a) * r, { rotZ: Math.cos(a) * 0.35 });
+    voxelPart(ctx, g, 0.22, 0.14, 0.22, p.leaf, 0.75,
+      Math.cos(a) * r, 0.62, Math.sin(a) * r, { rotY: a });
+  }
+  // amber buds — the signature glow accent
+  voxelPart(ctx, g, 0.13, 0.13, 0.13, '', 0.3, 0.1, 0.7, 0.05, { amber: true });
+  voxelPart(ctx, g, 0.13, 0.13, 0.13, '', 0.3, -0.15, 0.65, -0.1, { amber: true });
+}
+
+/** Crystal cluster: rock base + tall amber crystal shards. Reuses the
+ *  rock/amber roles only — the shards read as crystal by silhouette,
+ *  not by a new material role. */
+function buildCrystalCluster(ctx: BuildCtx, g: THREE.Group): void {
+  const p = ctx.pal;
+  voxelPart(ctx, g, 1.1, 0.3, 1.0, p.rockDark, 0.9, 0, 0.15, 0);
+  voxelPart(ctx, g, 0.16, 1.1, 0.16, '', 0.3, 0, 0.85, 0, { rotZ: 0.12 });
+  voxelPart(ctx, g, 0.14, 0.85, 0.14, '', 0.3, 0.3, 0.7, 0.2, { rotZ: -0.3, rotX: 0.15 });
+  voxelPart(ctx, g, 0.14, 0.75, 0.14, '', 0.3, -0.3, 0.65, -0.15, { rotZ: 0.35, rotX: -0.2 });
+  voxelPart(ctx, g, 0.11, 0.6, 0.11, '', 0.3, 0.15, 0.55, -0.3, { rotZ: -0.15, rotX: 0.3 });
+  voxelPart(ctx, g, 0.11, 0.5, 0.11, '', 0.3, -0.2, 0.5, 0.3, { rotZ: 0.2, rotX: -0.1 });
+}
+
 /** Salvage cache: wooden crate with metal bands + amber marker light. */
 function buildSalvageCache(ctx: BuildCtx, g: THREE.Group): void {
   const p = ctx.pal;
@@ -194,6 +261,14 @@ function buildSalvageCache(ctx: BuildCtx, g: THREE.Group): void {
 // GatherNode — one harvestable node
 // ---------------------------------------------------------------------------
 
+/** Node lifecycle: live -> depleting (collapse) -> awaiting (respawn
+ *  wait) -> regrowing (scale-up) -> live. Awaiting nodes are invisible
+ *  (unsubmitted); regrowing nodes are visible but not yet promptable. */
+export type GatherNodeState = 'live' | 'depleting' | 'awaiting' | 'regrowing';
+
+/** update() transition events the manager acts on. */
+export type GatherNodeEvent = 'collapsed' | 'regrowing' | 'regrown' | null;
+
 export class GatherNode {
   readonly kind: NodeKind;
   readonly root = new THREE.Group();
@@ -202,12 +277,21 @@ export class GatherNode {
   retired = false;
 
   private readonly rng: Rng;
-  private depleting = false;
+  private readonly baseScale: number;
+  private readonly respawnSeconds: number;
+  private state: GatherNodeState = 'live';
   private depleteT = 0;
+  private awaitT = 0;
+  private regrowT = 0;
 
   /** The instancible render root — the owner-agnostic registerEnemy({ renderRoot }) path. */
   get renderRoot(): THREE.Group | null {
     return this.root;
+  }
+
+  /** Current lifecycle state (manager + session read this, never set it). */
+  get nodeState(): GatherNodeState {
+    return this.state;
   }
 
   constructor(
@@ -216,11 +300,13 @@ export class GatherNode {
     position: THREE.Vector3,
     index: number,
     mapSeed: number,
+    opts: { respawnScale?: number } = {},
   ) {
     this.kind = kind;
     // per-node rng: deterministic yield + deterministic build jitter,
     // seeded off (mapSeed, GATHER_SALT, index) — never engine.rng
     this.rng = new Rng(((mapSeed ^ GATHER_SALT ^ Math.imul(index + 1, 0x9e3779b1)) >>> 0));
+    this.respawnSeconds = NODE_DEFS[kind].respawnSeconds * (opts.respawnScale ?? 1);
     const ctx: BuildCtx = {
       engine,
       geo: voxelBoxCacheFor(engine),
@@ -229,14 +315,20 @@ export class GatherNode {
     };
     if (kind === 'ore') buildOreVein(ctx, this.root);
     else if (kind === 'fiber') buildFiberPlant(ctx, this.root);
+    else if (kind === 'herb') buildHerbPatch(ctx, this.root);
+    else if (kind === 'crystal') buildCrystalCluster(ctx, this.root);
     else buildSalvageCache(ctx, this.root);
     // per-node silhouette variety: rotation + slight uniform scale —
-    // instance matrices, never unique geometry
+    // instance matrices, never unique geometry. NOTE: these two draws
+    // run before any harvest draw, so the yield below is a pure
+    // function of (mapSeed, index, kind) — the e2e replication relies
+    // on this exact draw order.
     this.root.rotation.y = this.rng.range(0, Math.PI * 2);
-    this.root.scale.setScalar(this.rng.range(0.9, 1.15));
+    this.baseScale = this.rng.range(0.9, 1.15);
+    this.root.scale.setScalar(this.baseScale);
     this.root.position.copy(position);
 
-    const label = NODE_LABELS[kind];
+    const label = NODE_DEFS[kind].label;
     this.interactable = {
       id: `node-${kind}-${(mapSeed >>> 0).toString(16)}-${index}`,
       type: 'node',
@@ -247,34 +339,96 @@ export class GatherNode {
     };
   }
 
+  /** True unless the node is live and harvestable (collapse, wait and regrow all block). */
   get isDepleted(): boolean {
-    return this.depleting;
+    return this.state !== 'live';
+  }
+
+  /** Collapse progress 0..1 (the harvest "progress": 0 live, 1 fully collapsed). */
+  get depleteProgress(): number {
+    if (this.state === 'live') return 0;
+    if (this.state === 'depleting') return Math.min(1, this.depleteT / DEPLETE_TIME);
+    return 1;
+  }
+
+  /** Seconds left before regrow starts (0 when live/depleting/regrowing). */
+  get regrowRemaining(): number {
+    return this.state === 'awaiting' ? Math.max(0, this.awaitT) : 0;
+  }
+
+  /** Effective respawn wait for this node (table value x respawnScale). */
+  get respawnTotal(): number {
+    return this.respawnSeconds;
   }
 
   /**
    * Harvest the node: starts the collapse animation and returns the
-   * material grant. Null when already harvested (double-harvest is a
-   * no-op — the prompt is disabled at the same moment).
+   * material grant. Null when not live (double-harvest is a no-op —
+   * the prompt is disabled at the same moment).
    */
   harvest(): { materialId: string; count: number } | null {
-    if (this.depleting) return null;
-    this.depleting = true;
+    if (this.state !== 'live') return null;
+    this.state = 'depleting';
+    this.depleteT = 0;
     this.interactable.enabled = false;
-    const y = NODE_YIELD[this.kind];
-    return { materialId: MATERIAL_IDS[this.kind], count: y.base + this.rng.int(0, y.variance) };
+    const def = NODE_DEFS[this.kind];
+    return { materialId: def.materialId, count: def.yieldBase + this.rng.int(0, def.yieldVariance) };
   }
 
   /**
-   * Tick the collapse animation. Returns true when the node has fully
-   * collapsed — the manager then retires it (instancer unregister +
-   * registry unregister). Ease-in shrink: continuous, no pop.
+   * Portal restore: re-enter a map with this node still waiting out its
+   * respawn (snapshot from the manager). The node sits collapsed and
+   * invisible until its remaining wait elapses, then regrows normally.
    */
-  update(dt: number): boolean {
-    if (!this.depleting || this.retired) return false;
-    this.depleteT += dt;
-    const k = Math.min(1, this.depleteT / DEPLETE_TIME);
-    this.root.scale.setScalar(Math.max(0.001, 1 - k * k));
-    return k >= 1;
+  restoreAwaiting(remainingSeconds: number): void {
+    this.state = 'awaiting';
+    this.awaitT = Math.max(0, remainingSeconds);
+    this.retired = true;
+    this.interactable.enabled = false;
+    this.root.scale.setScalar(0.001);
+  }
+
+  /**
+   * Tick the lifecycle. Returns the transition event for the manager:
+   * 'collapsed' (retire: unregister instancer + registry),
+   * 'regrowing' (re-register instancer so the scale-up is visible),
+   * 'regrown' (re-register interactable, harvestable again).
+   * Ease-in shrink/grow: continuous, no pop.
+   */
+  update(dt: number): GatherNodeEvent {
+    if (this.state === 'depleting') {
+      this.depleteT += dt;
+      const k = Math.min(1, this.depleteT / DEPLETE_TIME);
+      this.root.scale.setScalar(Math.max(0.001, this.baseScale * (1 - k * k)));
+      if (k >= 1) {
+        this.state = 'awaiting';
+        this.awaitT = this.respawnSeconds;
+        return 'collapsed';
+      }
+      return null;
+    }
+    if (this.state === 'awaiting') {
+      this.awaitT -= dt;
+      if (this.awaitT <= 0) {
+        this.state = 'regrowing';
+        this.regrowT = 0;
+        return 'regrowing';
+      }
+      return null;
+    }
+    if (this.state === 'regrowing') {
+      this.regrowT += dt;
+      const k = Math.min(1, this.regrowT / DEPLETE_TIME);
+      this.root.scale.setScalar(Math.max(0.001, this.baseScale * k * k));
+      if (k >= 1) {
+        this.state = 'live';
+        this.root.scale.setScalar(this.baseScale);
+        this.interactable.enabled = true;
+        return 'regrown';
+      }
+      return null;
+    }
+    return null;
   }
 }
 
@@ -307,6 +461,14 @@ export class GatheringManager implements MapLocalEntitySystem {
   private readonly opts: GatheringManagerOpts;
   private readonly instancer: NpcInstancer;
   private list: GatherNode[] = [];
+  /** mapSeed of the currently spawned roster (null before the first spawn) */
+  private currentSeed: number | null = null;
+  /**
+   * Portal-preserved respawn state: mapSeed -> node interactable id ->
+   * remaining await seconds. Written by despawnAll, read by spawnForMap.
+   * A node absent from the map (or mapped to <= 0) respawns live.
+   */
+  private savedAwait = new Map<number, Map<string, number>>();
 
   constructor(private readonly engine: Engine, opts: GatheringManagerOpts = {}) {
     this.opts = opts;
@@ -333,20 +495,35 @@ export class GatheringManager implements MapLocalEntitySystem {
    */
   spawnForMap(mapSeed: number): void {
     this.despawnAll();
+    this.currentSeed = mapSeed;
     const rng = new Rng((mapSeed ^ GATHER_SALT) >>> 0);
     const count = this.opts.count
       ?? Math.round(DEFAULT_NODE_COUNT * (this.opts.density ?? 1));
     const anchors = this.resolveAnchors(mapSeed);
+    const restored = this.savedAwait.get(mapSeed);
+    const live: GatherNode[] = [];
     for (let i = 0; i < count; i++) {
       const kind = rng.pick(NODE_KINDS);
       const pos = this.placeNode(rng, anchors, i);
-      const node = new GatherNode(this.engine, kind, pos, i, mapSeed);
+      const node = new GatherNode(this.engine, kind, pos, i, mapSeed,
+        { respawnScale: this.opts.respawnScale });
       this.engine.scene.add(node.root);
       this.list.push(node);
       // owner-agnostic path: the node only needs { renderRoot }
       this.instancer.registerEnemy(node);
+      // Portal-preserved wait: a node harvested before the trip resumes
+      // its countdown instead of respawning live. It stays registered
+      // with the instancer (sources hidden, nothing submitted) so the
+      // regrow path needs no visibility hacks — but it gets NO
+      // interactable until it regrows.
+      const remaining = restored?.get(node.interactable.id);
+      if (remaining !== undefined && remaining > 0) {
+        node.restoreAwaiting(remaining);
+        continue;
+      }
+      live.push(node);
     }
-    registerGatheringInteractables(this.engine, this.list);
+    registerGatheringInteractables(this.engine, live);
   }
 
   /**
@@ -360,6 +537,22 @@ export class GatheringManager implements MapLocalEntitySystem {
    * spawn would drop the other rosters' instancing on every portal arrival).
    */
   despawnAll(): void {
+    // Snapshot respawn state BEFORE clearing: awaiting nodes keep their
+    // remaining wait; mid-collapse nodes restart the full wait (collapse
+    // progress is animation, not state); regrowing nodes return live
+    // (their wait already elapsed). Live nodes map to nothing = live.
+    // An empty despawn (e.g. spawnForMap's self-clean right after a
+    // manual despawnAll) must NOT overwrite a saved snapshot — there is
+    // no roster here to snapshot, and wiping it would lose the trip's
+    // preserved waits.
+    if (this.currentSeed !== null && this.list.length > 0) {
+      const snap = new Map<string, number>();
+      for (const n of this.list) {
+        if (n.nodeState === 'awaiting') snap.set(n.interactable.id, n.regrowRemaining);
+        else if (n.nodeState === 'depleting') snap.set(n.interactable.id, n.respawnTotal);
+      }
+      this.savedAwait.set(this.currentSeed, snap);
+    }
     for (const n of this.list) {
       try { this.instancer.unregister(n); } catch { /* never strand the rest */ }
       try { this.engine.scene.remove(n.root); } catch { /* never strand the rest */ }
@@ -377,8 +570,8 @@ export class GatheringManager implements MapLocalEntitySystem {
    */
   update(dt: number): void {
     for (const n of this.list) {
-      if (n.retired) continue;
-      if (n.update(dt)) {
+      const ev = n.update(dt);
+      if (ev === 'collapsed') {
         // Collapse finished: retire the node — per-entity unregister from
         // the shared instancer + drop the interactable. Never reset().
         this.instancer.unregister(n);
@@ -386,7 +579,18 @@ export class GatheringManager implements MapLocalEntitySystem {
         n.retired = true;
         continue;
       }
-      this.instancer.submit(n);
+      if (ev === 'regrowing') {
+        // Wait elapsed: re-register so the scale-up is visible. The
+        // interactable stays down until 'regrown' (no harvesting a
+        // half-grown node).
+        this.instancer.registerEnemy(n);
+      } else if (ev === 'regrown') {
+        registerGatheringInteractables(this.engine, [n]);
+        n.retired = false;
+      }
+      // Awaiting nodes are the only ones never submitted (invisible);
+      // live, depleting and regrowing nodes all draw.
+      if (n.nodeState !== 'awaiting') this.instancer.submit(n);
     }
   }
 

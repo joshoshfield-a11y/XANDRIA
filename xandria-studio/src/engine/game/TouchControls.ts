@@ -120,6 +120,11 @@ function layoutForGenreBase(genre: string): TouchLayout {
           { label: 'JUMP', action: 'jump', kind: 'tap', right: 208, bottom: 100, size: 64 },
           // UPGRADE LOOP (deployables): field-item deploy (G / Digit3 on desktop)
           { label: 'DEPLOY', action: 'deploy', kind: 'tap', right: 208, bottom: 190, size: 60 },
+          // UPGRADE LOOP (stealth-system): hold-to-sneak (Ctrl on
+          // desktop). Stacked above the ability row (top edge 324):
+          // bottom 336 + size 56 clears it by 12px; right 24 aligns
+          // with STRIKE below. Hold kind: released on pointerup.
+          { label: 'SNEAK', action: 'sneak', kind: 'hold', right: 24, bottom: 336, size: 56 },
         ],
       };
     case 'top-down-shooter':

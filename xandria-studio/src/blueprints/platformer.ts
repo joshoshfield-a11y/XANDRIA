@@ -37,6 +37,8 @@ import { buildSideQuestPool } from '../engine/game/sidequests';
 import { QuestTracker } from '../engine/ui/QuestTracker';
 import { RadiantBoard } from '../engine/game/radiantQuests';
 import { RadiantBoardPanel } from '../engine/ui/RadiantBoardPanel';
+import { TimedBoard } from '../engine/game/timedQuests';
+import { TimedBoardPanel } from '../engine/ui/TimedBoardPanel';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
 import { resolveEliteChance } from '../engine/game/eliteAffixes';
 import { NpcInstancer } from '../engine/game/npcInstancing';
@@ -93,6 +95,9 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // live object across portal transitions. Rank-ups toast; the levelup
   // audio cue fires inside SkillSystem.addXp.
   const skills = new SkillSystem(engine, {
+    // SKILL-SYNERGIES: persist ranks per seed (the save/reload leg);
+    // synergies derive from ranks, so they persist with them.
+    persist: true,
     onRankUp: (def, rank) => {
       engine.hud.toast(`${def.name} rank ${rank}!`);
     },
@@ -230,6 +235,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     playerLevel: () => prog.level,
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
+    // UPGRADE LOOP (daily-mutators): live daily run's mutator set feeds spawn stat scaling.
+    mutators: () => engine.getDailyMutators(),
     ngPlus: () => engine.getNgPlusCycle(),
     // UPGRADE LOOP (elite-affixes): spec elite chance (default 0 = no elites).
     eliteChance: () => resolveEliteChance(spec),
@@ -244,7 +251,17 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
     damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
     // CRIT-SYSTEM: ability crits scale with equipped weapon tier + smithing rank.
-    critCtx: () => ({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }),
+    critCtx: () => {
+      // SKILL-SYNERGIES: synergy crit bonuses ride the crit context so
+      // melee/projectile/ability rolls use the same math as the HUD.
+      const cb = skills.synergyCritBonuses();
+      return {
+        tier: itemKit?.equippedWeaponRarity() ?? null,
+        skillRank: skills.rankOf('smithing'),
+        synergyChanceBonus: cb.chanceBonus,
+        synergyMultiplierBonus: cb.multiplierBonus,
+      };
+    },
   });
   // inventory wave: items/inventory/HUD/equip-rendering (null when spec has no custom.items)
   // crafting wave (workstream C): register the crafting item defs (materials
@@ -289,6 +306,9 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
     // CRIT-SYSTEM: inventory panel's CRIT STATS section reads smithing rank here.
     smithingRank: () => skills.rankOf('smithing'),
+    // SKILL-SYNERGIES: the inventory HUD's CRIT STATS section reads the
+    // same synergy bonuses the damage rolls use.
+    synergyCrit: () => skills.synergyCritBonuses(),
   });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -321,6 +341,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   // (which syncs the board) can reference them before construction.
   let radiantBoard: RadiantBoard | null = null;
   let radiantBoardPanel: RadiantBoardPanel | null = null;
+  let timedBoard: TimedBoard | null = null;
+  let timedBoardPanel: TimedBoardPanel | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -344,7 +366,7 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
         worldSeed: engine.portalManager?.worldSeedValue ?? spec.meta.seed,
         autoAccept: true,
         onLevelUp: (gain) => notifyLevelUp(gain),
-        onQuestsChanged: () => { radiantBoard?.sync(); radiantBoardPanel?.render(); },
+        onQuestsChanged: () => { radiantBoard?.sync(); radiantBoardPanel?.render(); timedBoard?.sync(); timedBoardPanel?.render(); },
       })
     : null;
   engine.questManager = quests;
@@ -363,10 +385,33 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
         onChanged: () => radiantBoardPanel?.render(),
       })
     : null;
+  // timed-quests wave: the clock board over the same manager. Offers
+  // generate from the live portal world seed, register as available
+  // timed defs, and re-roll deterministically when a slot is
+  // abandoned or turned in; failed slots stay for Try again.
+  // Construction precedes the radiant panel on purpose:
+  // registering the timed defs fires onQuestsChanged, and no
+  // panel may render while a board is still being constructed.
+  timedBoard = questsEnabled && quests
+    ? new TimedBoard({
+        manager: quests,
+        spec,
+        getMapSeed: () => engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onChanged: () => timedBoardPanel?.render(),
+      })
+    : null;
   radiantBoardPanel = questsEnabled && radiantBoard
     ? new RadiantBoardPanel({
         container: engine.container,
         board: () => radiantBoard,
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+      })
+    : null;
+
+  timedBoardPanel = questsEnabled && timedBoard
+    ? new TimedBoardPanel({
+        container: engine.container,
+        board: () => timedBoard,
         isModalOpen: () => talkSession?.isDialogueOpen ?? false,
       })
     : null;
@@ -702,5 +747,5 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
     camRig.update(dt, pp, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel };
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, gathering, stations, stationSession, gatheringSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, prog, wallet, vendors: vendorManager, shopPanel, vendorDefs, talkSession , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel, timedBoard, timedBoardPanel };
 }

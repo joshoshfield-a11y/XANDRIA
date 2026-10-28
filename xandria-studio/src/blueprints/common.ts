@@ -8,6 +8,8 @@ import { EnemyManager } from '../engine/game/EnemyAI';
 import type { Projectiles } from '../engine/game/Projectiles';
 import type { GameSpec } from '@spec';
 import { CRIT_MELEE_SALT, CritRoller, applyCrit, BASE_CRIT_CTX, type CritCtx } from '../engine/game/crit';
+import { displayedDamage, type DamageType } from '../engine/game/elemental';
+import { applySneakBonus } from '../engine/game/stealth';
 
 export interface PlayerAvatarEvents {
   onDeath?: () => void;
@@ -160,18 +162,31 @@ export class PlayerAvatar {
     }
   }
 
+  /** STEALTH-SYSTEM: hold-to-sneak state, delegated to the controller (player-scoped). */
+  get sneaking(): boolean { return this.ctrl.sneaking; }
+
   /**
    * melee arc attack; returns true if swing started.
    * CRIT-SYSTEM: each enemy hit consumes one draw from the avatar's
    * seeded melee crit stream. A crit multiplies the passed damage per
    * the CRIT_TABLE (and renders with crit styling); a non-crit deals
    * the passed damage exactly, as before.
+   * ELEMENTAL-DAMAGE-TYPES: `damageType` (default 'physical') is the
+   * caller's resolved outgoing type (the weapon enchant's type at the
+   * blueprint call site). It flows into Enemy.damage() as the
+   * elemental step (order step 5, after crit); the floating number
+   * spawns from the value damage() returns, so it always matches the
+   * amount that entered damage().
+   * STEALTH-SYSTEM: a strike against an enemy whose awareness is
+   * 'unaware' at the moment of the strike takes the sneak bonus
+   * instead — round(damage x CRIT_TABLE multiplier), applied once,
+   * rendered with crit styling (it IS the crit-table multiplier).
+   * The crit roll is skipped on that strike (no draw consumed, no
+   * stacking). First strike only: damage() alerts the victim.
    */
-  melee(aimYaw: number, range = 2.6, arc = 1.3, damage = 25, critCtx: CritCtx = BASE_CRIT_CTX): boolean {
+  melee(aimYaw: number, range = 2.6, arc = 1.3, damage = 25, critCtx: CritCtx = BASE_CRIT_CTX, damageType: DamageType = 'physical'): boolean {
     if (!this.enemies) return false;
     this.ctrl.swing();
-    // Tutorial wave: observe-only attack seam (no taps = no-op).
-    this.engine.hooks.emit('onAttack', { kind: 'melee' });
     this.engine.audio.play('swing');
     const origin = this.ctrl.position;
     const fwd = new THREE.Vector3(Math.sin(aimYaw + Math.PI), 0, Math.cos(aimYaw + Math.PI));
@@ -183,15 +198,31 @@ export class PlayerAvatar {
       if (d > range) continue;
       to.normalize();
       if (to.dot(fwd) < Math.cos(arc)) continue;
-      const roll = this.meleeCrit.roll(critCtx);
-      const finalDamage = applyCrit(damage, roll);
-      e.damage(finalDamage, origin);
+      // STEALTH-SYSTEM: read awareness BEFORE damage() alerts the victim.
+      const sneakStrike = e.awareness === 'unaware';
+      const roll = sneakStrike ? null : this.meleeCrit.roll(critCtx);
+      const finalDamage = sneakStrike ? applySneakBonus(damage, critCtx) : applyCrit(damage, roll!);
+      const returned = e.damage(finalDamage, origin, damageType);
       // DAMAGE-NUMBERS: melee hit feedback — themed floating number per
       // enemy hit (kind, not a caller hex; see floatingText.ts).
       // CRIT-SYSTEM: the kind is now a real crit, not a display highlight.
-      this.engine.juice.spawnText(this.engine.camera, e.position, roll.crit ? 'crit' : 'playerDamage', finalDamage);
+      // ELEMENTAL-DAMAGE-TYPES: the number is the crit-applied value run
+      // through the elemental step caller-side (displayedDamage), so a
+      // shielded-variant front-arc reduction stays HP-only exactly as
+      // on main — the number never depended on the wrapper.
+      // STEALTH-SYSTEM: a sneak strike renders as a crit (same multiplier).
+      const dealt = displayedDamage(finalDamage, e.damageKind, damageType, returned);
+      this.engine.juice.spawnText(this.engine.camera, e.position, (sneakStrike || roll!.crit) ? 'crit' : 'playerDamage', dealt);
       hitAny = true;
     }
+    // STEALTH-SYSTEM: the attack-noise event MUST fire after the damage
+    // loop, not before it — the onAttack tap emits swing noise, and an
+    // enemy inside the noise radius would hear it and flip from
+    // unaware to suspicious before the sneak read above, so the sneak
+    // bonus could never apply (the strike would secretly consume a
+    // crit draw instead). Noise still fires on every swing, whiffs
+    // included; the tutorial tap is order-insensitive.
+    this.engine.hooks.emit('onAttack', { kind: 'melee' });
     if (hitAny) {
       this.engine.audio.play('hit');
       // T1-2: hit-stop on melee connect (60–90ms freeze sells the impact).

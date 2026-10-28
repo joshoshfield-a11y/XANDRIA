@@ -16,7 +16,15 @@ import {
   preBootEnemyKindIds,
   type CustomEnemyKindDef,
 } from '../engine/game/Modding';
-import { applyLoadout, loadProfile } from '../engine/game/Profile';
+import { applyLoadout, loadProfile, saveProfile, getGearLoadouts, setGearLoadout, renameGearLoadout, clearGearLoadout } from '../engine/game/Profile';
+import {
+  MAX_LOADOUTS,
+  validateGearLoadouts,
+  defaultGearLoadouts,
+  captureLoadout,
+  applyGearLoadout,
+  loadoutPieceCount,
+} from '../engine/game/loadouts';
 import { Progression } from '../engine/game/Progression';
 import {
   PROGRESSION_TABLE,
@@ -78,6 +86,23 @@ import {
   applyDifficultyScaling,
 } from '../engine/game/difficulty';
 /**
+ * UPGRADE LOOP (stealth-system): pure stealth functions for the e2e
+ * replication assertions (same shipped code the spawn/perception path
+ * uses).
+ */
+import {
+  STEALTH_TABLE,
+  DETECTION_JITTER_SALT,
+  AwarenessTracker,
+  applySneakBonus,
+  baseDetectionRadiusFor,
+  detectionJitterFor,
+  detectionRadiusFor,
+  noiseRadiusFor,
+  targetWeightFor,
+} from '../engine/game/stealth';
+import { CRIT_TABLE, critMultiplierFor } from '../engine/game/crit';
+/**
  * UPGRADE LOOP (new-game-plus): pure NG+ table + apply fn for the e2e
  * per-table stat assertions (same shipped code the spawn path uses).
  */
@@ -92,6 +117,7 @@ import {
   GatheringInteractionSession,
   GATHER_SALT,
   MATERIAL_IDS,
+  NODE_DEFS,
 } from '../engine/game/gathering';
 import {
   StationManager,
@@ -105,6 +131,8 @@ import {
   craft,
   resolveCraftingEnabled,
   ensureCraftingItemDefs,
+  craftedItemDefs,
+  materialItemDefs,
 } from '../engine/game/crafting';
 import {
   MASTER_CATALOG_RECIPES,
@@ -145,12 +173,26 @@ import {
   pickCompanionTarget,
 } from '../engine/game/companions';
 import {
+  COMPANION_TARGET_WEIGHTS,
+  COMPANION_STANCES,
+  COMPANION_REVIVE_COST,
+  GUARD_DAMAGE_FRACTION,
+  pickEnemyTarget,
+  applyGuardReduction,
+  enemyAggroRange,
+} from '../engine/game/companionCombat';
+import {
   CAMP_SALT,
   CAMP_STRUCTURE_DEFS,
+  CAMP_STRUCTURE_TIERS,
   CampManager,
   CampProp,
+  campAnchorCoords,
   campSitePosition,
   campStructureDefOf,
+  campStructureMaxTier,
+  campStructureTierOf,
+  campTierVisualParts,
   WORKBENCH_DAMAGE_MULT,
   WORKBENCH_BUFF_DURATION_S,
 } from '../engine/game/camp';
@@ -198,6 +240,31 @@ import {
   ensureEnchantItemDefs,
 } from '../engine/game/enchantments';
 import {
+  DAMAGE_TYPES,
+  ELEMENTAL_TABLE,
+  ENEMY_RESISTANCES,
+  elementalDef,
+  isDamageType,
+  normalizeDamageType,
+  resistanceFor,
+  elementalMultiplierFor,
+  applyElemental,
+  resistanceLines,
+  outgoingDamageType,
+  outgoingDamageTypeDetail,
+} from '../engine/game/elemental';
+import {
+  SALVAGE_SALT,
+  SALVAGE_TABLE,
+  SET_PIECE_SALVAGE_BONUS,
+  salvageRowFor,
+  isSetPiece,
+  salvageSeedFor,
+  buildSalvageRng,
+  rollSalvageYields,
+  clearSalvagedFromLoadouts,
+} from '../engine/game/salvage';
+import {
   QuestManager,
   buildQuestPool,
   resolveQuestsEnabled,
@@ -205,6 +272,15 @@ import {
   QUEST_SALT,
 } from '../engine/game/quests';
 import { SIDE_QUEST_SALT, buildSideQuestPool } from '../engine/game/sidequests';
+import {
+  DIALOGUE_TREES,
+  DialogueEngine,
+  DialogueState,
+  FIRST_QUEST_REF,
+  localStorageDialogueAdapter,
+  validateDialogueTree,
+  validateDialogueTrees,
+} from '../engine/game/dialogue';
 import { biomeMusicPattern, AUDIO_SALT } from '../engine/game/biomeMusic';
 import {
   RADIANT_SALT,
@@ -217,6 +293,15 @@ import {
   RadiantBoard,
 } from '../engine/game/radiantQuests';
 import {
+  TIMED_QUEST_SALT,
+  TIMED_TEMPLATES,
+  buildTimedOffers,
+  timedOfferAt,
+  resolveTimedCount,
+  eligibleTimedTemplates,
+  TimedBoard,
+} from '../engine/game/timedQuests';
+import {
   CURATED_STORY_REWARDS,
   CURATED_SIDE_REWARDS,
   QUEST_REWARD_SLUGS,
@@ -226,6 +311,11 @@ import {
   allCuratedItemIds,
 } from '../engine/game/questRewards';
 import { QuestTalkSession } from '../engine/game/questTalk';
+import {
+  resolveQuestWaypoint,
+  trackedObjective,
+  WAYPOINT_SCAN_INTERVAL_S,
+} from '../engine/game/questWaypoints';
 import {
   BOSS_SALT,
   BOSS_DEFS,
@@ -243,14 +333,26 @@ import {
 } from '../engine/game/bosses';
 import type { BossBar } from '../engine/ui/BossBar';
 import {
+  WORLDBOSS_SALT,
+  WORLDBOSS_BASE_HEALTH,
+  planWorldBoss,
+  resolveWorldBossEnabled,
+  resolveWorldBossDef,
+  WorldBossEvent,
+} from '../engine/game/worldBoss';
+import {
   SkillSystem,
   SKILL_DEFS,
   SKILL_IDS,
+  SYNERGY_DEFS,
+  evaluateSynergies,
   resolveSkillsEnabled,
   resolveSkillsXpMultiplier,
 } from '../engine/game/skills';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
 import { FastTravelPanel } from '../engine/ui/FastTravelPanel';
+import { WorldAtlasPanel } from '../engine/ui/WorldAtlasPanel';
+import { buildAtlasModel, unchartedNeighborCount, fogPercentOf } from '../engine/world/WorldAtlas';
 import { FastTravelRegistry, fastTravelArrivalEdge, FAST_TRAVEL_STORAGE_KEY } from '../engine/world/FastTravel';
 import {
   ABILITY_DEFS,
@@ -317,6 +419,14 @@ import {
   resolveForcedWeather,
   WeatherCycleManager,
 } from '../engine/game/weatherCycles';
+import {
+  HAZARD_SALT,
+  HAZARD_DEFS,
+  planHazardZones,
+  resolveHazardsEnabled,
+  resolveHazardCount,
+  HazardZoneManager,
+} from '../engine/game/hazardZones';
 
 declare global {
   interface Window {
@@ -500,10 +610,51 @@ function boot() {
     fastTravelPanel = new FastTravelPanel({
       container: engine.container,
       discovered: () => pm.discovered.list(),
+      // camp-upgrades: camp anchors derived live from the discovered
+      // list + the save-slot campBuilt record (no new storage; a camp
+      // anchors exactly the maps it was built on, per map seed).
+      campAnchors: () => {
+        try {
+          return campAnchorCoords(pm.discovered.list(), loadProfile().campBuilt ?? {}, pm.worldSeedValue);
+        } catch {
+          return [];
+        }
+      },
       current: () => ({ ...pm.coord }),
       onTravel: (c) => pm.fastTravelTo(c),
       isModalOpen: () => !!(bp.skillsPanel?.isOpen || bp.bestiaryPanel?.isOpen
         || bp.achievementsPanel?.isOpen || bp.shopPanel?.isOpen),
+    });
+  }
+  // WORLD-ATLAS (upgrade loop): the discovered-maps overview panel,
+  // built once per boot beside the world-map panel (not per blueprint
+  // rebuild — the PortalManager persists across restarts). It observes
+  // only: the registry for the map list, the minimap for session fog
+  // percentages, and the save profile for built camp structures
+  // (keyed by deriveMapSeed — the same seed CampManager's spawnForMap
+  // receives). No key shortcut: every panel letter is taken; the chip
+  // below the MAP chip is the entry point, on the title screen too.
+  let worldAtlasPanel: WorldAtlasPanel | null = null;
+  if (engine.portalManager) {
+    const pm = engine.portalManager;
+    const bp = blueprint as unknown as Record<string, { isOpen?: boolean } | null | undefined>;
+    worldAtlasPanel = new WorldAtlasPanel({
+      container: engine.container,
+      discovered: () => pm.discovered.list(),
+      current: () => ({ ...pm.coord }),
+      fogCoverage: (c) => engine.minimap.coverageFor(c.mx, c.my),
+      campStructures: (c) => {
+        try {
+          const seed = deriveMapSeed(pm.getWorldSeed(), c.mx, c.my);
+          const built = loadProfile().campBuilt?.[String(seed)];
+          return Array.isArray(built) ? [...built] : [];
+        } catch {
+          return [];
+        }
+      },
+      onTravel: (c) => pm.fastTravelTo(c),
+      isModalOpen: () => !!(bp.skillsPanel?.isOpen || bp.bestiaryPanel?.isOpen
+        || bp.achievementsPanel?.isOpen || bp.shopPanel?.isOpen || fastTravelPanel?.isOpen),
     });
   }
   // NPCs wave (workstream C): test-mode seam. The e2e and perf harnesses
@@ -520,8 +671,37 @@ function boot() {
       /** Test seam: the live discovered-portal registry (null when portals disabled). */
       liveRegistry: (): FastTravelRegistry | null => engine.portalManager?.discovered ?? null,
     };
-    (window.__XANDRIA__ as Record<string, unknown>).npcTest = {
-      spawnNpcsForMap,
+    // PHOTO-MODE (upgrade loop): test-mode seam for the photo-mode e2e.
+    // All reads/writes are synchronous within one evaluate() call, so
+    // the camera-restore assertion is exact (no rendered frame in between).
+    (window.__XANDRIA__ as Record<string, unknown>).photoTest = {
+      enter: (): boolean => engine.photoMode.enter(),
+      exit: (): boolean => engine.photoMode.exit(),
+      active: (): boolean => engine.photoMode.active,
+      orbit: () => engine.photoMode.orbit,
+      setOrbit: (o: { yaw?: number; pitch?: number; distance?: number }) => engine.photoMode.setOrbit(o),
+      savedCamera: () => engine.photoMode.savedCamera,
+      requestCapture: (): boolean => engine.photoMode.requestCapture(),
+      capturePending: (): boolean => engine.photoMode.capturePending,
+      lastScreenshot: (): string | null => engine.photoMode.lastScreenshot,
+      cameraState: () => ({
+        position: engine.camera.position.toArray(),
+        quaternion: engine.camera.quaternion.toArray(),
+        fov: engine.camera.fov,
+      }),
+    };
+    // WORLD-ATLAS (upgrade loop): test-mode seam for the atlas e2e.
+    (window.__XANDRIA__ as Record<string, unknown>).atlasTest = {
+      WorldAtlasPanel,
+      buildAtlasModel,
+      unchartedNeighborCount,
+      fogPercentOf,
+      /** Test seam: the live atlas panel (null when portals disabled). */
+      livePanel: (): WorldAtlasPanel | null => worldAtlasPanel,
+      /** Test seam: the live discovered-portal registry (null when portals disabled). */
+      liveRegistry: (): FastTravelRegistry | null => engine.portalManager?.discovered ?? null,
+    };
+    (window.__XANDRIA__ as Record<string, unknown>).npcTest = {      spawnNpcsForMap,
       registerNpcInteractables,
       unregisterNpcInteractables,
       NpcInteractionSession,
@@ -625,6 +805,22 @@ function boot() {
       /** Test seam: bucket/instance diagnostics. */
       enemyInstancerStats: () => NpcInstancer.for(engine).stats(),
     };
+    // STEALTH-SYSTEM: test-mode seam for the stealth e2e — the tuning
+    // table, pure detection/noise/weight functions, and the crit table
+    // the sneak bonus reuses (same shipped code the game uses).
+    (window.__XANDRIA__ as Record<string, unknown>).stealthTest = {
+      STEALTH_TABLE,
+      DETECTION_JITTER_SALT,
+      AwarenessTracker,
+      applySneakBonus,
+      baseDetectionRadiusFor,
+      detectionJitterFor,
+      detectionRadiusFor,
+      noiseRadiusFor,
+      targetWeightFor,
+      CRIT_TABLE,
+      critMultiplierFor,
+    };
     // Crafting wave (workstream B): test-mode seam for the gathering e2e +
     // perf harnesses — the manager, salts, material ids, session.
     (window.__XANDRIA__ as Record<string, unknown>).gatheringTest = {
@@ -632,6 +828,7 @@ function boot() {
       GatheringInteractionSession,
       GATHER_SALT,
       MATERIAL_IDS,
+      NODE_DEFS,
       /** Test seam: the live gathering manager from the blueprint build (null when absent). */
       liveManager: (): GatheringManager | null =>
         (blueprint as { gathering?: GatheringManager }).gathering ?? null,
@@ -652,6 +849,8 @@ function boot() {
       craft,
       resolveCraftingEnabled,
       ensureCraftingItemDefs,
+      craftedItemDefs,
+      materialItemDefs,
       /** Master-crafting wave: tier-3 recipe catalog + output defs. */
       MASTER_CATALOG_RECIPES,
       masterTier3OutputDefs,
@@ -714,6 +913,27 @@ function boot() {
         getEnchant: (id: string) => string | null;
         enchant: (id: string, enchantId: string) => { ok: boolean; reason?: string };
         removeEnchant: (id: string) => { itemId: string; count: number }[];
+        isSalvageable: (id: string) => { ok: boolean; reason?: string };
+        salvagePreview: (id: string) => { itemId: string; count: number }[] | null;
+        salvage: (id: string, opts?: { onClearLoadout?: (itemId: string) => void }) => {
+          ok: boolean; reason?: string;
+          yields?: { itemId: string; count: number }[];
+          enchantCleared?: string | null; setPiece?: boolean;
+        };
+        salvageAllJunk: (opts?: { onClearLoadout?: (itemId: string) => void }) => {
+          salvaged: Array<{ itemId: string; units: number; yields: { itemId: string; count: number }[] }>;
+          skipped: Array<{ itemId: string; reason: string }>;
+          yields: { itemId: string; count: number }[];
+        };
+        previewSalvageAllJunk: () => {
+          plan: Array<{ itemId: string; units: number; yields: { itemId: string; count: number }[] }>;
+          skipped: Array<{ itemId: string; reason: string }>;
+        };
+        salvageCount: () => number;
+        serialize: () => string;
+        restore: (serialized: string) => void;
+        setJunk: (id: string, flag: boolean) => void;
+        isJunk: (id: string) => boolean;
       } | null =>
         (blueprint as { itemKit?: { inventory?: {
           count: (id: string) => number;
@@ -728,6 +948,27 @@ function boot() {
           getEnchant: (id: string) => string | null;
           enchant: (id: string, enchantId: string) => { ok: boolean; reason?: string };
           removeEnchant: (id: string) => { itemId: string; count: number }[];
+          isSalvageable: (id: string) => { ok: boolean; reason?: string };
+          salvagePreview: (id: string) => { itemId: string; count: number }[] | null;
+          salvage: (id: string, opts?: { onClearLoadout?: (itemId: string) => void }) => {
+            ok: boolean; reason?: string;
+            yields?: { itemId: string; count: number }[];
+            enchantCleared?: string | null; setPiece?: boolean;
+          };
+          salvageAllJunk: (opts?: { onClearLoadout?: (itemId: string) => void }) => {
+            salvaged: Array<{ itemId: string; units: number; yields: { itemId: string; count: number }[] }>;
+            skipped: Array<{ itemId: string; reason: string }>;
+            yields: { itemId: string; count: number }[];
+          };
+          previewSalvageAllJunk: () => {
+            plan: Array<{ itemId: string; units: number; yields: { itemId: string; count: number }[] }>;
+            skipped: Array<{ itemId: string; reason: string }>;
+          };
+          salvageCount: () => number;
+          serialize: () => string;
+          restore: (serialized: string) => void;
+          setJunk: (id: string, flag: boolean) => void;
+          isJunk: (id: string) => boolean;
         } } | null }).itemKit?.inventory ?? null,
       /** Test seam: the live inventory HUD (inventory-qol wave). */
       liveInventoryHud: (): {
@@ -774,6 +1015,15 @@ function boot() {
       rollCompanionHeal,
       rollFollowOffset,
       pickCompanionTarget,
+      // UPGRADE LOOP (companion-combat-depth): weight table, stance
+      // math, guard reduction and revive cost for the e2e harness.
+      COMPANION_TARGET_WEIGHTS,
+      COMPANION_STANCES,
+      COMPANION_REVIVE_COST,
+      GUARD_DAMAGE_FRACTION,
+      pickEnemyTarget,
+      applyGuardReduction,
+      enemyAggroRange,
       /** Test seam: the live companions manager from the blueprint build. */
       liveManager: (): CompanionsManager | null =>
         (blueprint as { companions?: CompanionsManager }).companions ?? null,
@@ -786,10 +1036,15 @@ function boot() {
     (window.__XANDRIA__ as Record<string, unknown>).campTest = {
       CAMP_SALT,
       CAMP_STRUCTURE_DEFS,
+      CAMP_STRUCTURE_TIERS,
       CampManager,
       CampProp,
+      campAnchorCoords,
       campSitePosition,
       campStructureDefOf,
+      campStructureMaxTier,
+      campStructureTierOf,
+      campTierVisualParts,
       WORKBENCH_DAMAGE_MULT,
       WORKBENCH_BUFF_DURATION_S,
       /** Test seam: the live camp manager from the blueprint build. */
@@ -875,6 +1130,57 @@ function boot() {
       buildSetUiReport,
       ensureSetItemDefs,
     };
+    // Loadout-presets wave: test-mode seam for the loadout e2e + unit
+    // harnesses — the pure loadout functions plus live handles: the
+    // active slot's rack, and save/apply through the real profile +
+    // equip paths (apply is combat-guarded via Engine.inCombat).
+    (window.__XANDRIA__ as Record<string, unknown>).loadoutTest = {
+      MAX_LOADOUTS,
+      validateGearLoadouts,
+      defaultGearLoadouts,
+      captureLoadout,
+      applyGearLoadout,
+      loadoutPieceCount,
+      liveLoadouts: (): unknown => getGearLoadouts(loadProfile()),
+      liveInventory: (): unknown =>
+        (blueprint as { itemKit?: { inventory?: unknown } | null }).itemKit?.inventory ?? null,
+      liveDefs: (): Record<string, unknown> =>
+        (spec.custom?.items?.defs ?? {}) as Record<string, unknown>,
+      saveLive: (index: number, name?: string): boolean => {
+        const inv = (blueprint as { itemKit?: { inventory?: { getAllEquipped: () => Record<string, string> } } | null }).itemKit?.inventory;
+        if (!inv) return false;
+        const rack = getGearLoadouts(loadProfile());
+        const snap = captureLoadout(name ?? rack[index]?.name ?? `Loadout ${index + 1}`, inv.getAllEquipped(), spec.custom?.items?.defs ?? {});
+        const p = loadProfile();
+        const ok = setGearLoadout(p, index, snap);
+        if (ok) saveProfile(p);
+        return ok;
+      },
+      applyLive: (index: number): unknown => {
+        const inv = (blueprint as { itemKit?: { inventory?: unknown } | null }).itemKit?.inventory;
+        const loadout = getGearLoadouts(loadProfile())[index];
+        if (!inv || !loadout) return { ok: false, reason: 'no-inventory' };
+        return applyGearLoadout(
+          inv as Parameters<typeof applyGearLoadout>[0],
+          loadout,
+          spec.custom?.items?.defs ?? {},
+          () => engine.inCombat(),
+        );
+      },
+      renameLive: (index: number, name: string): boolean => {
+        const p = loadProfile();
+        const ok = renameGearLoadout(p, index, name);
+        if (ok) saveProfile(p);
+        return ok;
+      },
+      clearLive: (index: number): boolean => {
+        const p = loadProfile();
+        const ok = clearGearLoadout(p, index);
+        if (ok) saveProfile(p);
+        return ok;
+      },
+      inCombat: (): boolean => engine.inCombat(),
+    };
     // Tutorial wave: test-mode seam for the tutorial e2e harness — the
     // live TutorialManager (observe-only) plus the defs table so the spec
     // can assert step order, prompts, and skip rules without touching
@@ -895,6 +1201,39 @@ function boot() {
       computeEnchantStats,
       ensureEnchantItemDefs,
     };
+    // Elemental-damage-types wave: test-mode seam for the elemental e2e
+    // + unit harnesses — the damage-type table, the resistance table,
+    // the pure helpers, and the live inventory's outgoing-type resolver.
+    (window.__XANDRIA__ as Record<string, unknown>).elementalTest = {
+      DAMAGE_TYPES,
+      ELEMENTAL_TABLE,
+      ENEMY_RESISTANCES,
+      elementalDef,
+      isDamageType,
+      normalizeDamageType,
+      resistanceFor,
+      elementalMultiplierFor,
+      applyElemental,
+      resistanceLines,
+      outgoingDamageType,
+      outgoingDamageTypeDetail,
+      /** Test seam: the live player inventory's outgoing damage type. */
+      liveOutgoingDamageType: (): string =>
+        (blueprint as { itemKit?: { inventory?: { outgoingDamageType: () => string } } | null }).itemKit?.inventory?.outgoingDamageType() ?? 'physical',
+    };
+    // Gear-salvage wave: test-mode seam for the salvage e2e + unit
+    // harnesses — the tuning table, the seeded roll, the loadout
+    // snapshot helper, and the live inventory via lootTest.
+    (window.__XANDRIA__ as Record<string, unknown>).salvageTest = {
+      SALVAGE_SALT,
+      SALVAGE_TABLE,
+      SET_PIECE_SALVAGE_BONUS,
+      salvageRowFor,
+      isSetPiece,
+      salvageSeedFor,
+      buildSalvageRng,
+      rollSalvageYields,
+      clearSalvagedFromLoadouts,    };
     // Quest wave: test-mode seam for the quest e2e harness — the pool
     // builder, salts, manager class and the live blueprint handles.
     // Side-quests wave: SIDE_QUEST_SALT + buildSideQuestPool ride the same
@@ -955,9 +1294,35 @@ function boot() {
       /** Test seam: open the radiant board panel (the real UI path, not a manager call). */
       openRadiantBoard: (): void =>
         (blueprint as { radiantBoardPanel?: { show: () => void } | null }).radiantBoardPanel?.show(),
+      // Timed-quests wave: the salt, the template table, the pure
+      // offer generators (batch + single-slot replication), the count
+      // resolver, and the live board/panel handles for the timed e2e.
+      TIMED_QUEST_SALT,
+      TIMED_TEMPLATES,
+      buildTimedOffers,
+      timedOfferAt,
+      resolveTimedCount,
+      eligibleTimedTemplates,
+      TimedBoard,
+      /** Test seam: the live timed board from the blueprint build (null when disabled). */
+      liveTimedBoard: (): TimedBoard | null =>
+        (blueprint as { timedBoard?: TimedBoard | null }).timedBoard ?? null,
+      /** Test seam: open the timed board panel (the real UI path, not a manager call). */
+      openTimedBoard: (): void =>
+        (blueprint as { timedBoardPanel?: { show: () => void } | null }).timedBoardPanel?.show(),
       /** Test seam: the live talk session from the blueprint build (null when absent). */
       liveTalkSession: (): QuestTalkSession | null =>
         (blueprint as { talkSession?: QuestTalkSession | null }).talkSession ?? null,
+    };
+    // Quest-waypoints wave: test-mode seam for the waypoint e2e — the
+    // pure resolver, the tracked-objective selector, and the live
+    // engine-owned waypoint presenter (beacon/minimap/compass).
+    (window.__XANDRIA__ as Record<string, unknown>).waypointTest = {
+      resolveQuestWaypoint,
+      trackedObjective,
+      WAYPOINT_SCAN_INTERVAL_S,
+      /** Test seam: the live QuestWaypoints from the engine build. */
+      live: () => engine.waypoints,
     };
     // Boss-fights wave: test-mode seam for the boss e2e + unit harnesses —
     // the salt, the data-driven defs, the pure placement/phase/pick
@@ -983,6 +1348,23 @@ function boot() {
       liveBar: (): BossBar | null =>
         (blueprint as { bossBar?: BossBar }).bossBar ?? null,
     };
+    // Wandering world-boss wave: test-mode seam for the world-boss e2e +
+    // unit harnesses — the salt, the pure plan/resolvers, and the live
+    // blueprint handles (event + its owned open-field encounter).
+    (window.__XANDRIA__ as Record<string, unknown>).worldBossTest = {
+      WORLDBOSS_SALT,
+      WORLDBOSS_BASE_HEALTH,
+      planWorldBoss,
+      resolveWorldBossEnabled,
+      resolveWorldBossDef,
+      WorldBossEvent,
+      /** Test seam: the live WorldBossEvent from the blueprint build (null when absent). */
+      liveWorldBoss: (): WorldBossEvent | null =>
+        (blueprint as { worldBoss?: WorldBossEvent }).worldBoss ?? null,
+      /** Test seam: the live open-field BossEncounter owned by the event. */
+      liveEncounter: (): BossEncounter | null =>
+        (blueprint as { worldBoss?: WorldBossEvent }).worldBoss?.liveEncounter ?? null,
+    };
     // UPGRADE LOOP (audio-system): test-mode seam for the audio e2e —
     // the pure per-biome pattern fn (so e2e can replicate the loop
     // independently) and the live engine's biome setter for determinism
@@ -1000,6 +1382,8 @@ function boot() {
       SkillSystem,
       SKILL_DEFS,
       SKILL_IDS,
+      SYNERGY_DEFS,
+      evaluateSynergies,
       SkillsPanel,
       resolveSkillsEnabled,
       resolveSkillsXpMultiplier,
@@ -1098,6 +1482,27 @@ function boot() {
       livePanel: (): { render: (rows: unknown[]) => void } | null =>
         (blueprint as { standingsPanel?: { render: (rows: unknown[]) => void } }).standingsPanel ?? null,
     };
+    // UPGRADE LOOP (dialogue-branching): test-mode seam for the dialogue
+    // e2e harness — the tuning table, engine/state classes, validators,
+    // the storage adapter, and the live blueprint handles. Production
+    // dialogue never touches this seam.
+    (window.__XANDRIA__ as Record<string, unknown>).dialogueTest = {
+      DIALOGUE_TREES,
+      DialogueEngine,
+      DialogueState,
+      FIRST_QUEST_REF,
+      localStorageDialogueAdapter,
+      validateDialogueTree,
+      validateDialogueTrees,
+      /** Test seam: the live dialogue engine from the blueprint build. */
+      liveEngine: (): DialogueEngine | null =>
+        (blueprint as { dialogueEngine?: DialogueEngine }).dialogueEngine ?? null,
+      /** Test seam: the live dialogue state from the blueprint build. */
+      liveState: (): DialogueState | null =>
+        (blueprint as { dialogueState?: DialogueState }).dialogueState ?? null,
+      /** Test seam: the live dialogue state on the engine (null when absent). */
+      liveEngineState: (): DialogueState | null => engine.dialogueState ?? null,
+    };
     // UPGRADE LOOP (weather-cycles): test-mode seam for the weather e2e
     // harness — the salt, the tuning table, the pure scheduler, the
     // resolvers, and the live blueprint handle.
@@ -1112,6 +1517,20 @@ function boot() {
       /** Test seam: the live WeatherCycleManager from the blueprint build (null when absent). */
       liveWeather: (): WeatherCycleManager | null =>
         (blueprint as { weather?: WeatherCycleManager | null }).weather ?? null,
+    };
+    // UPGRADE LOOP (hazard-zones): test-mode seam for the hazard e2e
+    // harness — the salt, the defs table, the pure scheduler, the
+    // resolvers, and the live blueprint handle.
+    (window.__XANDRIA__ as Record<string, unknown>).hazardTest = {
+      HAZARD_SALT,
+      HAZARD_DEFS,
+      planHazardZones,
+      resolveHazardsEnabled,
+      resolveHazardCount,
+      HazardZoneManager,
+      /** Test seam: the live HazardZoneManager from the blueprint build (null when absent). */
+      liveHazards: (): HazardZoneManager | null =>
+        (blueprint as { hazards?: HazardZoneManager | null }).hazards ?? null,
     };
     // COMBAT-ABILITIES (upgrade loop): test-mode seam for the abilities
     // e2e harness — the tuning table, the manager, and the live handles.

@@ -35,10 +35,38 @@ export interface CritCtx {
   tier: ItemRarity | null;
   /** smithing skill rank (0 = unknown/unranked, 1..3 otherwise). */
   skillRank: number;
+  /**
+   * SKILL-SYNERGIES: additive crit-chance bonus from active skill
+   * synergies, applied AFTER the table's tier + smithing-rank bonuses.
+   * Omitted = 0 (every pre-synergy caller). Never changes the roll's
+   * seeded draw — only the threshold the draw is compared against.
+   */
+  synergyChanceBonus?: number;
+  /** SKILL-SYNERGIES: additive crit-multiplier bonus, same order. Omitted = 0. */
+  synergyMultiplierBonus?: number;
 }
 
 /** The default context: no weapon, no skill rank — base table only. */
 export const BASE_CRIT_CTX: CritCtx = { tier: null, skillRank: 0 };
+
+/**
+ * Build a CritCtx carrying skill-synergy bonuses (blueprint damage
+ * paths that construct the context inline — projectiles, melee).
+ * Keeps the bonus plumbing in one place; bonuses are the
+ * SkillSystem.synergyCritBonuses() sums, applied after tier + rank.
+ */
+export function synergyCritCtx(
+  tier: ItemRarity | null,
+  skillRank: number,
+  bonuses: { chanceBonus: number; multiplierBonus: number },
+): CritCtx {
+  return {
+    tier,
+    skillRank,
+    synergyChanceBonus: bonuses.chanceBonus,
+    synergyMultiplierBonus: bonuses.multiplierBonus,
+  };
+}
 
 /** One tuning table — every crit number lives here and nowhere else. */
 export const CRIT_TABLE = {
@@ -73,6 +101,11 @@ function clampRank(rank: number): number {
   return Math.max(0, Math.min(3, Math.floor(rank)));
 }
 
+/** Synergy bonuses are additive and never negative; garbage sanitizes to 0. */
+function clampSynergyBonus(v: number | undefined): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
 /** Round to the table's authored precision — the bonus decimals are
  * exact at 2 places, so float dust (0.05 + 0.1 = 0.15000000000000002)
  * must never leak into a chance boundary or a displayed multiplier. */
@@ -80,28 +113,41 @@ function round4(n: number): number {
   return Math.round(n * 10000) / 10000;
 }
 
-/** Effective crit chance (0..1) for a tier + smithing rank. */
-export function critChanceFor(tier: ItemRarity | null, skillRank: number): number {
+/** Effective crit chance (0..1) for a tier + smithing rank + synergy bonus. */
+export function critChanceFor(
+  tier: ItemRarity | null,
+  skillRank: number,
+  synergyChanceBonus = 0,
+): number {
   const t = tier ?? 'common';
   const r = clampRank(skillRank);
   return Math.min(
     1,
-    round4(
-      CRIT_TABLE.baseChance +
-        (CRIT_TABLE.tierChanceBonus[t] ?? 0) +
-        (CRIT_TABLE.skillRankChanceBonus[r] ?? 0),
+    Math.max(
+      0,
+      round4(
+        CRIT_TABLE.baseChance +
+          (CRIT_TABLE.tierChanceBonus[t] ?? 0) +
+          (CRIT_TABLE.skillRankChanceBonus[r] ?? 0) +
+          clampSynergyBonus(synergyChanceBonus),
+      ),
     ),
   );
 }
 
-/** Effective crit damage multiplier for a tier + smithing rank. */
-export function critMultiplierFor(tier: ItemRarity | null, skillRank: number): number {
+/** Effective crit damage multiplier for a tier + smithing rank + synergy bonus. */
+export function critMultiplierFor(
+  tier: ItemRarity | null,
+  skillRank: number,
+  synergyMultiplierBonus = 0,
+): number {
   const t = tier ?? 'common';
   const r = clampRank(skillRank);
   return round4(
     CRIT_TABLE.baseMultiplier +
       (CRIT_TABLE.tierMultiplierBonus[t] ?? 0) +
-      (CRIT_TABLE.skillRankMultiplierBonus[r] ?? 0),
+      (CRIT_TABLE.skillRankMultiplierBonus[r] ?? 0) +
+      clampSynergyBonus(synergyMultiplierBonus),
   );
 }
 
@@ -118,8 +164,8 @@ export function critStatsFor(ctx: CritCtx): CritStats {
   const tier = ctx.tier ?? 'common';
   const skillRank = clampRank(ctx.skillRank);
   return {
-    chance: critChanceFor(tier, skillRank),
-    multiplier: critMultiplierFor(tier, skillRank),
+    chance: critChanceFor(tier, skillRank, ctx.synergyChanceBonus),
+    multiplier: critMultiplierFor(tier, skillRank, ctx.synergyMultiplierBonus),
     tier,
     skillRank,
   };
@@ -130,9 +176,15 @@ export function rollCrit(
   u: number,
   tier: ItemRarity | null,
   skillRank: number,
+  synergy?: { chanceBonus?: number; multiplierBonus?: number },
 ): { crit: boolean; multiplier: number } {
-  const crit = u < critChanceFor(tier, skillRank);
-  return { crit, multiplier: crit ? critMultiplierFor(tier, skillRank) : 1 };
+  const crit = u < critChanceFor(tier, skillRank, synergy?.chanceBonus);
+  return {
+    crit,
+    multiplier: crit
+      ? critMultiplierFor(tier, skillRank, synergy?.multiplierBonus)
+      : 1,
+  };
 }
 
 /**
@@ -154,6 +206,9 @@ export class CritRoller {
 
   /** Roll a crit for a context; consumes exactly one seeded draw. */
   roll(ctx: CritCtx): { crit: boolean; multiplier: number } {
-    return rollCrit(this.rng.next(), ctx.tier, ctx.skillRank);
+    return rollCrit(this.rng.next(), ctx.tier, ctx.skillRank, {
+      chanceBonus: ctx.synergyChanceBonus,
+      multiplierBonus: ctx.synergyMultiplierBonus,
+    });
   }
 }

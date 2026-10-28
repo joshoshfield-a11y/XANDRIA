@@ -266,6 +266,14 @@ export interface DailyBoardRow {
   today: boolean;
   goalText: string;
   loadoutText: string;
+  /**
+   * UPGRADE LOOP (daily-mutators): the day's mutator set, enriched by
+   * Engine.showTitle (dailyMutators.ts) — challengeBoard itself stays a
+   * pure challenge-tuple function. Optional so older callers/tests that
+   * build rows by hand keep compiling; HUD renders the line only when set.
+   */
+  mutators?: string[];
+  mutatorText?: string;
   result: {
     score: number;
     kills: number;

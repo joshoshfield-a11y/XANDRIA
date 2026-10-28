@@ -10,9 +10,15 @@ import * as THREE from 'three';
 import type { Engine } from '../engine/Engine';
 import { EQUIP_SLOTS, type EquipSlot, type GameSpec, type ItemDef } from '@spec';
 import { Inventory } from '../engine/game/items/Inventory';
-import { InventoryHUD, type InventorySellHooks } from '../engine/ui/InventoryHUD';
+import { InventoryHUD, type InventorySellHooks, type InventorySalvageHooks } from '../engine/ui/InventoryHUD';
 import { buildSetUiReport } from '../engine/game/setBonuses';
 import { critStatsFor } from '../engine/game/crit';
+import { applyGearLoadout, captureLoadout } from '../engine/game/loadouts';
+import { clearSalvagedFromLoadouts } from '../engine/game/salvage';
+import {
+  loadProfile, saveProfile, getGearLoadouts, setGearLoadout,
+  renameGearLoadout, clearGearLoadout,
+} from '../engine/game/Profile';
 import { wireItems } from '../engine/game/items/wireItems';
 import { type ItemWorld } from '../engine/game/items/ItemWorld';
 import { ItemModelForge } from '../engine/gfx/ItemModels';
@@ -32,7 +38,7 @@ export class BlueprintItemKit {
   private buffUntil = 0;
   private buffMult = 1;
 
-  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar, opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number }) {
+  constructor(engine: Engine, spec: GameSpec, avatar: PlayerAvatar, opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number; synergyCrit?: () => { chanceBonus: number; multiplierBonus: number }; salvageHooks?: InventorySalvageHooks | null }) {
     this.engine = engine;
     this.spec = spec;
     this.avatar = avatar;
@@ -47,13 +53,53 @@ export class BlueprintItemKit {
     this.hud = new InventoryHUD(engine.container, this.inventory, {
       input: engine.input,
       sell: opts?.sell ?? null,
+      // Gear-salvage wave: loadout-clearing hook, wired now that the
+      // loadout-presets wave has merged (REPORT loadout rule).
+      salvageHooks: {
+        clearFromLoadouts: (itemId) => {
+          const p = loadProfile();
+          if (clearSalvagedFromLoadouts(p.gearLoadouts, itemId)) saveProfile(p);
+        },
+      },
       setReport: () => buildSetUiReport(this.inventory),
       // CRIT-SYSTEM: the inventory panel's CRIT STATS section reads live
       // equipped-weapon tier + smithing rank through this resolver.
+      // SKILL-SYNERGIES: synergy crit bonuses ride the same resolver so
+      // the displayed stats always match the rolls' math.
       critReport: () => critStatsFor({
         tier: this.equippedWeaponRarity(),
         skillRank: opts?.smithingRank?.() ?? 0,
+        synergyChanceBonus: opts?.synergyCrit?.().chanceBonus ?? 0,
+        synergyMultiplierBonus: opts?.synergyCrit?.().multiplierBonus ?? 0,
       }),
+      // Loadout-presets wave: the LOADOUTS section reads/writes the
+      // active save slot's profile rack (persisted via saveProfile);
+      // apply reuses equip/unequip through applyGearLoadout and is
+      // refused while Engine.inCombat() reports combat.
+      loadouts: {
+        list: () => getGearLoadouts(loadProfile()),
+        capture: (name) => captureLoadout(name, this.inventory.getAllEquipped(), this.defs),
+        save: (index, loadout) => {
+          const p = loadProfile();
+          if (setGearLoadout(p, index, loadout)) saveProfile(p);
+        },
+        rename: (index, name) => {
+          const p = loadProfile();
+          const ok = renameGearLoadout(p, index, name);
+          if (ok) saveProfile(p);
+          return ok;
+        },
+        clear: (index) => {
+          const p = loadProfile();
+          if (clearGearLoadout(p, index)) saveProfile(p);
+        },
+        apply: (index) => {
+          const loadout = getGearLoadouts(loadProfile())[index];
+          if (!loadout) return { ok: false, reason: 'unknown-loadout', applied: [], unchanged: [], missing: [], blocked: [] };
+          return applyGearLoadout(this.inventory, loadout, this.defs, () => this.engine.inCombat());
+        },
+        inCombat: () => this.engine.inCombat(),
+      },
     });
 
     // single loot path: drops → magnet → onPickup → inventory.add (no double-count)
@@ -104,6 +150,11 @@ export class BlueprintItemKit {
     const id = this.inventory.getEquipped('weapon');
     if (!id) return null;
     return this.defs[id]?.rarity ?? null;
+  }
+
+  /** Outgoing damage type from the equipped weapon's enchant (elemental.ts). */
+  outgoingDamageType(): import('../engine/game/elemental').DamageType {
+    return this.inventory.outgoingDamageType();
   }
 
   /** Outgoing damage multiplier from equipped damage stat + active set bonuses + active buffs. */
@@ -163,7 +214,7 @@ export function buildItemKit(
   engine: Engine,
   spec: GameSpec,
   avatar: PlayerAvatar,
-  opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number },
+  opts?: { sell?: InventorySellHooks | null; smithingRank?: () => number; synergyCrit?: () => { chanceBonus: number; multiplierBonus: number }; salvageHooks?: InventorySalvageHooks | null },
 ): BlueprintItemKit | null {
   if (!spec.custom?.items) return null;
   const kit = new BlueprintItemKit(engine, spec, avatar, opts);

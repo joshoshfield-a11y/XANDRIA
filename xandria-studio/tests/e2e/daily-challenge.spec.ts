@@ -94,7 +94,19 @@ async function boardRows(page: any) {
 }
 
 async function readProfile(page: any) {
-  return page.evaluate(() => JSON.parse(localStorage.getItem('xandria.profile.v1') ?? '{}'));
+  // SAVE-SLOTS: profiles live in the active slot of xandria.slots.v1 now;
+  // the legacy xandria.profile.v1 key is only a fallback for old stores.
+  return page.evaluate(() => {
+    const slotsRaw = localStorage.getItem('xandria.slots.v1');
+    if (slotsRaw) {
+      try {
+        const st = JSON.parse(slotsRaw);
+        const active = st.slots?.find((s: any) => s.id === st.activeSlotId) ?? st.slots?.[0];
+        if (active?.profile) return active.profile;
+      } catch { /* fall through to the legacy key */ }
+    }
+    return JSON.parse(localStorage.getItem('xandria.profile.v1') ?? '{}');
+  });
 }
 
 test('daily challenge: title board, seeded start, scoring + persistence', async ({ page }) => {

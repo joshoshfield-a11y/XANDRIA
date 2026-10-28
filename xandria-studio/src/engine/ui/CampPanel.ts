@@ -22,6 +22,22 @@ export interface CampPanelSource {
   backpackItems: () => string[];
   defName: (itemId: string) => string;
   buffRemaining: () => number;
+  /** camp-upgrades: current upgrade tier of a structure (0 = base build) */
+  tierOf: (id: string) => number;
+  /** camp-upgrades: highest upgrade tier a structure supports */
+  maxTier: (id: string) => number;
+  /** camp-upgrades: short current-tier effect text for a structure */
+  tierEffect: (id: string) => string;
+  /** camp-upgrades: next tier's cost as "have/need" text ('' at max tier) */
+  nextTierCost: (id: string) => string;
+  /** camp-upgrades: chest capacity in total stored units */
+  chestCapacity: () => number;
+  /** camp-upgrades: units currently stored in the chest */
+  chestUsed: () => number;
+  /** camp-upgrades: seconds of rested bonus remaining (0 when inactive) */
+  restedRemaining: () => number;
+  /** camp-upgrades: upgrade one structure a tier; failure reason or null */
+  onUpgrade: (id: string) => string | null;
   /** build one structure; returns the failure reason or null on success */
   onBuild: (id: string) => string | null;
   /** deposit n units; returns units actually moved */
@@ -43,6 +59,7 @@ export class CampPanel {
   private root: HTMLDivElement;
   private bodyEl: HTMLDivElement;
   private msgEl: HTMLDivElement;
+  private summaryEl: HTMLDivElement;
   private onKey: (e: KeyboardEvent) => void;
   private disposed = false;
   private open_ = false;
@@ -75,17 +92,22 @@ export class CampPanel {
     const body = doc.createElement('div');
     const msg = doc.createElement('div');
     msg.style.cssText = 'font-size:13px;color:#ffcf7a;min-height:18px;margin-bottom:6px';
+    // camp-upgrades: tier indicator — one line, every structure's tier.
+    const summary = doc.createElement('div');
+    summary.id = 'xandria-camp-tier-summary';
+    summary.style.cssText = 'font-size:12px;color:#4ade80;margin-bottom:10px';
 
     const close = doc.createElement('button');
     close.textContent = 'Leave  (Esc)';
     close.style.cssText = `${BTN};background:transparent;color:#9aa4b8;border:1px solid rgba(154,164,184,0.4)`;
     close.addEventListener('click', () => this.hide());
 
-    root.append(title, sub, msg, body, close);
+    root.append(title, sub, summary, msg, body, close);
     container.appendChild(root);
     this.root = root as HTMLDivElement;
     this.bodyEl = body as HTMLDivElement;
     this.msgEl = msg as HTMLDivElement;
+    this.summaryEl = summary as HTMLDivElement;
 
     this.onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && this.open_) this.hide();
@@ -142,6 +164,14 @@ export class CampPanel {
     this.bodyEl.replaceChildren();
     this.setMsg('');
 
+    // camp-upgrades: tier indicator line (also the e2e-readable summary).
+    this.summaryEl.textContent = s.structures().map((def) => {
+      const isBuilt = built.has(def.id);
+      const tier = s.tierOf(def.id);
+      const max = s.maxTier(def.id);
+      return isBuilt ? `${def.name}: Tier ${tier}/${max}` : `${def.name}: not built`;
+    }).join(' · ');
+
     // --- BUILD ---
     this.bodyEl.appendChild(this.section('BUILD'));
     const buildEl = this.doc.createElement('div');
@@ -150,22 +180,52 @@ export class CampPanel {
       const row = this.doc.createElement('div');
       row.style.cssText = ROW;
       const isBuilt = built.has(def.id);
+      const tier = s.tierOf(def.id);
+      const max = s.maxTier(def.id);
       const costText = def.cost.map((c) => `${s.defName(c.itemId)} ${s.inventoryCount(c.itemId)}/${c.count}`).join(' · ');
       const label = this.doc.createElement('span');
-      label.textContent = `${def.name} — ${def.desc} [${costText}]`;
-      const btn = this.button(isBuilt ? 'Built' : 'Build', isBuilt, `xandria-camp-build-${def.id}`);
-      btn.addEventListener('click', () => {
-        const err = s.onBuild(def.id);
-        if (err) this.setMsg(err);
-        this.render();
-      });
+      label.textContent = isBuilt
+        ? `${def.name} [Tier ${tier}/${max}] — ${s.tierEffect(def.id)} [${costText}]`
+        : `${def.name} — ${def.desc} [${costText}]`;
+      let btn: HTMLButtonElement;
+      if (!isBuilt) {
+        btn = this.button('Build', false, `xandria-camp-build-${def.id}`);
+        btn.addEventListener('click', () => {
+          const err = s.onBuild(def.id);
+          if (err) this.setMsg(err);
+          this.render();
+        });
+      } else if (tier < max) {
+        // camp-upgrades: upgrade path — cost shown is the NEXT tier's
+        // cost, read live from the tier table via the session's counts.
+        const nextCost = s.nextTierCost(def.id);
+        const upLabel = this.doc.createElement('span');
+        upLabel.textContent = `Next tier: ${nextCost}`;
+        upLabel.style.cssText = 'font-size:12px;opacity:0.75';
+        btn = this.button(`Upgrade → Tier ${tier + 1}`, false, `xandria-camp-upgrade-${def.id}`);
+        btn.addEventListener('click', () => {
+          const err = s.onUpgrade(def.id);
+          if (err) this.setMsg(err);
+          this.render();
+        });
+        const btnCol = this.doc.createElement('span');
+        btnCol.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:2px';
+        btnCol.append(upLabel, btn);
+        row.append(label, btnCol);
+        buildEl.appendChild(row);
+        continue;
+      } else {
+        btn = this.button('Max tier', true, `xandria-camp-upgrade-${def.id}`);
+      }
       row.append(label, btn);
       buildEl.appendChild(row);
     }
     this.bodyEl.appendChild(buildEl);
 
     // --- STORAGE ---
-    this.bodyEl.appendChild(this.section('STORAGE CHEST'));
+    this.bodyEl.appendChild(this.section(built.has('chest')
+      ? `STORAGE CHEST (${s.chestUsed()}/${s.chestCapacity()})`
+      : 'STORAGE CHEST'));
     const storeEl = this.doc.createElement('div');
     storeEl.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-bottom:12px';
     if (!built.has('chest')) {
@@ -223,7 +283,10 @@ export class CampPanel {
     const restRow = this.doc.createElement('div');
     restRow.style.cssText = ROW;
     const restLabel = this.doc.createElement('span');
-    restLabel.textContent = built.has('rest') ? 'Restore HP to full, exactly.' : 'Build the rest point to rest here.';
+    const rested = s.restedRemaining();
+    restLabel.textContent = rested > 0
+      ? `Rested bonus active for ${Math.ceil(rested)}s more.`
+      : built.has('rest') ? `Rest — ${s.tierEffect('rest')}.` : 'Build the rest point to rest here.';
     const restBtn = this.button('Rest', !built.has('rest'), 'xandria-camp-rest');
     restBtn.addEventListener('click', () => {
       const err = s.onRest();
@@ -244,8 +307,8 @@ export class CampPanel {
     const remaining = s.buffRemaining();
     const wbLabel = this.doc.createElement('span');
     wbLabel.textContent = remaining > 0
-      ? `Sharpened — +10% melee damage for ${Math.ceil(remaining)}s more.`
-      : built.has('workbench') ? 'Sharpen tools: +10% melee damage for 10 min.' : 'Build the workbench to sharpen tools.';
+      ? `Sharpened — ${s.tierEffect('workbench')} for ${Math.ceil(remaining)}s more.`
+      : built.has('workbench') ? `Sharpen tools: ${s.tierEffect('workbench')}.` : 'Build the workbench to sharpen tools.';
     const wbBtn = this.button('Sharpen', !built.has('workbench'), 'xandria-camp-workbench');
     wbBtn.addEventListener('click', () => {
       const err = s.onActivateBuff();

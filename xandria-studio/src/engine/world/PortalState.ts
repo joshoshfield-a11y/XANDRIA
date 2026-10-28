@@ -55,6 +55,7 @@ import type { PlayerAvatar } from '@blueprints/common';
 import type { Inventory } from '../game/items/Inventory';
 import type { Progression } from '../game/Progression';
 import type { QuestManager, QuestPortalSnapshot } from '../game/quests';
+import type { DialogueState, DialogueSnapshot } from '../game/dialogue';
 import type { SkillSystem } from '../game/skills';
 import type { Wallet } from '../game/economy';
 import type { Terrain } from './Terrain';
@@ -100,6 +101,12 @@ export interface PlayerStateSnapshot {
   progression: PortalProgressionSnapshot | null;
   /** QuestManager.portalSnapshot() JSON — quest statuses + objective progress. */
   quests: QuestPortalSnapshot | null;
+  /**
+   * Dialogue-branching wave: DialogueState.portalSnapshot() JSON —
+   * visited nodes, chosen choices, flags, last node per tree.
+   * Player-scoped like quests; absent (pre-dialogue snapshots) = null.
+   */
+  dialogue: DialogueSnapshot | null;
   /** skills: per-skill XP; null when the blueprint has no SkillSystem */
   skills: PortalSkillsSnapshot | null;
   /** spec.custom.weaponMods.rateOfFire after 'firerate' upgrades; null = untouched. */
@@ -125,6 +132,14 @@ export interface PortalParts {
   progression: Progression | null;
   /** quest wave: the blueprint's player-scoped QuestManager (null = quests off) */
   quests?: QuestManager | null;
+  /**
+   * Dialogue-branching wave: the blueprint's player-scoped DialogueState
+   * (null/undefined = dialogue off). Snapshot/restore keeps visited
+   * nodes, choices and flags across blueprint rebuilds; live portal
+   * transitions never touch the object at all (it's never in
+   * engine.portalEntities).
+   */
+  dialogue?: DialogueState | null;
   /** the blueprint's SkillSystem (skills wave); null/undefined when absent */
   skills?: SkillSystem | null;
   /**
@@ -166,6 +181,7 @@ export function capturePlayerState(engine: Engine, parts: PortalParts): PlayerSt
     inventory: parts.inventory ? parts.inventory.serialize() : new InventoryShim().serialize(),
     progression: parts.progression ? parts.progression.portalSnapshot() : null,
     quests: parts.quests ? parts.quests.portalSnapshot() : null,
+    dialogue: parts.dialogue ? parts.dialogue.portalSnapshot() : null,
     skills: parts.skills ? parts.skills.portalSnapshot() : null,
     weaponRateOfFire: readWeaponRateOfFire(engine),
     buff: buff ? { until: buff.until, mult: buff.mult } : null,
@@ -203,6 +219,7 @@ export function applyPlayerState(engine: Engine, parts: PortalParts, snap: Playe
   if (parts.inventory) parts.inventory.restore(snap.inventory);
   if (parts.progression && snap.progression) parts.progression.portalRestore(snap.progression);
   if (parts.quests && snap.quests) parts.quests.portalRestore(snap.quests);
+  if (parts.dialogue && snap.dialogue) parts.dialogue.portalRestore(snap.dialogue);
   if (parts.skills && snap.skills) parts.skills.portalRestore(snap.skills);
   // vendor-economy: pre-economy snapshots carry no currency field — default 0.
   if (parts.wallet) parts.wallet.portalRestore({ balance: snap.currency ?? 0 });

@@ -39,7 +39,7 @@ export interface VariantEnemy {
   rig: { group: { rotation: { y: number } }; flash(): void } | null;
   position: THREE.Vector3;
   home: THREE.Vector3;
-  damage(amount: number, from?: THREE.Vector3): void;
+  damage(amount: number, from?: THREE.Vector3, type?: import('../engine/game/elemental').DamageType): number;
 }
 
 export const VARIANT_DEFS: Record<EnemyVariant, { base: EnemyKind; tint: string; blurb: string }> = {
@@ -198,8 +198,12 @@ export class VariantDirector {
     if (variant === 'shielded') {
       const orig = e.damage.bind(e);
       const ve = e as unknown as VariantEnemy;
-      e.damage = (amount: number, from?: THREE.Vector3) => {
-        orig(shieldedDamage(ve, amount, from), from);
+      // ELEMENTAL-DAMAGE-TYPES: the front-arc reduction applies to the
+      // incoming amount BEFORE Enemy.damage()'s elemental step (the
+      // wrapper is caller-side), and the type passes through untouched
+      // so the elemental multiplier still applies inside damage().
+      e.damage = (amount: number, from?: THREE.Vector3, type?: import('../engine/game/elemental').DamageType) => {
+        return orig(shieldedDamage(ve, amount, from), from, type);
       };
     }
   }

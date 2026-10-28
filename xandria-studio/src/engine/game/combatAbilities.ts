@@ -43,6 +43,7 @@ import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import type { FloatingTextKind } from './floatingText';
 import { BASE_CRIT_CTX, rollCrit, type CritCtx } from './crit';
+import { displayedDamage, type DamageType } from './elemental';
 
 /** Salt for the ability variance stream — off the loot/enemy streams. */
 export const ABILITY_SALT = 0xab17;
@@ -86,6 +87,14 @@ export interface AbilityDef {
   duration: number;
   /** VFX colors (pooled particles only) */
   color: string;
+  /**
+   * ELEMENTAL-DAMAGE-TYPES: the damage type this ability deals, from
+   * the elemental table. Null for non-damaging abilities (mend) — the
+   * type never reaches Enemy.damage() for them. Adding a type here
+   * changes no ability contract: the def gains one data field, and
+   * the elemental step applies inside Enemy.damage() after crit.
+   */
+  damageType: DamageType | null;
   /** default hotkey label, for the bar (Input owns the real binding) */
   keyLabel: string;
 }
@@ -108,6 +117,7 @@ export const ABILITY_DEFS: readonly AbilityDef[] = [
     totalHeal: 0,
     duration: 0,
     color: '#7af7ff',
+    damageType: 'physical',
     keyLabel: 'Z',
   },
   {
@@ -127,6 +137,7 @@ export const ABILITY_DEFS: readonly AbilityDef[] = [
     totalHeal: 0,
     duration: 0,
     color: '#ffb46b',
+    damageType: 'shock',
     keyLabel: 'C',
   },
   {
@@ -146,6 +157,7 @@ export const ABILITY_DEFS: readonly AbilityDef[] = [
     totalHeal: 45,
     duration: 3,
     color: '#8fe3a8',
+    damageType: null,
     keyLabel: 'V',
   },
 ];
@@ -171,7 +183,13 @@ export interface AbilityEnemies {
   enemies: Array<{
     alive: boolean;
     position: THREE.Vector3;
-    damage(amount: number, from?: THREE.Vector3): void;
+    /**
+     * ELEMENTAL-DAMAGE-TYPES: the optional third arg is the damage
+     * type; the return is the typed amount that entered damage()
+     * (Enemy.damage() returns it). Fakes that return nothing are fine —
+     * cast() falls back to the pre-elemental roll for them.
+     */
+    damage(amount: number, from?: THREE.Vector3, type?: DamageType): number | void;
     body?: { applyImpulse(impulse: { x: number; y: number; z: number }): void } | null;
   }>;
 }
@@ -192,7 +210,7 @@ export interface CastResult {
   ok: boolean;
   /** fail reason when ok is false: 'disabled' | 'cooldown' | 'energy' | 'unknown' */
   reason?: string;
-  /** total damage actually dealt by this cast (variance + damageMult applied) */
+  /** total damage actually dealt by this cast (variance + damageMult + crit + elemental, per enemy) */
   damageDealt: number;
   /** enemies hit by this cast */
   targets: number;
@@ -239,8 +257,8 @@ export class AbilityManager {
   private readonly avatar: AbilityAvatar;
   private readonly enemies: AbilityEnemies;
   readonly enabled: boolean;
-  /** last cast, for e2e exact assertions (damage incl. variance + crits) */
-  lastCast: { id: AbilityId; damageDealt: number; targets: number; crits: number } | null = null;
+  /** last cast, for e2e exact assertions (damage incl. variance + crits + elemental) */
+  lastCast: { id: AbilityId; damageDealt: number; targets: number; crits: number; damageType: DamageType | null } | null = null;
 
   constructor(opts: AbilityManagerOpts) {
     this.avatar = opts.avatar;
@@ -295,9 +313,7 @@ export class AbilityManager {
         if (d > def.range) continue;
         if (d > 0 && to.normalize().dot(dir) < def.arcCos) continue;
         const dmg = this.rollDamage(def);
-        e.damage(dmg.dmg, origin);
-        this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
-        damageDealt += dmg.dmg;
+        damageDealt += this.dealDamage(e, dmg, origin, def);
         targets++;
         if (dmg.crit) crits++;
       }
@@ -316,14 +332,13 @@ export class AbilityManager {
         const d = to.length();
         if (d > def.radius) continue;
         const dmg = this.rollDamage(def);
-        e.damage(dmg.dmg, origin);
-        this.fx?.damageNumber(e.position, String(dmg.dmg), def.color, dmg.crit ? 'crit' : 'playerDamage');
+        const dealt = this.dealDamage(e, dmg, origin, def);
         if (dmg.crit) crits++;
         if (e.body && d > 0.001) {
           const push = to.normalize().multiplyScalar(def.knockback);
           e.body.applyImpulse({ x: push.x, y: def.knockback * 0.25, z: push.z });
         }
-        damageDealt += dmg.dmg;
+        damageDealt += dealt;
         targets++;
       }
       this.fx?.burst(origin.clone().add(new THREE.Vector3(0, 0.5, 0)), def.color);
@@ -335,7 +350,7 @@ export class AbilityManager {
       this.hotHealed = 0;
       this.fx?.burst(origin.clone().add(new THREE.Vector3(0, 1.2, 0)), def.color);
     }
-    this.lastCast = { id, damageDealt, targets, crits };
+    this.lastCast = { id, damageDealt, targets, crits, damageType: def.damageType };
     return { ok: true, damageDealt, targets, healed: 0 };
   }
 
@@ -382,6 +397,34 @@ export class AbilityManager {
   }
 
   /**
+   * ELEMENTAL-DAMAGE-TYPES: deal one rolled hit to one enemy. The
+   * def's damageType flows into Enemy.damage() (elemental step, order
+   * step 5, after the crit in rollDamage); the floating number spawns
+   * from the value damage() returns, so it matches the hit exactly.
+   * Returns the post-elemental amount. Fakes whose damage() returns
+   * nothing fall back to the pre-elemental roll (their health math is
+   * the fake's own business); real enemies always return a number.
+   */
+  private dealDamage(
+    e: AbilityEnemies['enemies'][number],
+    dmg: { dmg: number; crit: boolean },
+    origin: THREE.Vector3,
+    def: AbilityDef,
+  ): number {
+    const returned = e.damage(dmg.dmg, origin, def.damageType ?? 'physical');
+    // ELEMENTAL-DAMAGE-TYPES: the number is the crit-applied roll run
+    // through the elemental step caller-side (displayedDamage), so a
+    // shielded-variant front-arc reduction stays HP-only exactly as on
+    // main. Enemies without a build kind (test fakes) fall back to
+    // damage()'s return, then to the pre-elemental roll.
+    const fallback = typeof returned === 'number' ? returned : dmg.dmg;
+    const kind = (e as { damageKind?: string }).damageKind;
+    const amount = displayedDamage(dmg.dmg, kind, def.damageType ?? 'physical', fallback);
+    this.fx?.damageNumber(e.position, String(amount), def.color, dmg.crit ? 'crit' : 'playerDamage');
+    return amount;
+  }
+
+  /**
    * CRIT-SYSTEM: seeded damage roll. First draw is the variance draw
    * (base * damageMult * uniform[0.9, 1.1], identical to before — a
    * non-crit result is bit-identical to the pre-crit formula); the
@@ -392,7 +435,10 @@ export class AbilityManager {
     const u = this.rng.next();
     const base = def.damage * this.damageMult() * (0.9 + u * 0.2);
     const ctx = this.critCtx();
-    const roll = rollCrit(this.rng.next(), ctx.tier, ctx.skillRank);
+    const roll = rollCrit(this.rng.next(), ctx.tier, ctx.skillRank, {
+      chanceBonus: ctx.synergyChanceBonus,
+      multiplierBonus: ctx.synergyMultiplierBonus,
+    });
     // Non-crit keeps the exact pre-crit rounding; crit rounds once after
     // multiplying the already-computed variance value.
     return { dmg: roll.crit ? Math.round(base * roll.multiplier) : Math.round(base), crit: roll.crit };

@@ -31,6 +31,15 @@ export interface FastTravelPanelOpts {
   doc?: Document;
   /** discovered portals, read fresh on every open */
   discovered: () => DiscoveredPortal[];
+  /**
+   * UPGRADE LOOP (camp-upgrades): maps with a built camp, read fresh on
+   * every open (main.ts derives them from the discovered list + the
+   * save-slot campBuilt record). Camp rows travel through the SAME
+   * onTravel pipeline as portal rows — no arrival-semantics change: the
+   * arrived map's state is identical to a walked arrival, and the camp
+   * itself is restored by the camp manager's arrival path.
+   */
+  campAnchors?: () => MapCoord[];
   /** current map coordinate */
   current: () => MapCoord;
   /** run the travel; resolves true when the player arrived */
@@ -196,10 +205,25 @@ export class FastTravelPanel {
     this.chip.remove();
   }
 
+  private travelButton(coord: MapCoord, aria: string): HTMLButtonElement {
+    const doc = this.opts.doc ?? globalThis.document;
+    const btn = el(doc, 'button', [
+      'background:rgba(30,42,64,.9)', `color:${GOLD}`, `border:1px solid ${GOLD}73`,
+      'border-radius:6px', 'padding:0 16px', 'min-height:36px', 'font-size:13px',
+      'font-weight:700', 'font-family:inherit', 'cursor:pointer', 'flex-shrink:0',
+    ].join(';'), 'TRAVEL') as HTMLButtonElement;
+    btn.setAttribute('aria-label', aria);
+    btn.disabled = this.traveling;
+    btn.addEventListener('click', () => void this.travelTo(coord));
+    return btn;
+  }
+
   private renderRows(): void {
     const doc = this.opts.doc ?? globalThis.document;
     const cur = this.opts.current();
     const portals = this.opts.discovered();
+    const camps = this.opts.campAnchors?.() ?? [];
+    const campSet = new Set(camps.map((c) => `${c.mx},${c.my}`));
     this.countEl.textContent = portals.length === 1 ? '1 portal discovered' : `${portals.length} portals discovered`;
     while (this.rowsEl.firstChild) this.rowsEl.removeChild(this.rowsEl.firstChild);
     if (portals.length === 0) {
@@ -209,6 +233,7 @@ export class FastTravelPanel {
     }
     for (const p of portals) {
       const here = p.mx === cur.mx && p.my === cur.my;
+      const hasCamp = campSet.has(`${p.mx},${p.my}`);
       const row = el(doc, 'div', [
         'display:flex', 'align-items:center', 'justify-content:space-between', 'gap:10px',
         'padding:10px 12px', 'border-radius:8px', 'background:rgba(255,255,255,0.04)',
@@ -216,30 +241,52 @@ export class FastTravelPanel {
       ].join(';'));
       row.setAttribute('data-mx', String(p.mx));
       row.setAttribute('data-my', String(p.my));
+      if (hasCamp) row.setAttribute('data-camp', 'true');
       const biomeName = BIOMES[p.biome]?.name ?? p.biome;
       const label = el(doc, 'div', 'display:flex;flex-direction:column;gap:2px;min-width:0');
       label.append(
         el(doc, 'div', `font-size:14px;font-weight:700;color:${here ? HERE : TEXT}`,
-          `Map (${p.mx}, ${p.my})${here ? ' — YOU ARE HERE' : ''}`),
-        el(doc, 'div', `font-size:12px;color:${DIM}`, `${biomeName} · Tier ${p.tier}`),
+          `${hasCamp ? '⛺ ' : ''}Map (${p.mx}, ${p.my})${here ? ' — YOU ARE HERE' : ''}`),
+        el(doc, 'div', `font-size:12px;color:${DIM}`, `${biomeName} · Tier ${p.tier}${hasCamp ? ' · Camp built' : ''}`),
       );
       row.append(label);
-      if (!here) {
-        const btn = el(doc, 'button', [
-          'background:rgba(30,42,64,.9)', `color:${GOLD}`, `border:1px solid ${GOLD}73`,
-          'border-radius:6px', 'padding:0 16px', 'min-height:36px', 'font-size:13px',
-          'font-weight:700', 'font-family:inherit', 'cursor:pointer', 'flex-shrink:0',
-        ].join(';'), 'TRAVEL') as HTMLButtonElement;
-        btn.setAttribute('aria-label', `Travel to map (${p.mx}, ${p.my})`);
-        btn.disabled = this.traveling;
-        btn.addEventListener('click', () => void this.travelTo(p));
-        row.append(btn);
-      }
+      if (!here) row.append(this.travelButton({ mx: p.mx, my: p.my }, `Travel to map (${p.mx}, ${p.my})`));
       this.rowsEl.append(row);
+    }
+    // Camp anchors: one row per map with a built camp, in discovery order
+    // (the campAnchors supplier preserves it). Same TRAVEL pipeline as
+    // portal rows — the button just targets the camp's map.
+    if (camps.length > 0) {
+      this.rowsEl.append(el(doc, 'div', 'font-size:12px;font-weight:700;letter-spacing:0.08em;color:#4ade80;padding:10px 2px 2px', '⛺ CAMPS — TRAVEL BACK TO A CAMP YOU BUILT'));
+      for (const c of camps) {
+        const here = c.mx === cur.mx && c.my === cur.my;
+        const row = el(doc, 'div', [
+          'display:flex', 'align-items:center', 'justify-content:space-between', 'gap:10px',
+          'padding:10px 12px', 'border-radius:8px', 'background:rgba(74,222,128,0.06)',
+          `border:1px solid ${here ? HERE : 'rgba(74,222,128,0.35)'}`,
+        ].join(';'));
+        row.setAttribute('data-camp', 'true');
+        row.setAttribute('data-mx', String(c.mx));
+        row.setAttribute('data-my', String(c.my));
+        const label = el(doc, 'div', 'display:flex;flex-direction:column;gap:2px;min-width:0');
+        label.append(
+          el(doc, 'div', `font-size:14px;font-weight:700;color:${here ? HERE : TEXT}`,
+            `⛺ Camp — Map (${c.mx}, ${c.my})${here ? ' — YOU ARE HERE' : ''}`),
+          el(doc, 'div', `font-size:12px;color:${DIM}`,
+            here ? 'Your camp is on this map' : 'Travel to this map — your camp is restored on arrival'),
+        );
+        row.append(label);
+        if (!here) {
+          const btn = this.travelButton({ mx: c.mx, my: c.my }, `Travel to camp on map (${c.mx}, ${c.my})`);
+          btn.id = `xandria-fast-travel-camp-${c.mx}-${c.my}`;
+          row.append(btn);
+        }
+        this.rowsEl.append(row);
+      }
     }
   }
 
-  private async travelTo(p: DiscoveredPortal): Promise<void> {
+  private async travelTo(p: MapCoord): Promise<void> {
     if (this.traveling) return;
     this.traveling = true;
     this.hide();

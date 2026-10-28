@@ -24,6 +24,7 @@ import { applyCosmeticsToRig } from '../../engine/game/cosmetics';
 import { mountSkinCreator } from '../creators/skinCreator';
 import { mountItemEditor, type LootSpot } from '../creators/itemEditor';
 import { deriveWorldTier } from '../../engine/world/worldTiers';
+import { HAZARD_DEFS, resolveHazardCount } from '../../engine/game/hazardZones';
 import { renderItemsPanel, type ItemsPanelCtx } from '../itemsPanel';
 import type { ItemsCustom, QuestRewardOverride } from '../../spec/schema';
 import {
@@ -837,6 +838,28 @@ export function createEditorPanel(cb: EditorCallbacks): EditorPanel {
       }, true),
       'Pin one weather for testing — the day/night phase cycle keeps running underneath.',
     ));
+    // UPGRADE LOOP (hazard-zones): master toggle + per-def instance
+    // counts for the seeded environmental hazard zones.
+    host.appendChild(field(
+      'HAZARD ZONES',
+      checkbox('Enabled', s.custom?.hazards?.enabled ?? true, (sp, v) => {
+        sp.custom = sp.custom ?? {};
+        sp.custom.hazards = { ...(sp.custom?.hazards ?? {}), enabled: v };
+      }),
+      'Seeded telegraphed hazard zones per map (spike fields, ember vents, toxic pools). Off = no zones spawn.',
+    ));
+    for (const def of HAZARD_DEFS) {
+      host.appendChild(field(
+        `${def.name.toUpperCase()} — ${def.damage} dmg/tick`,
+        select(['0', '1', '2', '3', '4'], String(resolveHazardCount(s, def)), (sp, v) => {
+          sp.custom = sp.custom ?? {};
+          const counts = { ...(sp.custom?.hazards?.counts ?? {}) };
+          counts[def.id] = Number(v);
+          sp.custom.hazards = { ...(sp.custom?.hazards ?? {}), counts };
+        }),
+        `Instances of ${def.name} per map (radius ${def.radius}m, telegraph ${def.telegraphSec}s). Seeded placement — same seed, same zones.`,
+      ));
+    }
   }
 
   function renderPlayer(s: GameSpec, host: HTMLElement): void {

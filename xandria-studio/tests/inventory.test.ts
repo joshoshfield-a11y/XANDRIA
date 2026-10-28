@@ -62,6 +62,12 @@ describe('remove / count', () => {
     expect(inv.remove('health-potion', 99)).toBe(3); // only 3 left
     expect(inv.count('health-potion')).toBe(0);
   });
+
+  it('count(undefined) returns 0 instead of throwing on empty slots (gathering-nodes)', () => {
+    inv.add('health-potion', 2);
+    expect((inv as unknown as { count(id: unknown): number }).count(undefined)).toBe(0);
+    expect(inv.count('health-potion')).toBe(2);
+  });
 });
 
 describe('equip', () => {

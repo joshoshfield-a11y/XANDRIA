@@ -34,6 +34,15 @@
  *   (isBoss, health, maxHealth, home, body, rig, instancer).
  * - despawnAll() removes every live payload (arena group, telegraphs,
  *   shockwaves) and hides the bar — idempotent, zero-leak.
+ *
+ * OPEN-FIELD MODE (wandering world-boss wave, additive): spawnOpenField()
+ * runs the same encounter with no arena and no tether — the bound boss
+ * roams a seeded waypoint loop (steered by re-pointing the public `home`,
+ * the dynamic-events patrol pattern) and the telegraphed attack scheduler
+ * runs unchanged. When spec.custom.worldBoss.enabled is true,
+ * spawnForMap() stands down so the arena encounter never binds the same
+ * brute the world-boss event owns. Default behavior is byte-identical:
+ * open-field state only exists after an explicit spawnOpenField() call.
  */
 import * as THREE from 'three';
 import type { GameSpec, ObjectiveStage } from '@spec';
@@ -387,6 +396,11 @@ export class BossEncounter implements MapLocalEntitySystem {
   private active = false;
   private disposed = false;
   private untapKill: (() => void) | null = null;
+  // --- open-field mode (wandering world-boss wave; see header) ---
+  private openField = false;
+  private fieldDef: BossDef | null = null;
+  private waypoints: THREE.Vector3[] = [];
+  private wpIndex = 0;
 
   constructor(
     private engine: Engine,
@@ -403,6 +417,8 @@ export class BossEncounter implements MapLocalEntitySystem {
 
   /** The live arena (null when the flag is off or before spawnForMap). */
   get liveArena(): BossArena | null { return this.arena; }
+  /** True when running in open-field (world-boss) mode — no arena exists. */
+  get isOpenField(): boolean { return this.openField; }
   /** The currently-bound boss (null when none). */
   get liveBoss(): Enemy | null { return this.bind?.enemy ?? null; }
   get isActive(): boolean { return this.active; }
@@ -417,6 +433,10 @@ export class BossEncounter implements MapLocalEntitySystem {
     this.mapSeed = mapSeed;
     this.bindsThisMap = 0;
     const spec = this.engine.spec;
+    // WANDERING WORLD-BOSS: when the world-boss event owns this map, the
+    // arena encounter stands down entirely — one boss, one owner, no
+    // double health-scaling or double telegraphs on the same brute.
+    if (spec.custom?.worldBoss?.enabled === true) return;
     if (!bossEnabled(spec)) return;
     const def = resolveBossDef(spec);
     const radius = resolveArenaRadius(spec);
@@ -425,6 +445,24 @@ export class BossEncounter implements MapLocalEntitySystem {
     this.arena = { ...a, y };
     this.arenaGroup = this.buildArenaVisual(a, y, def);
     this.engine.scene.add(this.arenaGroup);
+    this.active = true;
+  }
+
+  /**
+   * WANDERING WORLD-BOSS: open-field mode. No arena visuals, no tether —
+   * the bound boss roams `waypoints` (steered via the public `home`) and
+   * the telegraphed attack scheduler runs unchanged. The def comes from
+   * the world-boss plan, not from spec.custom.boss. Idempotent: a prior
+   * arena or open-field run is fully despawned first.
+   */
+  spawnOpenField(mapSeed: number, def: BossDef, waypoints: THREE.Vector3[]): void {
+    this.despawnAll();
+    this.mapSeed = mapSeed;
+    this.bindsThisMap = 0;
+    this.openField = true;
+    this.fieldDef = def;
+    this.waypoints = waypoints.map((w) => w.clone());
+    this.wpIndex = 0;
     this.active = true;
   }
 
@@ -442,6 +480,10 @@ export class BossEncounter implements MapLocalEntitySystem {
     this.bind = null;
     this.arena = null;
     this.active = false;
+    this.openField = false;
+    this.fieldDef = null;
+    this.waypoints = [];
+    this.wpIndex = 0;
     this.opts.bar?.hide();
   }
 
@@ -458,6 +500,7 @@ export class BossEncounter implements MapLocalEntitySystem {
     if (!b.teleported) this.teleportToArena(b);
     if (!b.healthScaled) this.scaleHealth(b);
     this.updateBar(b);
+    if (this.openField) this.steerPatrol(b, playerPos);
     const dist = b.enemy.position.distanceTo(playerPos);
     // attacks only run in combat range — no telegraphs across the map
     if (dist > 60) { this.clearWindup(); return; }
@@ -478,7 +521,9 @@ export class BossEncounter implements MapLocalEntitySystem {
   private tryBind(): void {
     const e = this.opts.manager.enemies.find((x) => x.isBoss && x.alive);
     if (!e) return;
-    const def = resolveBossDef(this.engine.spec);
+    // open-field mode: the def is the world-boss plan's def, not the
+    // spec's arena def (the arena flag may be off entirely).
+    const def = this.openField && this.fieldDef ? this.fieldDef : resolveBossDef(this.engine.spec);
     this.bind = {
       enemy: e,
       def,
@@ -503,8 +548,10 @@ export class BossEncounter implements MapLocalEntitySystem {
   }
 
   private teleportToArena(b: BossBind): void {
-    const a = this.arena;
-    if (!a) { b.teleported = true; return; }
+    // open-field mode: no tether — the boss stays where the world-boss
+    // event spawned it and roams from there (home already = spawn).
+    if (this.openField || !this.arena) { b.teleported = true; return; }
+    const a = this.arena!;
     const e = b.enemy;
     if (e.body) {
       e.body.position.set(a.x, a.y + 2, a.z);
@@ -513,6 +560,24 @@ export class BossEncounter implements MapLocalEntitySystem {
     }
     e.home.set(a.x, a.y, a.z);
     b.teleported = true;
+  }
+
+  /**
+   * WANDERING WORLD-BOSS: patrol steering, the dynamic-events patrol
+   * pattern — re-point the public `home` so an idle (non-aggroed) boss
+   * wanders the seeded waypoint loop. Only steers while the player is
+   * beyond 26m; in combat the boss's own chase/attack AI owns movement.
+   * No EnemyAI internals are touched.
+   */
+  private steerPatrol(b: BossBind, playerPos: THREE.Vector3): void {
+    if (this.waypoints.length === 0) return;
+    if (b.enemy.position.distanceTo(playerPos) <= 26) return;
+    const wp = this.waypoints[this.wpIndex];
+    if (b.enemy.position.distanceTo(wp) < 5) {
+      this.wpIndex = (this.wpIndex + 1) % this.waypoints.length;
+    }
+    const target = this.waypoints[this.wpIndex];
+    b.enemy.home.set(target.x, this.opts.terrain.heightAt(target.x, target.z) + 1, target.z);
   }
 
   private scaleHealth(b: BossBind): void {

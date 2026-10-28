@@ -63,6 +63,16 @@ import type { CompanionSave } from './companions';
 import {
   defaultCosmetics, validateCosmetics, type CosmeticSelection,
 } from './cosmetics';
+/**
+ * UPGRADE LOOP (loadout-presets): gear loadout presets live in the
+ * profile (player-scoped, per save slot) so they survive reload and
+ * portal travel. Import is runtime-safe: loadouts.ts imports spec
+ * types only, no Profile cycle (it never imports Profile).
+ */
+import {
+  defaultGearLoadouts, sanitizeLoadoutName, validateGearLoadouts,
+  type GearLoadout,
+} from './loadouts';
 
 export const PROFILE_KEY = 'xandria.profile.v1';
 /** Bump when the stored shape changes; migrateProfile() handles old versions. */
@@ -253,6 +263,15 @@ export interface ProfileData {
    */
   campBuilt: Record<string, string[]>;
   /**
+   * UPGRADE LOOP (camp-upgrades): structure upgrade tiers per map (map
+   * seed -> structure id -> tier, 0 = base build). Per-map, persisted, so
+   * revisiting a map restores its tiers. Tier numbers are validated as
+   * non-negative integers here; clamping to each structure's max tier
+   * happens in CampManager (the tier table lives in camp.ts, and Profile
+   * must not import it — same cycle note as mounts below).
+   */
+  campTiers: Record<string, Record<string, number>>;
+  /**
    * UPGRADE LOOP (mounts): the player's active mount + per-mount stamina.
    * Player-scoped, persisted, survives portal travel and save/reload.
    * All three seeded mounts are owned from the start (no unlock grind
@@ -260,6 +279,15 @@ export interface ProfileData {
    * migrateProfile; stamina is clamped by the mount state on load.
    */
   mounts: { active: string | null; stamina: Record<string, number> };
+  /**
+   * UPGRADE LOOP (loadout-presets): the player's 3 named gear loadout
+   * presets (full equip-set snapshots). Player-scoped, persisted per
+   * save slot, survives portal travel and save/reload. Additive field
+   * — missing keys default to the 3-slot empty rack via
+   * validateGearLoadouts, no version bump. The modifier `loadout`
+   * field above is a different thing (run modifiers) — never conflated.
+   */
+  gearLoadouts: GearLoadout[];
 }
 
 /** Merit earned for finishing a run. Wins pay more; every level adds a bonus. */
@@ -294,7 +322,9 @@ export function defaultProfile(): ProfileData {
     cosmetics: defaultCosmetics(),
     campChest: {},
     campBuilt: {},
+    campTiers: {},
     mounts: { active: null, stamina: {} },
+    gearLoadouts: defaultGearLoadouts(),
   };
 }
 
@@ -399,7 +429,10 @@ export function migrateProfile(raw: unknown): ProfileData {
     cosmetics: validateCosmetics(r.cosmetics),
     campChest: numRec(r.campChest),
     campBuilt: campBuiltRec(r.campBuilt),
+    campTiers: campTiersRec(r.campTiers),
     mounts: mountsRec(r.mounts),
+    // loadout-presets: validated rack (exactly 3 slots, repaired never thrown).
+    gearLoadouts: validateGearLoadouts(r.gearLoadouts),
   };
 }
 
@@ -410,6 +443,25 @@ function campBuiltRec(v: unknown): Record<string, string[]> {
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
     if (!Array.isArray(x)) continue;
     out[k] = x.filter((s): s is string => typeof s === 'string');
+  }
+  return out;
+}
+
+/**
+ * Validate the per-map camp-tier record; drop malformed entries, never
+ * throw. Tier values are non-negative integers; the manager clamps them
+ * to each structure's max tier on load (see the campTiers field note).
+ */
+function campTiersRec(v: unknown): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) continue;
+    const tiers: Record<string, number> = {};
+    for (const [id, t] of Object.entries(x as Record<string, unknown>)) {
+      if (typeof t === 'number' && Number.isInteger(t) && t >= 0) tiers[id] = t;
+    }
+    out[k] = tiers;
   }
   return out;
 }
@@ -581,6 +633,56 @@ export function getLoadout(p: ProfileData): string[] {
 export function setCosmetics(p: ProfileData, partial: Partial<CosmeticSelection>): ProfileData {
   p.cosmetics = validateCosmetics({ ...p.cosmetics, ...partial });
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// gear loadout presets (UPGRADE LOOP: loadout-presets)
+// ---------------------------------------------------------------------------
+
+/** The active profile's loadout rack (always exactly MAX_LOADOUTS slots). */
+export function getGearLoadouts(p: ProfileData): GearLoadout[] {
+  return validateGearLoadouts(p.gearLoadouts);
+}
+
+/**
+ * Overwrite one loadout slot with a snapshot (validated — names
+ * sanitize, bogus equipped entries drop). Returns false for an
+ * out-of-range slot index. Callers persist with saveProfile().
+ */
+export function setGearLoadout(p: ProfileData, index: number, loadout: GearLoadout): boolean {
+  const rack = getGearLoadouts(p);
+  if (index < 0 || index >= rack.length) return false;
+  const validated = validateGearLoadouts([loadout])[0];
+  // validateGearLoadouts falls back to slot-0's default name for a
+  // blank name; re-point the fallback at this slot's own default.
+  if (!sanitizeLoadoutName(loadout.name, '')) validated.name = `Loadout ${index + 1}`;
+  rack[index] = validated;
+  p.gearLoadouts = rack;
+  return true;
+}
+
+/** Rename one loadout slot. Returns false for a bad index or blank name. */
+export function renameGearLoadout(p: ProfileData, index: number, name: string): boolean {
+  const rack = getGearLoadouts(p);
+  if (index < 0 || index >= rack.length) return false;
+  const clean = sanitizeLoadoutName(name, '');
+  if (!clean) return false;
+  rack[index] = { ...rack[index], name: clean };
+  p.gearLoadouts = rack;
+  return true;
+}
+
+/**
+ * Clear one loadout slot back to its default-named empty state
+ * (delete = clear, never shrinks the rack — the 3 slots are fixed).
+ * Returns false for a bad index. Callers persist with saveProfile().
+ */
+export function clearGearLoadout(p: ProfileData, index: number): boolean {
+  const rack = getGearLoadouts(p);
+  if (index < 0 || index >= rack.length) return false;
+  rack[index] = defaultGearLoadouts()[index];
+  p.gearLoadouts = rack;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -987,6 +1089,34 @@ export function createSlot(name?: string): SaveSlot | null {
     defaultProfile(),
     defaultSlotSettings(),
   );
+  st.slots.push(slot);
+  st.activeSlotId = id;
+  saveSlots(st);
+  return slot;
+}
+
+/**
+ * UPGRADE LOOP (save-export-import): append a slot carrying a caller-
+ * supplied profile + settings (an imported backup). The caller has
+ * already validated the payload and resolved the display name; this
+ * only assigns the deterministic id, stamps fresh wall-clock metadata,
+ * and activates the new slot (the createSlot convention). Returns null
+ * at the slot cap. The stored profile/settings are written verbatim —
+ * no gameplay semantics change.
+ */
+export function appendSlot(
+  name: string,
+  profile: ProfileData,
+  settings: SettingsData,
+  ironman: boolean,
+  dead: boolean,
+): SaveSlot | null {
+  const st = loadSlots();
+  if (st.slots.length >= MAX_SLOTS) return null;
+  const id = `slot-${st.nextSeq++}`;
+  const slot = makeSlot(id, sanitizeSlotName(name) || id, profile, settings);
+  slot.ironman = ironman === true;
+  slot.dead = dead === true;
   st.slots.push(slot);
   st.activeSlotId = id;
   saveSlots(st);

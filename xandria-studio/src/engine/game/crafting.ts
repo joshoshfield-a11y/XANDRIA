@@ -54,7 +54,10 @@ export const CRAFT_SALT = 0xc0a57;
 export const MAT_ORE = 'mat_ore';
 export const MAT_FIBER = 'mat_fiber';
 export const MAT_SCRAP = 'mat_scrap';
-export const MATERIAL_IDS = [MAT_ORE, MAT_FIBER, MAT_SCRAP] as const;
+/** UPGRADE LOOP (gathering-nodes): herb-patch + crystal-cluster materials. */
+export const MAT_HERB = 'mat_herb';
+export const MAT_CRYSTAL = 'mat_crystal';
+export const MATERIAL_IDS = [MAT_ORE, MAT_FIBER, MAT_SCRAP, MAT_HERB, MAT_CRYSTAL] as const;
 
 /**
  * FIXED CONTRACT (workstream C): station entity ids. Recipe.stationId must
@@ -259,6 +262,31 @@ const RECIPE_CATALOG: readonly CraftingRecipe[] = [
   // exact prefixes of larger ones for the same seed (the prefix property
   // the tests pin).
   ...DEPLOY_CATALOG_RECIPES,
+  // UPGRADE LOOP (gathering-nodes): sinks for the two new node materials.
+  // alwaysInPool (the deployables pattern) so the seeded subset is never
+  // the reason a herb/crystal recipe is missing.
+  {
+    id: 'recipe_herb_poultice',
+    name: 'Herb Poultice',
+    ingredients: [
+      { itemId: MAT_HERB, count: 3 },
+      { itemId: MAT_FIBER, count: 1 },
+    ],
+    output: { itemId: 'craft_herb_poultice', count: 2 },
+    stationId: STATION_ALCHEMY,
+    alwaysInPool: true,
+  },
+  {
+    id: 'recipe_crystal_lens',
+    name: 'Crystal Lens',
+    ingredients: [
+      { itemId: MAT_CRYSTAL, count: 2 },
+      { itemId: MAT_ORE, count: 1 },
+    ],
+    output: { itemId: 'craft_crystal_lens', count: 1 },
+    stationId: STATION_FORGE,
+    alwaysInPool: true,
+  },
 ];
 
 /** Catalog length — poolSize clamps to 1..this. */
@@ -344,6 +372,23 @@ export function materialItemDefs(): Record<string, ItemDef> {
       .stackable(999)
       .value(3)
       .description('Bent plates and dead circuitry. Still useful.')
+      .build(),
+    // UPGRADE LOOP (gathering-nodes): the two new node materials.
+    [MAT_HERB]: new ItemBuilder(MAT_HERB)
+      .named('Wild Herbs')
+      .material()
+      .rarity('common')
+      .stackable(999)
+      .value(2)
+      .description('Bitter leaves from a herb patch. Brewable.')
+      .build(),
+    [MAT_CRYSTAL]: new ItemBuilder(MAT_CRYSTAL)
+      .named('Amber Crystal')
+      .material()
+      .rarity('uncommon')
+      .stackable(999)
+      .value(8)
+      .description('A shard pried from a crystal cluster. Hums faintly.')
       .build(),
   };
 }
@@ -448,6 +493,24 @@ export function craftedItemDefs(): Record<string, ItemDef> {
       .stackable(5)
       .value(10)
       .description('Puts a keener edge on your next swings. +10% attack speed for 45 seconds.')
+      .build(),
+    // UPGRADE LOOP (gathering-nodes): outputs for the herb/crystal recipes.
+    craft_herb_poultice: new ItemBuilder('craft_herb_poultice')
+      .named('Herb Poultice')
+      .consumable()
+      .behavior('heal', 25)
+      .rarity('common')
+      .stackable(10)
+      .value(8)
+      .description('Pounded herbs in a fiber wrap. Restores 25 health.')
+      .build(),
+    craft_crystal_lens: new ItemBuilder('craft_crystal_lens')
+      .named('Crystal Lens')
+      .trinket()
+      .stat('damage', 2)
+      .rarity('uncommon')
+      .value(60)
+      .description('A focused amber lens. Your strikes bite a little deeper.')
       .build(),
   };
 }

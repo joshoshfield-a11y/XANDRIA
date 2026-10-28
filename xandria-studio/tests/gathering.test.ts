@@ -281,9 +281,14 @@ describe('harvest + depletion', () => {
     expect(inst.registeredNpcCount).toBe(mgr.nodes.length - 1);
   });
 
-  it('depleted state is NOT persisted across portals: re-entry respawns live nodes', () => {
+  it('portal re-entry preserves node state: depleted nodes resume their respawn wait', () => {
+    // Gathering-nodes phase: timed respawn supersedes the crafting wave's
+    // "depleted state is NOT persisted" note — under a respawn table,
+    // non-persistence would let portal-hopping refresh nodes early.
     const engine = makeEngine();
-    const mgr = new GatheringManager(engine, { count: 10, inventory: makeInventory() });
+    const mgr = new GatheringManager(engine, {
+      count: 10, inventory: makeInventory(), respawnScale: 0.01,
+    });
     mgr.spawnForMap(2468);
     const sig = signature(mgr);
     const victim = mgr.nodes[3];
@@ -293,8 +298,18 @@ describe('harvest + depletion', () => {
     mgr.despawnAll();
     mgr.spawnForMap(2468); // arrival regenerates the identical roster
     expect(signature(mgr)).toBe(sig);
-    expect(mgr.nodes.every((n) => !n.retired && !n.isDepleted)).toBe(true);
-    expect(mgr.nodes[3].interactable.enabled).toBe(true);
+    // the harvested node is still depleted (its wait preserved); every
+    // other node is live, and the roster itself is unchanged
+    const back = mgr.nodes[3];
+    expect(back.isDepleted).toBe(true);
+    expect(back.interactable.enabled).toBe(false);
+    expect(mgr.nodes.filter((n, i) => i !== 3).every((n) => !n.isDepleted)).toBe(true);
+    // the preserved wait still elapses in-map: the node regrows and is
+    // harvestable again (same material, same id)
+    for (let i = 0; i < 240; i++) frame(engine, mgr, 1 / 60);
+    expect(back.isDepleted).toBe(false);
+    expect(back.interactable.enabled).toBe(true);
+    expect(mgr.harvestById(back.interactable.id)).not.toBeNull();
   });
 });
 
@@ -308,8 +323,11 @@ describe('instancing', () => {
     const stats = inst.stats();
     expect(stats.instances).toBeGreaterThan(0);
     // ~6-8 meshes per node; buckets must collapse across the roster —
-    // the whole node layer stays in the low tens of buckets, not hundreds
-    expect(inst.bucketCount).toBeLessThanOrEqual(24);
+    // the whole node layer stays in the low tens of buckets, not hundreds.
+    // Gathering-nodes phase: 5 kinds (herb + crystal part geometries)
+    // measure 25 buckets for 30 nodes; the bound allows headroom for
+    // part-geometry growth, never for node-count growth.
+    expect(inst.bucketCount).toBeLessThanOrEqual(32);
     expect(inst.bucketCount).toBeLessThan(30 * 6);
   });
 

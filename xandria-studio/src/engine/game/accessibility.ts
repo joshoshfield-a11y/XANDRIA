@@ -151,6 +151,13 @@ export const SECONDARY_CODES: Record<string, readonly string[]> = {
   // unbind KeyG/Digit3 deploy and KeyZ/C/V abilities.
   KeyG: ['deploy'], Digit3: ['deploy'],
   KeyZ: ['ability1'], KeyC: ['ability2'], KeyV: ['ability3'],
+  // STEALTH-SYSTEM: hold-to-sneak (Ctrl, either side) — a fixed
+  // secondary like deploy/abilities (never remappable, never removed
+  // by a remap). ControlLeft's primary is 'brake' (racing only); in
+  // third-person-action blueprints brake is unread, so Ctrl = sneak
+  // there with no conflict. Gamepad has no free button: no gamepad
+  // sneak binding (touch + keyboard covered).
+  ControlLeft: ['sneak'], ControlRight: ['sneak'],
   // Old KEYMAP bound confirm to BOTH Space and Enter; confirm's primary
   // is Enter, Space survives as a secondary so Space-to-confirm keeps working.
   Space: ['confirm'],

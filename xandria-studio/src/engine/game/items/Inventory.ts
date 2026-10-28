@@ -23,7 +23,18 @@ import {
 } from '@spec';
 import { addItemStats, computeSetBonuses } from '../setBonuses';
 import { computeEnchantStats, enchantDef, ENCHANT_DEFS, type EnchantCost } from '../enchantments';
-
+import {
+  outgoingDamageType,
+  outgoingDamageTypeDetail,
+  type DamageType,
+} from '../elemental';
+import {
+  buildSalvageRng,
+  enchantRefundFor,
+  isSetPiece,
+  rollSalvageYields,
+  type SalvageYield,
+} from '../salvage';
 /** Structural contract shared with the runtime crew's wireItems. */
 export interface InventoryLike {
   /** Add items; returns the leftover count that did not fit. */
@@ -51,10 +62,38 @@ export interface SerializedInventory {
   acqSeq?: number;
   /** Enchantments wave: [itemId, enchantId][] (absent = none). */
   ench?: Array<[string, string]>;
+  /** Gear-salvage wave: salvage sequence counter (absent = 0). */
+  salv?: number;
 }
 
 const isFiniteNum = (v: unknown): v is number =>
   typeof v === 'number' && Number.isFinite(v);
+
+/** Gear-salvage wave: result of one salvage() call. */
+export interface SalvageResult {
+  ok: boolean;
+  reason?: string;
+  /** Exact materials granted (post-roll), present on success. */
+  yields?: SalvageYield[];
+  /** Enchant id cleared by this salvage (null = the piece was unenchanted). */
+  enchantCleared?: string | null;
+  /** True when the piece belongs to a gear set (bonus lines included). */
+  setPiece?: boolean;
+}
+
+/** Gear-salvage wave: non-mutating salvage-all-junk preview. */
+export interface SalvageAllPreview {
+  plan: Array<{ itemId: string; units: number; yields: SalvageYield[] }>;
+  skipped: Array<{ itemId: string; reason: string }>;
+}
+
+/** Gear-salvage wave: result of salvageAllJunk(). */
+export interface SalvageAllResult {
+  salvaged: Array<{ itemId: string; units: number; yields: SalvageYield[] }>;
+  skipped: Array<{ itemId: string; reason: string }>;
+  /** Merged yields across all salvaged ids. */
+  yields: SalvageYield[];
+}
 
 export class Inventory implements InventoryLike {
   /**
@@ -98,6 +137,14 @@ export class Inventory implements InventoryLike {
    * One enchant per item id; see engine/game/enchantments.ts.
    */
   private enchants = new Map<string, string>();
+  /**
+   * Gear-salvage wave: monotonic salvage counter. Seeds the per-unit
+   * yield stream (Rng(SALVAGE_SALT ^ hash(itemId) ^ seq)) — derived
+   * from the event sequence like acqSeq, never Date.now/Math.random,
+   * so yields are deterministic given the same play sequence and
+   * survive save/reload via serialize().
+   */
+  private salvSeq = 0;
 
   constructor(private defs: Record<string, ItemDef>) {
     this.slots = Array.from({ length: BACKPACK_SIZE }, () => null);
@@ -142,7 +189,12 @@ export class Inventory implements InventoryLike {
   /** Total units of an item across backpack AND equipped slots. */
   count(itemId: string): number {
     let n = 0;
-    for (const s of this.slots) if (s?.itemId === itemId) n += s.count;
+    // Gathering-nodes phase: null slots must never match — with the old
+    // `s?.itemId === itemId` test, a null slot's itemId reads as undefined,
+    // so count(undefined) matched every empty slot and then dereferenced
+    // it (`s.count` on null). The guard keeps defined-id behavior identical
+    // and makes undefined queries return 0 instead of throwing.
+    for (const s of this.slots) if (s && s.itemId === itemId) n += s.count;
     for (const id of Object.values(this.equipped)) if (id === itemId) n += 1;
     return n;
   }
@@ -539,6 +591,24 @@ export class Inventory implements InventoryLike {
   }
 
   /**
+   * ELEMENTAL-DAMAGE-TYPES: the outgoing damage type for melee /
+   * projectile attacks — the weapon-slot enchant's damageType, else
+   * 'physical'. Pure function of (equipped slots, per-id enchant
+   * state); see elemental.ts outgoingDamageType for the precedence
+   * rules. Enchant state serializes already (ench: [...] in
+   * serialize/deserialize), so the outgoing type survives save/reload
+   * by construction — no new persisted field.
+   */
+  outgoingDamageType(): DamageType {
+    return outgoingDamageType(this.getAllEquipped(), this.enchants);
+  }
+
+  /** Outgoing type + the enchant id that set it (null = no typed enchant). */
+  outgoingDamageTypeDetail(): { type: DamageType; enchantId: string | null } {
+    return outgoingDamageTypeDetail(this.getAllEquipped(), this.enchants);
+  }
+
+  /**
    * Gear set bonuses wave: the stat math the engine actually uses —
    * equipped item stats PLUS active set bonuses, additive (addItemStats
    * merges finite numbers only). Equip slot semantics and the loot ladder
@@ -550,6 +620,255 @@ export class Inventory implements InventoryLike {
    */
   effectiveStats(): ItemStats {
     return addItemStats(addItemStats(this.equippedStats(), this.setBonusStats()), this.enchantStats());
+  }
+
+  // ------------------------------------------------------------ gear salvage
+
+  /** Monotonic salvage counter (the per-unit yield stream position). */
+  salvageCount(): number {
+    return this.salvSeq;
+  }
+
+  /** Backpack-only units of an item (equipped units never count here). */
+  private backpackCount(itemId: string): number {
+    let n = 0;
+    for (const s of this.slots) if (s?.itemId === itemId) n += s.count;
+    return n;
+  }
+
+  /** True when the item id is equipped in any slot. */
+  private isEquippedAnywhere(itemId: string): boolean {
+    return Object.values(this.equipped).includes(itemId);
+  }
+
+  /**
+   * Gear-salvage wave: is one unit of this item salvageable right now?
+   * Rules (see engine/game/salvage.ts): known weapon/armor def, at
+   * least one backpack unit, and NOT equipped in any slot — equipped
+   * items are never salvageable, even with spare backpack copies.
+   */
+  isSalvageable(itemId: string): { ok: boolean; reason?: string } {
+    const def = this.defs[itemId];
+    if (!def) return { ok: false, reason: 'unknown-item' };
+    if (!this.isEquippable(itemId) || !def.slot) return { ok: false, reason: 'not-salvageable' };
+    if (this.isEquippedAnywhere(itemId)) return { ok: false, reason: 'equipped' };
+    if (this.backpackCount(itemId) <= 0) return { ok: false, reason: 'not-owned' };
+    return { ok: true };
+  }
+
+  /**
+   * Gear-salvage wave: the exact yields the NEXT salvage() of this item
+   * would grant, rolled from the current sequence position without
+   * consuming it — so a HUD confirm preview and the confirmed salvage
+   * always agree. Null when the item is not salvageable.
+   */
+  salvagePreview(itemId: string): SalvageYield[] | null {
+    if (!this.isSalvageable(itemId).ok) return null;
+    const def = this.defs[itemId]!;
+    const rng = buildSalvageRng(itemId, this.salvSeq);
+    return rollSalvageYields(def, rng, {
+      enchantCost: enchantRefundFor(this.enchants.get(itemId) ?? null),
+      setPiece: isSetPiece(itemId),
+    });
+  }
+
+  /**
+   * True when every yield line fits in the backpack AFTER the salvaged
+   * unit is removed (simulated, no mutation): the freed slot counts,
+   * so a full backpack can still salvage when the yields stack into
+   * the freed slot or existing stacks.
+   */
+  private canFitAfterRemoval(yields: readonly SalvageYield[], itemId: string): boolean {
+    // Simulate slot contents: [itemId, count][] over the 24 slots.
+    const sim: Array<{ itemId: string; count: number } | null> = this.slots.map(
+      (s) => (s ? { itemId: s.itemId, count: s.count } : null),
+    );
+    // Remove one unit of the salvaged item first (frees its slot when
+    // the stack empties — gear stacks are size 1 in the catalogs).
+    for (let i = 0; i < sim.length; i++) {
+      const s = sim[i];
+      if (s && s.itemId === itemId) {
+        s.count -= 1;
+        if (s.count <= 0) sim[i] = null;
+        break;
+      }
+    }
+    for (const y of yields) {
+      let need = y.count;
+      const max = this.stackSize(y.itemId);
+      for (const s of sim) {
+        if (need <= 0) break;
+        if (s && s.itemId === y.itemId && s.count < max) {
+          const take = Math.min(max - s.count, need);
+          s.count += take;
+          need -= take;
+        }
+      }
+      for (let i = 0; i < sim.length && need > 0; i++) {
+        if (sim[i] === null) {
+          const take = Math.min(max, need);
+          sim[i] = { itemId: y.itemId, count: take };
+          need -= take;
+        }
+      }
+      if (need > 0) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Gear-salvage wave: dismantle ONE backpack unit into crafting
+   * materials (never currency, never new items). Validation order:
+   * unknown item -> not salvageable -> equipped -> not owned ->
+   * no-room. On success the unit is removed, the per-id enchant (if
+   * any) is cleared with its cost refunded inside the yields, set
+   * pieces pay the set bonus, and materials land via add() — the same
+   * seams craft() consumes from. `onClearLoadout` fires only when
+   * zero units of the id remain afterwards (the loadout-snapshot
+   * rule — see engine/game/salvage.ts). Never throws.
+   */
+  salvage(
+    itemId: string,
+    opts?: { onClearLoadout?: (itemId: string) => void },
+  ): SalvageResult {
+    const def = this.defs[itemId];
+    if (!def) {
+      this.warnUnknown(itemId);
+      return { ok: false, reason: 'unknown-item' };
+    }
+    const check = this.isSalvageable(itemId);
+    if (!check.ok) return { ok: false, reason: check.reason };
+    const enchantId = this.enchants.get(itemId) ?? null;
+    const setPiece = isSetPiece(itemId);
+    const rng = buildSalvageRng(itemId, this.salvSeq);
+    const yields = rollSalvageYields(def, rng, {
+      enchantCost: enchantRefundFor(enchantId),
+      setPiece,
+    });
+    if (!this.canFitAfterRemoval(yields, itemId)) return { ok: false, reason: 'no-room' };
+    const removed = this.remove(itemId, 1);
+    if (removed < 1) return { ok: false, reason: 'not-owned' };
+    this.salvSeq += 1;
+    if (enchantId) this.enchants.delete(itemId);
+    for (const y of yields) this.add(y.itemId, y.count);
+    this.pruneJunk();
+    if (this.count(itemId) === 0 && opts?.onClearLoadout) {
+      try {
+        opts.onClearLoadout(itemId);
+      } catch (e) {
+        console.warn('[inventory] onClearLoadout threw', e);
+      }
+    }
+    return { ok: true, yields, enchantCleared: enchantId, setPiece };
+  }
+
+  /**
+   * Gear-salvage wave: junk ids to consider for salvage-all, in
+   * deterministic order — backpack first-appearance slot order, then
+   * junk ids owned only in equipped slots (so an equipped junk piece
+   * is reported as skipped, not silently ignored).
+   */
+  private junkSalvageOrder(): string[] {
+    const order: string[] = [];
+    for (const s of this.slots) {
+      if (s && this.junk.has(s.itemId) && !order.includes(s.itemId)) order.push(s.itemId);
+    }
+    for (const id of Object.values(this.equipped)) {
+      if (id && this.junk.has(id) && !order.includes(id)) order.push(id);
+    }
+    return order;
+  }
+  /**
+   * Gear-salvage wave: non-mutating preview of salvageAllJunk() —
+   * per-id unit counts and exact yields, in the same backpack-slot
+   * order and with the same per-unit seeds the real run will use
+   * (enchant refund on the first unit of an enchanted id only, set
+   * bonus per unit). Skipped ids carry their block reason.
+   */
+  previewSalvageAllJunk(): SalvageAllPreview {
+    const plan: SalvageAllPreview['plan'] = [];
+    const skipped: SalvageAllPreview['skipped'] = [];
+    const order = this.junkSalvageOrder();
+    let seq = this.salvSeq;
+    for (const itemId of order) {
+      const check = this.isSalvageable(itemId);
+      if (!check.ok) {
+        skipped.push({ itemId, reason: check.reason ?? 'not-salvageable' });
+        continue;
+      }
+      const def = this.defs[itemId]!;
+      const units = this.backpackCount(itemId);
+      const yields: SalvageYield[] = [];
+      const merge = (ys: SalvageYield[]): void => {
+        for (const y of ys) {
+          const e = yields.find((v) => v.itemId === y.itemId);
+          if (e) e.count += y.count;
+          else yields.push({ ...y });
+        }
+      };
+      for (let u = 0; u < units; u++) {
+        const rng = buildSalvageRng(itemId, seq);
+        seq += 1;
+        merge(
+          rollSalvageYields(def, rng, {
+            // enchant state is per id: only the first salvaged unit
+            // of an enchanted id pays the refund.
+            enchantCost: u === 0 ? enchantRefundFor(this.enchants.get(itemId) ?? null) : [],
+            setPiece: isSetPiece(itemId),
+          }),
+        );
+      }
+      plan.push({ itemId, units, yields });
+    }
+    return { plan, skipped };
+  }
+
+  /**
+   * Gear-salvage wave: salvage every backpack unit of every
+   * junk-marked salvageable id (the inventory-qol junk path), in
+   * backpack slot order. Equipped / non-salvageable ids are skipped
+   * honestly (nothing consumed for them); a unit that cannot fit its
+   * yields stops that id only. Returns per-id results + merged yields.
+   */
+  salvageAllJunk(opts?: { onClearLoadout?: (itemId: string) => void }): SalvageAllResult {
+    const salvaged: SalvageAllResult['salvaged'] = [];
+    const skipped: SalvageAllResult['skipped'] = [];
+    const merged: SalvageYield[] = [];
+    const mergeInto = (ys: SalvageYield[]): void => {
+      for (const y of ys) {
+        const e = merged.find((v) => v.itemId === y.itemId);
+        if (e) e.count += y.count;
+        else merged.push({ ...y });
+      }
+    };
+    const order = this.junkSalvageOrder();
+    for (const itemId of order) {
+      const check = this.isSalvageable(itemId);
+      if (!check.ok) {
+        skipped.push({ itemId, reason: check.reason ?? 'not-salvageable' });
+        continue;
+      }
+      let units = 0;
+      const yields: SalvageYield[] = [];
+      while (this.backpackCount(itemId) > 0) {
+        const r = this.salvage(itemId, opts);
+        if (!r.ok) {
+          skipped.push({ itemId, reason: r.reason ?? 'not-salvageable' });
+          break;
+        }
+        units += 1;
+        for (const y of r.yields ?? []) {
+          const e = yields.find((v) => v.itemId === y.itemId);
+          if (e) e.count += y.count;
+          else yields.push({ ...y });
+        }
+      }
+      if (units > 0) {
+        salvaged.push({ itemId, units, yields });
+        mergeInto(yields);
+      }
+    }
+    return { salvaged, skipped, yields: merged };
   }
 
   // ------------------------------------------------------------ save / load
@@ -564,6 +883,7 @@ export class Inventory implements InventoryLike {
       acq: [...this.acqOrder.entries()],
       acqSeq: this.acqSeq,
       ench: [...this.enchants.entries()],
+      salv: this.salvSeq,
     };
     return JSON.stringify(data);
   }
@@ -590,6 +910,7 @@ export class Inventory implements InventoryLike {
     this.acqOrder = fresh.acqOrder;
     this.acqSeq = fresh.acqSeq;
     this.enchants = fresh.enchants;
+    this.salvSeq = fresh.salvSeq;
     this.emitChange();
   }
 
@@ -682,6 +1003,10 @@ export class Inventory implements InventoryLike {
         }
         inv.enchants.set(id, enchId);
       }
+    }
+    // gear salvage: restore the salvage sequence counter (validated).
+    if (isFiniteNum(d.salv)) {
+      inv.salvSeq = Math.max(0, Math.floor(d.salv));
     }
     return inv;
   }

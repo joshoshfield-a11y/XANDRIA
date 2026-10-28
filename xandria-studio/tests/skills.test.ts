@@ -224,8 +224,14 @@ describe('SkillSystem — ranks and XP', () => {
     expect(s.craftTimeMult(STATION_ALCHEMY)).toBe(1); // alchemy still rank 1
     s.addXp(SKILL_SMITHING, 160);
     s.addXp(SKILL_ALCHEMY, 240);
-    expect(s.craftTimeMult(STATION_FORGE)).toBe(0.75);
-    expect(s.craftTimeMult(STATION_ALCHEMY)).toBe(0.75);
+    // SKILL-SYNERGIES: workshop-flow is now active (smithing 2+ + alchemy
+    // 2+), so the rank multiplier 0.75 is multiplied by the synergy 0.9.
+    expect(s.craftTimeMult(STATION_FORGE)).toBeCloseTo(0.675, 10);
+    expect(s.craftTimeMult(STATION_ALCHEMY)).toBeCloseTo(0.675, 10);
+    // Rank-only path, no synergy: smithing alone at rank 3 stays 0.75.
+    const solo = new SkillSystem(fakeEngine());
+    solo.addXp(SKILL_SMITHING, 240);
+    expect(solo.craftTimeMult(STATION_FORGE)).toBe(0.75);
   });
 
   it('xpForNextRank / progressToNext', () => {

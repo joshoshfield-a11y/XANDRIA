@@ -59,6 +59,14 @@ import {
   ngPlusByCycle,
 } from './newGamePlus';
 /**
+ * UPGRADE LOOP (daily-mutators): daily challenge mutators — the last
+ * additive layer on spawnOne (band -> difficulty -> NG+ -> affixes ->
+ * mutators), all tuning in dailyMutators.ts's MUTATOR_TABLE.
+ */
+import {
+  combineMutatorEffects,
+} from './dailyMutators';
+/**
  * UPGRADE LOOP (elite-affixes): seeded elite enemy affixes — the affix
  * table, the seeded roll and the additive stat application all live in
  * eliteAffixes.ts. EnemyAI only owns the runtime mechanics (shield pool,
@@ -74,6 +82,35 @@ import {
   applyEliteAffixes,
   type EliteAffixId,
 } from './eliteAffixes';
+/**
+ * ELEMENTAL-DAMAGE-TYPES: the elemental step (stat-math order step 5)
+ * lives in damage() — the single funnel every damage-to-enemy path
+ * already uses. See elemental.ts for the disclosed order.
+ */
+import {
+  applyElemental,
+  normalizeDamageType,
+  resistanceFor,
+  type DamageType,
+} from './elemental';
+/**
+ * UPGRADE LOOP (stealth-system): sneak detection — the ONE authorized
+ * behavior-contract change (awareness gates chase/attack; see
+ * stealth.ts for the full disclosed model). Additive: lure precedence,
+ * ranges, speeds, cadences, and damage are untouched; when perception
+ * is absent the enemy behaves exactly as before (standing player,
+ * silent), except awareness now escalates through 'suspicious' for
+ * 0.4s before alerting.
+ */
+import {
+  AwarenessTracker,
+  DEFAULT_PERCEPTION,
+  detectionJitterFor,
+  detectionRadiusFor,
+  targetWeightFor,
+  type AwarenessState,
+  type StealthPerception,
+} from './stealth';
 
 /**
  * Salt for the enemy roster stream — keeps it off the NPC stream and the
@@ -88,6 +125,16 @@ export interface EnemyEvents {
    * modifiers (night damage). Existing handlers (dmg, from) are unaffected.
    */
   onPlayerHit?: (damage: number, from: THREE.Vector3, kind?: EnemyKind) => void;
+  /**
+   * UPGRADE LOOP (companion-combat-depth): melee hits against a
+   * companion-targeted enemy route here instead of onPlayerHit (same
+   * signature: damage, attacker position, kind). Ranged projectiles
+   * still use the player-body collision channel (see companionCombat
+   * header) and do NOT route here. Optional: when unset, a
+   * companion-targeted melee hit deals no damage (the companion is
+   * never silently charged to the player).
+   */
+  onCompanionHit?: (damage: number, from: THREE.Vector3, kind?: EnemyKind) => void;
   onDeath?: (e: Enemy) => void;
 
   /** boss phase transitions (1 at ≤66% HP, 2 at ≤33% HP) */
@@ -132,6 +179,40 @@ export class Enemy {
    * cleared per-frame by DeployablesManager; never by EnemyManager.
    */
   lureTarget: THREE.Vector3 | null = null;
+  /**
+   * UPGRADE LOOP (companion-combat-depth): additive companion-target
+   * hook, mirroring lureTarget. When non-null, the enemy targets this
+   * world point (the live companion's root position) instead of the
+   * player — chase/attack ranges, facing and ranged aim all read it.
+   * Precedence: lureTarget wins over companionTargetPos (a deployed
+   * lure still beats a companion, preserving deployables behavior
+   * exactly); otherwise companionTargetPos wins over the player.
+   * Melee hits against a companion target route to onCompanionHit,
+   * never to onPlayerHit. Null (default) = byte-identical
+   * pre-companion-combat behavior. Assigned and cleared per-frame by
+   * CompanionsManager; never by EnemyManager.
+   */
+  companionTargetPos: THREE.Vector3 | null = null;
+  /**
+   * UPGRADE LOOP (companion-combat-depth): which target the last
+   * update() actually used ('lure' | 'companion' | 'player').
+   * Observability seam for the e2e (ranged aim proof) — drives nothing.
+   */
+  lastTarget: 'lure' | 'companion' | 'player' = 'player';
+  /**
+   * UPGRADE LOOP (stealth-system): current awareness — 'unaware' |
+   * 'suspicious' | 'alerted'. Public read-only seam (melee sneak-bonus
+   * checks it; e2e asserts it). Mutated only via the tracker in
+   * update()/damage()/hearNoise(). A lure target forces 'alerted'.
+   */
+  awareness: AwarenessState = 'unaware';
+  private awarenessTracker = new AwarenessTracker();
+  /**
+   * UPGRADE LOOP (stealth-system): per-enemy detection jitter, one
+   * seeded draw at spawn, fixed for life (see stealth.ts). Public so
+   * e2e can compute the exact effective radius for this enemy.
+   */
+  readonly detectionJitter: number;
   private attackCd = 0;
   private wanderTarget: THREE.Vector3 | null = null;
   private hoverPhase: number;
@@ -151,6 +232,16 @@ export class Enemy {
   private customDef: import('./Modding').CustomEnemyKindDef | null = null;
   /** effective build kind: the registered base for custom kinds, else spec.kind */
   private readonly kind: EnemyKind;
+  /**
+   * ELEMENTAL-DAMAGE-TYPES: the build kind damage() bills against
+   * (the registered base for custom kinds). Callers use it to compute
+   * the displayed (floating-text) value caller-side, so the number
+   * never depends on caller-side wrappers such as the shielded-variant
+   * front-arc reduction, which stays HP-only as on main.
+   */
+  get damageKind(): EnemyKind {
+    return this.kind;
+  }
   /** group scale applied to the procedural rig (re-applied after an import-model swap) */
   private rigScale = 1;
   /**
@@ -241,6 +332,7 @@ export class Enemy {
     const sz = (mods?.size ?? 1) * (this.customDef?.scale ?? 1);
     this.health = this.maxHealth = spec.health;
     this.home = spawn.clone();
+    this.detectionJitter = detectionJitterFor(seed);
     this.rng = new Rng(seed);
     this.hoverPhase = this.rng.range(0, Math.PI * 2);
     this.isBoss = buildKind === 'brute' && Enemy.isBossObjective(engine);
@@ -403,13 +495,56 @@ export class Enemy {
     this.health = Math.min(this.maxHealth, this.health + amount);
   }
 
-  damage(amount: number, from?: THREE.Vector3) {
-    if (!this.alive) return;
+  /**
+   * ELEMENTAL-DAMAGE-TYPES: `type` defaults to 'physical' (multiplier
+   * 1.0 for every kind, so untyped callers are bit-identical to before
+   * this phase). The elemental multiplier applies FIRST — to the
+   * crit-applied amount the caller computed — before the shield pool
+   * absorbs and the elite damageTakenMult scales what gets through.
+   * Returns the typed amount that entered damage() (after the
+   * elemental step, before shield/armor). Callers compute the
+   * displayed number caller-side via displayedDamage() (same step,
+   * same table) so caller-side wrappers such as the shielded-variant
+   * front-arc reduction stay HP-only as on main; the return is the
+   * fallback for callers whose target has no build kind. Callers
+   * that ignore the return value see identical health math. Returns
+   * 0 when dead.
+   */
+  /**
+   * UPGRADE LOOP (stealth-system): a noise event reached this enemy —
+   * suspicious, never directly alerted (unless already alerted).
+   * Dead enemies hear nothing.
+   */
+  hearNoise(from: THREE.Vector3, radius: number): void {
+    if (!this.alive || radius <= 0) return;
+    if (this.position.distanceTo(from) > radius) return;
+    this.awarenessTracker.hearNoise();
+    this.awareness = this.awarenessTracker.state;
+  }
+
+  /** UPGRADE LOOP (stealth-system): effective detection radius right now. */
+  effectiveDetectionRadius(sneaking: boolean): number {
+    return detectionRadiusFor(this.kind, sneaking, this.detectionJitter, this.aggroMult);
+  }
+
+  damage(amount: number, from?: THREE.Vector3, type?: DamageType): number {
+    if (!this.alive) return 0;
+    // UPGRADE LOOP (stealth-system): taking damage alerts immediately —
+    // this is what makes the sneak bonus first-strike-only.
+    this.awarenessTracker.alert();
+    this.awareness = 'alerted';
     // UPGRADE LOOP (elite-affixes): remember the attacker for the
     // volatile detonation check in die(); shield absorbs first, then
     // the damage-taken multiplier (armored) applies to what gets through.
     if (from) this.lastDamageFrom = from.clone();
-    let remaining = amount;
+    const damageType = normalizeDamageType(type);
+    const multiplier = resistanceFor(this.kind, damageType, this.isBoss);
+    const typedAmount = applyElemental(amount, this.kind, damageType, this.isBoss);
+    // Status-hook seam: observe-only, zero taps = no-op. A future
+    // status wave taps onElementalHit to apply the type's statusHook
+    // (burn/chill/stun); no status effect is applied in this phase.
+    this.engine.hooks.emit('onElementalHit', { enemy: this, type: damageType, amount: typedAmount, multiplier });
+    let remaining = typedAmount;
     if (this.shield > 0) {
       const absorbed = Math.min(this.shield, remaining);
       this.shield -= absorbed;
@@ -420,7 +555,7 @@ export class Enemy {
       this.rig?.flash();
       this.instancer?.flash(this);
       this.engine.juice.combatHit(this.position, 0.9);
-      return;
+      return typedAmount;
     }
     this.health -= remaining * this.damageTakenMult;
     this.rig?.flash();
@@ -444,8 +579,9 @@ export class Enemy {
       const dir = this.position.sub(from).setY(0).normalize();
       this.body.applyImpulse(new CANNON.Vec3(dir.x * landed * 0.6, landed * 0.25, dir.z * landed * 0.6));
     }
-    if (this.health <= 0) { this.die(); return; }
+    if (this.health <= 0) { this.die(); return typedAmount; }
     this.checkBossPhase();
+    return typedAmount;
   }
 
   /**
@@ -563,23 +699,61 @@ export class Enemy {
     }
   }
 
-  update(dt: number, playerPos: THREE.Vector3, t: number) {
+  update(dt: number, playerPos: THREE.Vector3, t: number, perception: StealthPerception = DEFAULT_PERCEPTION) {
     if (!this.alive) { this.updateCorpse(dt, t); return; }
     const pos = this.position;
     // render-interpolated position for visual placements only — AI logic keeps raw `pos`
     const vpos = this.body ? this.engine.physics.interpolatedPosition(this.body, this.tmpV) : pos;
     // UPGRADE LOOP (deployables): the lure hook — a lured enemy measures
     // ranges and aims at the totem instead of the player.
-    const tgt = this.lureTarget ?? playerPos;
+    // UPGRADE LOOP (companion-combat-depth): a companion-targeted enemy
+    // measures ranges and aims at the companion instead (lure wins on
+    // ties; null companionTargetPos = pre-phase behavior exactly).
+    const tgt = this.lureTarget ?? this.companionTargetPos ?? playerPos;
+    this.lastTarget = this.lureTarget ? 'lure' : this.companionTargetPos ? 'companion' : 'player';
     const dist = pos.distanceTo(tgt);
     this.attackCd -= dt;
 
-    const aggroR = (this.kind === 'turret' ? 42 : 30) * this.aggroMult;
-    const attackR = this.kind === 'walker' || this.kind === 'brute' ? 2.2 : 26;
+    // UPGRADE LOOP (stealth-system): the effective detection radius is
+    // the old aggroR with sneak + jitter folded in (base 30/42 x sneak
+    // 0.45 x jitter 0.9–1.1 x aggroMult). The ONLY behavior-contract
+    // change: chase/ranged-attack require targeting weight 100
+    // (alerted). Suspicious/unaware enemies wander (idle) — they never
+    // pursue. Melee contact (below) and lures bypass awareness: a
+    // lured enemy is alerted, and a melee enemy already touching its
+    // target attacks exactly as before stealth existed.
+    const aggroR = this.effectiveDetectionRadius(perception.sneaking && !this.lureTarget);
+    const isMelee = this.kind === 'walker' || this.kind === 'brute';
+    const attackR = isMelee ? 2.2 : 26;
+    // Contact: a melee enemy whose target is already inside its strike
+    // range has physically bumped into the target — instant detection.
+    // This preserves the pre-stealth contract (a fresh enemy with the
+    // player on top of it attacks on the first update; see the
+    // deployables control test). Ranged kinds get no bypass: firing a
+    // weapon is a targeting act, gated by awareness like the chase.
+    const contact = !this.lureTarget && isMelee && dist < attackR;
+    if (this.lureTarget) {
+      this.awarenessTracker.alert();
+      this.awareness = 'alerted';
+    } else if (contact) {
+      this.awarenessTracker.alert();
+      this.awareness = 'alerted';
+    } else {
+      const noiseHeard = perception.noiseRadius > 0 && dist <= perception.noiseRadius;
+      this.awareness = this.awarenessTracker.update(dt, {
+        inDetectionRange: dist < aggroR,
+        beyondHysteresis: dist > aggroR * 1.3,
+        noiseHeard,
+      });
+    }
 
-    if (dist < attackR && this.attackCd <= 0) this.state = 'attack';
-    else if (dist < aggroR) this.state = 'chase';
-    else if (this.state !== 'idle' && dist > aggroR * 1.3) this.state = 'idle';
+    if (contact || targetWeightFor(this.awareness) > 0) {
+      if (dist < attackR && this.attackCd <= 0) this.state = 'attack';
+      else if (dist < aggroR) this.state = 'chase';
+      else if (this.state !== 'idle' && dist > aggroR * 1.3) this.state = 'idle';
+    } else {
+      this.state = 'idle';
+    }
 
     switch (this.kind) {
       case 'walker': case 'brute': {
@@ -595,12 +769,21 @@ export class Enemy {
             this.rig!.swing?.();
             // UPGRADE LOOP (deployables): a lured enemy mauls the totem —
             // never the player.
+            // UPGRADE LOOP (companion-combat-depth): a companion-targeted
+            // enemy hits the companion (onCompanionHit) — never the
+            // player. Vampiric lifesteal still applies: the hit landed,
+            // so life was drained (from the companion).
             if (dist < 2.6 && !this.lureTarget) {
-              this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
-              // UPGRADE LOOP (elite-affixes): vampiric lifesteal on a
-              // landed melee hit (lured mauling heals nothing — no player
-              // was hit, so no life was drained).
-              this.heal(this.spec.damage * this.lifestealFrac);
+              if (this.companionTargetPos) {
+                this.events.onCompanionHit?.(this.spec.damage, pos, this.kind);
+                this.heal(this.spec.damage * this.lifestealFrac);
+              } else {
+                this.events.onPlayerHit?.(this.spec.damage, pos, this.kind);
+                // UPGRADE LOOP (elite-affixes): vampiric lifesteal on a
+                // landed melee hit (lured mauling heals nothing — no player
+                // was hit, so no life was drained).
+                this.heal(this.spec.damage * this.lifestealFrac);
+              }
             }
           }
         } else {
@@ -750,6 +933,15 @@ export interface EnemyManagerOpts {
    * function of (spawnSeed, chance) in eliteAffixes.ts.
    */
   eliteChance?: () => number;
+  /**
+   * UPGRADE LOOP (daily-mutators): the live daily run's mutator ids,
+   * read at spawn/kill time. Default () => [] (identity: every multiplier
+   * 1, byte-identical spawns). Blueprints wire
+   * () => engine.getDailyMutators(). Applied LAST on the scaled copy
+   * (band -> difficulty -> NG+ -> affixes -> mutators); see dailyMutators.ts
+   * for the field semantics and the spawnAll scoping note.
+   */
+  mutators?: () => readonly string[];
 }
 
 /** Spawns and manages the full enemy roster from spec. */
@@ -841,12 +1033,25 @@ export class EnemyManager implements MapLocalEntitySystem {
     const eliteRoll = rollEliteAffixes(seed, this.opts.eliteChance?.() ?? 0);
     const affixed = applyEliteAffixes(
       nScaled.health, nScaled.damage, scaled.spec.speed, nScaled.xpMult, eliteRoll.affixes);
+    // UPGRADE LOOP (daily-mutators): additive mutator layer, applied LAST
+    // on the scaled copy (band -> difficulty -> NG+ -> affixes -> mutators).
+    // Player-taken damage folds into the enemy damage stat (the difficulty
+    // pattern, so every damage path is covered); player-dealt damage and
+    // enemy armor compose on Enemy.damageTakenMult (see dailyMutators.ts
+    // for why one field carries both). No mutators = identity, spawns
+    // byte-identical to pre-mutator builds.
+    const mut = this.mutatorEffect();
     const finalSpec = {
       ...scaled.spec,
-      health: affixed.health, damage: affixed.damage, speed: affixed.speed,
+      health: affixed.health, damage: affixed.damage * mut.playerDamageTakenMult, speed: affixed.speed,
     };
     const e = new Enemy(this.engine, finalSpec, pos, this.projectiles, {
       onPlayerHit: this.events.onPlayerHit,
+      // UPGRADE LOOP (companion-combat-depth): forward the companion-hit
+      // channel too — without this, companion-targeted melee hits would
+      // silently deal no damage (the per-enemy events object is built
+      // here, not passed through wholesale).
+      onCompanionHit: this.events.onCompanionHit,
       // ANIMATION wave: the kill is counted at death; the roster entry is
       // swept once the ragdoll-lite corpse finishes (EnemyManager.update),
       // so waves can't accumulate corpses forever
@@ -862,7 +1067,7 @@ export class EnemyManager implements MapLocalEntitySystem {
           if (!this.lootRng) {
             this.lootRng = buildLootRng(this.opts.lootSeed ?? this.engine.spec.meta.seed);
           }
-          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss, this.engine.worldTier ?? 1, this.difficultyDef().lootChanceMult * this.ngPlusDef().lootChanceMult)) {
+          for (const drop of rollLoot(this.lootRng, en.spec.kind, en.isBoss, this.engine.worldTier ?? 1, this.difficultyDef().lootChanceMult * this.ngPlusDef().lootChanceMult * this.mutatorEffect().lootChanceMult)) {
             try { this.lootHooks.onLoot(drop, en.position); } catch { /* loot is cosmetic */ }
           }
           // VENDOR-ECONOMY: seeded scrap payout off the separate currency
@@ -896,7 +1101,7 @@ export class EnemyManager implements MapLocalEntitySystem {
     e.xpMult = affixed.xpMult;
     e.scalingBand = scaled.bandIndex;
     e.eliteAffixes = eliteRoll.affixes;
-    e.damageTakenMult = affixed.mods.damageTakenMult;
+    e.damageTakenMult = affixed.mods.damageTakenMult * mut.enemyDamageTakenMult * mut.playerDamageDealtMult;
     e.lifestealFrac = affixed.mods.lifestealFrac;
     e.volatile = affixed.mods.volatile;
     e.maxShield = e.shield = e.maxHealth * affixed.mods.shieldFrac;
@@ -923,6 +1128,16 @@ export class EnemyManager implements MapLocalEntitySystem {
    */
   private ngPlusDef() {
     return ngPlusByCycle(this.opts.ngPlus?.() ?? 0);
+  }
+
+  /**
+   * UPGRADE LOOP (daily-mutators): the combined mutator effect for this
+   * manager's roster. Read per spawn/kill so a daily run's set applies to
+   * enemies spawned after the run starts (already-spawned enemies keep
+   * their spawn-time stats). Identity when the opts callback is absent.
+   */
+  private mutatorEffect() {
+    return combineMutatorEffects(this.opts.mutators?.() ?? []);
   }
 
   /**
@@ -968,7 +1183,10 @@ export class EnemyManager implements MapLocalEntitySystem {
     this.lootRng = buildLootRng(mapSeed);
     const rng = new Rng((mapSeed ^ ENEMY_SALT) >>> 0);
     const specs = this.opts.specs ?? this.engine.spec.enemies ?? [];
-    const density = this.opts.density ?? 1;
+    // UPGRADE LOOP (daily-mutators): swarm multiplies the roster density
+    // here (the opts.density scale). spawnAll is deliberately untouched:
+    // its counts are authored per-encounter (waves, scripted bosses).
+    const density = (this.opts.density ?? 1) * this.mutatorEffect().spawnDensityMult;
     const raw = this.opts.pois?.length ? this.opts.pois : [{ x: 0, z: 0, r: 0 }];
     const pois = raw.map((p) => p instanceof THREE.Vector3
       ? { x: p.x, z: p.z, r: 0 }
@@ -1036,7 +1254,16 @@ export class EnemyManager implements MapLocalEntitySystem {
     return best;
   }
 
-  update(dt: number, playerPos: THREE.Vector3, t: number) {
+  /**
+   * UPGRADE LOOP (stealth-system): one-shot noise event (an attack).
+   * Every living enemy within `radius` of `pos` becomes suspicious
+   * (never directly alerted). Enemies outside the radius hear nothing.
+   */
+  emitNoise(pos: THREE.Vector3, radius: number): void {
+    for (const e of this.enemies) e.hearNoise(pos, radius);
+  }
+
+  update(dt: number, playerPos: THREE.Vector3, t: number, perception: StealthPerception = DEFAULT_PERCEPTION) {
     // ENEMIES WAVE C: the blueprint drives the shared instancer frame
     // (beginFrame/endFrame) around the manager updates — NpcManager and
     // EnemyManager submit into the same per-engine buckets, so a single
@@ -1046,7 +1273,7 @@ export class EnemyManager implements MapLocalEntitySystem {
     // Unregistered enemies (blueprint initial-build path) submit as no-ops.
     // iterate a copy: the roster can change mid-loop (custom kinds, death)
     for (const e of [...this.enemies]) {
-      e.update(dt, playerPos, t);
+      e.update(dt, playerPos, t, perception);
       this.instancer.submit(e);
     }
     // sweep finished corpses: their death tumble ran, scene + GPU freed.

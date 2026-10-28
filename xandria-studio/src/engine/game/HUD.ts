@@ -88,7 +88,18 @@ const CSS = `
 .xhud .crosshair::after { left:0; top:6px; width:14px; height:2px; }
 .xhud .vignette { position:absolute; inset:0; background:radial-gradient(ellipse at center, transparent 55%, rgba(255,30,40,.55) 100%); opacity:0; transition:opacity .1s; }
 .xhud .toast { position:absolute; left:50%; top:18%; transform:translateX(-50%); font-size:20px; font-weight:700; letter-spacing:.1em; text-shadow:0 2px 12px rgba(0,0,0,.7); opacity:0; transition:opacity .3s; }
+/* UPGRADE LOOP (photo-mode): HUD chip that opens photo mode. Left edge
+   below the objective panel (top-left) and above the bars (bottom-left):
+   the bottom-right is the minimap, the top-centre is the boss bar, and
+   the bottom-centre is the hint pill — this edge is the free one on both
+   desktop and 360x780. 32px tall so the touch target clears the 28px floor. */
+.xhud .xphoto-chip { position:absolute; left:16px; top:160px; min-height:32px; min-width:32px; padding:6px 12px;
+  font-size:12px; font-weight:700; letter-spacing:.08em; color:#e8ecf1; cursor:pointer; pointer-events:auto;
+  background:rgba(10,14,20,.55); border:1px solid rgba(140,180,220,.25); border-radius:8px; }
+.xhud .xphoto-chip:hover { background:rgba(43,63,87,.8); }
 .xhud .hint { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); font-size:11.5px; opacity:.65; background:rgba(10,14,20,.5); padding:6px 12px; border-radius:8px; }
+/* STEALTH-SYSTEM: sneak-state chip — sits above the bars panel, hidden unless sneaking. */
+.xhud .sneakchip { position:absolute; left:16px; bottom:118px; font-size:11px; font-weight:700; letter-spacing:.18em; color:#9fd8ff; background:rgba(10,14,20,.55); border:1px solid rgba(140,180,220,.25); border-radius:8px; padding:6px 10px; }
 /* HUD-polish: an empty hint is a visible padding-only pill — hide it so it
    can't collide with the bars on touch layouts. */
 .xhud .hint:empty { display:none; }
@@ -206,6 +217,16 @@ const CSS = `
 .xhud .title-screen .slot-btn.armed { border-color:#ff6a7a; color:#ff8a9a; }
 .xhud .title-screen .slot-rename-input { flex:1; min-height:36px; min-width:0; background:#141c2c; color:#e8ecf1; border:1px solid #ffd23f; border-radius:8px; padding:6px 10px; font-size:14px; }
 .xhud .title-screen .slot-new { width:100%; min-height:36px; margin:4px 0 0; border-radius:8px; border:1px dashed rgba(140,180,220,.4); background:transparent; color:#9fb4d0; cursor:pointer; font-size:13px; letter-spacing:.1em; padding:6px 12px; }
+/* UPGRADE LOOP (save-export-import): export/import row under the slot rows.
+   Same >= 28px touch targets; the file input is visually hidden (never
+   display:none — Playwright setInputFiles and keyboard users both need a
+   real input) and the status line reports import/export outcomes in
+   plain text (textContent only — a backup file's contents never reach
+   innerHTML). */
+.xhud .title-screen .slot-backup { display:flex; gap:6px; margin:8px 0 0; }
+.xhud .title-screen .slot-backup-btn { flex:1; min-width:0; min-height:36px; padding:6px 12px; border-radius:8px; border:1px solid rgba(140,180,220,.3); background:rgba(20,28,44,.7); color:#e8ecf1; cursor:pointer; font-size:13px; letter-spacing:.08em; margin:0; }
+.xhud .title-screen .slot-backup-file { position:absolute; width:1px; height:1px; opacity:0; overflow:hidden; }
+.xhud .title-screen .slot-backup-status { font-size:12px; line-height:1.4; text-align:center; margin:8px 0 0; opacity:.9; overflow-wrap:anywhere; }
 @keyframes pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.05); } }
 .xhud .settings { display:flex; flex-direction:column; gap:14px; margin-bottom:24px; min-width:300px; }
 /* UPGRADE LOOP (audio-system): the settings panel outgrew the viewport
@@ -313,6 +334,8 @@ export class HUD {
   private livesEl: HTMLDivElement;
   private vignette: HTMLDivElement;
   private toastEl: HTMLDivElement;
+  /** STEALTH-SYSTEM: sneak-state chip element (hidden unless sneaking). */
+  private sneakEl: HTMLDivElement;
   /** Tutorial wave: the live tutorial card + highlighted target (if any). */
   private tutCard: HTMLDivElement | null = null;
   private tutHl: HTMLElement | null = null;
@@ -409,6 +432,7 @@ export class HUD {
       <div class="vignette"></div>
       <div class="toast"></div>
       <div class="hint"></div>
+      <div class="sneakchip" data-sneak-chip style="display:none">SNEAKING</div>
       <div class="boss" style="display:none"><div class="name"></div><div class="bar"><div style="width:100%"></div></div></div>`;
     container.style.position = 'relative';
     container.appendChild(this.root);
@@ -431,6 +455,7 @@ export class HUD {
     this.livesEl = this.root.querySelector('.lives')!;
     this.vignette = this.root.querySelector('.vignette')!;
     this.toastEl = this.root.querySelector('.toast')!;
+    this.sneakEl = this.root.querySelector('.sneakchip')!;
     this.hintEl = this.root.querySelector('.hint')!;
     this.bossEl = this.root.querySelector('.boss')!;
     this.bossName = this.root.querySelector('.boss .name')!;
@@ -442,6 +467,22 @@ export class HUD {
     this.crosshair.className = 'crosshair';
     this.crosshair.style.display = 'none';
     this.root.appendChild(this.crosshair);
+    // UPGRADE LOOP (photo-mode): the HUD chip that opens photo mode (the
+    // O key is the keyboard twin). The click reads this.eng at click
+    // time — the HUD is constructed before Engine finishes building the
+    // photo controller, so binding at construction would be too early.
+    // The chip lives inside .xhud, so photo mode's overlay snapshot hides
+    // it with the rest of the HUD while framing.
+    const photoChip = document.createElement('button');
+    photoChip.type = 'button';
+    photoChip.className = 'xphoto-chip';
+    // setAttribute is optional-chained: the unit-test DOM stub exposes
+    // className only (see the showCard comment above), and the label is
+    // decorative — a stub without setAttribute must still construct.
+    photoChip.setAttribute?.('aria-label', 'Open photo mode');
+    photoChip.textContent = '📷 PHOTO (O)';
+    photoChip.addEventListener('click', () => { this.eng?.photoMode.enter(); });
+    this.root.appendChild(photoChip);
 
     this.setObjective(spec.objective.description, '');
     this.hintEl.textContent = '';
@@ -485,6 +526,9 @@ export class HUD {
   /** vendor-economy wave: the scrap (currency) readout under the score. */
   setCurrency(n: number) { this.coinVal.textContent = String(Math.max(0, Math.floor(n))); }
   setHealth(frac: number) { this.hpFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`; }
+
+  /** STEALTH-SYSTEM: show/hide the SNEAKING chip. Idempotent; called on state change only. */
+  setSneaking(on: boolean) { this.sneakEl.style.display = on ? '' : 'none'; }
   setBoost(frac: number) { this.boostFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`; }
   showBoostBar(show: boolean) {
     this.boostBar.style.display = show ? '' : 'none';
@@ -930,6 +974,14 @@ export class HUD {
     onRenameSlot?: (id: string, name: string) => void;
     onDeleteSlot?: (id: string) => void;
     onNewSlot?: () => void;
+    /**
+     * UPGRADE LOOP (save-export-import): export the active slot to a JSON
+     * backup file; import a backup file's text as a new slot. The status
+     * line below reports the outcome of the last export/import.
+     */
+    onExportSlot?: () => void;
+    onImportSlot?: (text: string) => void;
+    slotBackupStatus?: string;
     /** run-journal wave: opens the run journal panel; renders the button */
     onJournal?: () => void;
     /**
@@ -1060,6 +1112,48 @@ export class HUD {
         nw.textContent = '＋ NEW SLOT';
         nw.addEventListener('click', (e) => { e.stopPropagation(); opts.onNewSlot?.(); });
         sw.appendChild(nw);
+      }
+      // UPGRADE LOOP (save-export-import): backup row. Export downloads
+      // the active slot; import reads a chosen file and hands its text to
+      // the engine (validation + new-slot landing live there). Every
+      // control stopPropagation()s like the rest of the picker.
+      const backup = document.createElement('div');
+      backup.className = 'slot-backup';
+      const exp = document.createElement('button');
+      exp.className = 'slot-backup-btn slot-export';
+      exp.textContent = '⤓ EXPORT';
+      exp.setAttribute('aria-label', 'Export active save slot to a backup file');
+      exp.addEventListener('click', (e) => { e.stopPropagation(); opts.onExportSlot?.(); });
+      const imp = document.createElement('button');
+      imp.className = 'slot-backup-btn slot-import';
+      imp.textContent = '⤒ IMPORT';
+      imp.setAttribute('aria-label', 'Import a save slot backup file');
+      const fileInput = document.createElement('input');
+      fileInput.className = 'slot-backup-file';
+      fileInput.type = 'file';
+      fileInput.accept = '.json,application/json';
+      fileInput.setAttribute('aria-label', 'Choose a save slot backup file');
+      fileInput.addEventListener('click', (e) => e.stopPropagation());
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        // Reset so choosing the same file twice still fires change.
+        fileInput.value = '';
+        void file.text().then(
+          (text) => opts.onImportSlot?.(text),
+          () => opts.onImportSlot?.(''),
+        );
+      });
+      imp.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+      backup.append(exp, imp, fileInput);
+      sw.appendChild(backup);
+      if (opts.slotBackupStatus) {
+        const status = document.createElement('div');
+        status.className = 'slot-backup-status';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = opts.slotBackupStatus;
+        sw.appendChild(status);
       }
       ov.appendChild(sw);
     }
@@ -1235,7 +1329,9 @@ export class HUD {
           dt.textContent = r.today ? 'TODAY' : r.date.slice(5);
           const gl = document.createElement('span');
           gl.className = 'dbr-goal';
-          gl.textContent = `${r.goalText} · ${r.loadoutText}`;
+          gl.textContent = r.mutatorText
+            ? `${r.goalText} · ${r.loadoutText} · ⚡ ${r.mutatorText}`
+            : `${r.goalText} · ${r.loadoutText}`;
           const rs = document.createElement('span');
           rs.className = 'dbr-result';
           rs.textContent = r.result

@@ -30,6 +30,13 @@ import type { Npc } from './Npc';
 import { DialoguePanel, type DialogueQuestAction } from '../ui/DialoguePanel';
 import { InteractionPrompt } from '../ui/InteractionPrompt';
 import { QuestManager, questRequiresFor, questProducesFor } from './quests';
+import {
+  DialogueEngine,
+  DialogueState,
+  type DialogueContext,
+  type DialogueNodeDef,
+  type DialogueTreeDef,
+} from './dialogue';
 
 export interface QuestTalkSessionOpts {
   /** override the UI container (default: engine.container) */
@@ -47,6 +54,18 @@ export interface QuestTalkSessionOpts {
    * dialogue. Undefined = vendors open the dialogue like villagers.
    */
   openVendor?: (npc: Npc) => boolean;
+  /**
+   * Dialogue-branching wave: the tree engine + player-scoped state +
+   * live-context thunk (standings, quest manager, inventory — wired by
+   * the blueprint). When present, villagers with a tree for their role
+   * render the tree above the quest actions; roles without a tree keep
+   * the quest-only dialogue exactly as before.
+   */
+  dialogue?: {
+    engine: DialogueEngine;
+    state: DialogueState;
+    context: () => DialogueContext;
+  };
 }
 
 /** Stale-session guard: one live session per engine (mirrors the other sessions). */
@@ -61,6 +80,8 @@ export class QuestTalkSession {
   private scratch = new THREE.Vector3();
   /** interactable id the open dialogue belongs to (null = none) */
   private openNpcId: string | null = null;
+  /** dialogue-branching wave: the tree node the open dialogue shows (null = quest-only) */
+  private openTree: { treeId: string; nodeId: string } | null = null;
 
   constructor(
     private readonly engine: Engine,
@@ -100,6 +121,11 @@ export class QuestTalkSession {
     return this.dialogue?.isOpen ?? false;
   }
 
+  /** Dialogue-branching wave: the tree node id the open dialogue shows (null = none / quest-only). */
+  get currentDialogueNode(): string | null {
+    return this.openTree?.nodeId ?? null;
+  }
+
   /**
    * Open the quest dialogue for an interactable id. Talk objectives advance
    * here (the player actually spoke). Vendors (vendor-economy wave) open
@@ -120,6 +146,7 @@ export class QuestTalkSession {
   /** Close the dialogue (dismiss). */
   closeDialogue(): void {
     this.openNpcId = null;
+    this.openTree = null;
     this.dialogue?.hide();
   }
 
@@ -140,12 +167,53 @@ export class QuestTalkSession {
     const actions: DialogueQuestAction[] = [
       ...acts.turnIn.map((d) => ({ id: `turnin:${d.id}`, label: `Turn in: ${d.name}` })),
       ...acts.accept.map((d) => ({ id: `accept:${d.id}`, label: `Accept: ${d.name} — ${d.brief}` })),
+      // timed-quests wave: a failed timed quest can be retried from
+      // the giver — same reaccept() the timed board's Try again uses.
+      ...acts.failed.map((d) => ({ id: `retry:${d.id}`, label: `Retry: ${d.name} — the clock ran out` })),
     ];
+    // Dialogue-branching wave: a tree for this role renders above the
+    // quest actions (same panel, same z-order, same dismiss control).
+    // The dialogue always opens on the tree's start node; a node opened
+    // again shows its returnLines (state-driven, via recordVisit below).
+    const dlg = this.opts.dialogue;
+    const tree = dlg?.engine.treeForRole(npc.role) ?? null;
+    if (dlg && tree) {
+      const nodeId = this.openTree?.treeId === tree.id ? this.openTree.nodeId : tree.start;
+      const node = dlg.engine.nodeOf(tree, nodeId) ?? dlg.engine.nodeOf(tree, tree.start);
+      if (node) {
+        // text BEFORE the visit is recorded: first render shows lines,
+        // later renders (same conversation or a later visit) show
+        // returnLines when the node defines them.
+        const text = dlg.engine.displayText(tree, node, dlg.state);
+        dlg.state.recordVisit(tree.id, node.id);
+        const choices = dlg.engine.choicesFor(tree, node, dlg.context()).map((v) => ({
+          id: v.def.id,
+          label: v.def.label,
+          locked: v.locked,
+          lockReason: v.lockReasons.join('; '),
+        }));
+        this.openTree = { treeId: tree.id, nodeId: node.id };
+        this.dialogue.showTree({
+          name: npc.name,
+          role: npc.role,
+          text,
+          nodeId: node.id,
+          choices,
+          actions,
+          onChoice: (id) => this.onTreeChoice(npc, tree, node, id),
+          onAction: (id) => this.onQuestAction(npc, id),
+        });
+        return;
+      }
+    }
+    this.openTree = null;
     let greeting = npc.greeting;
     if (acts.turnIn.length > 0) {
       greeting = `So it's done. ${acts.turnIn[0].name} — the settlement owes you.`;
     } else if (acts.accept.length > 0) {
       greeting = acts.accept[0].brief;
+    } else if (acts.failed.length > 0) {
+      greeting = `${acts.failed[0].name} — the clock ran out. Try again, and be quick about it.`;
     }
     this.dialogue.show(
       { name: npc.name, role: npc.role, greeting },
@@ -154,11 +222,27 @@ export class QuestTalkSession {
     );
   }
 
+  /** Dialogue-branching wave: apply a tree choice, navigate or close. */
+  private onTreeChoice(npc: Npc, tree: DialogueTreeDef, node: DialogueNodeDef, choiceId: string): void {
+    const dlg = this.opts.dialogue;
+    if (!dlg) return;
+    const res = dlg.engine.choose(tree, node, choiceId, dlg.context(), dlg.state);
+    if (res.ended) {
+      this.closeDialogue();
+      return;
+    }
+    if (res.nextNodeId) this.openTree = { treeId: tree.id, nodeId: res.nextNodeId };
+    // re-show: the node (and its quest-action list, which a questAccept
+    // choice may have changed) is re-read fresh
+    this.showFor(npc);
+  }
+
   private onQuestAction(npc: Npc, id: string): void {
     const sep = id.indexOf(':');
     const action = id.slice(0, sep);
     const questId = id.slice(sep + 1);
     if (action === 'accept') this.quests.accept(questId);
+    else if (action === 'retry') this.quests.reaccept(questId);
     else if (action === 'turnin') {
       // UPGRADE LOOP (audio-system): observe-only turn-in seam — the
       // audio wiring taps this for the quest SFX; gameplay is untouched.
@@ -186,6 +270,7 @@ export class QuestTalkSession {
     this.dialogue?.dispose();
     this.dialogue = null;
     this.openNpcId = null;
+    this.openTree = null;
     this.byId.clear();
     if (liveSessions.get(this.engine) === this) liveSessions.delete(this.engine);
   }

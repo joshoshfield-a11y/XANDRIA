@@ -58,6 +58,7 @@
  * - LootEntry type is imported TYPE-ONLY from loot.ts.
  */
 import type { GameSpec, ItemDef, ItemStats, EquipSlot } from '@spec';
+import type { DamageType } from './elemental';
 import type { LootEntry } from './loot';
 import { ItemBuilder } from './items/ItemBuilder';
 import { addItemStats } from './setBonuses';
@@ -130,6 +131,15 @@ export interface EnchantDef {
   slots: readonly EquipSlot[];
   /** Additive stats granted while the enchanted item is equipped. */
   stats: ItemStats;
+  /**
+   * ELEMENTAL-DAMAGE-TYPES: the damage type this enchant lends the
+   * weapon it is applied to (see elemental.ts outgoingDamageType —
+   * weapon slot only). Absent for defensive enchants, which grant no
+   * damage type. Adding a type here changes no stat math and no
+   * enchant/ability contract: the type flows only through the
+   * elemental step in Enemy.damage().
+   */
+  damageType?: DamageType;
   /** Materials consumed on apply; refunded in full on remove. */
   cost: readonly EnchantCost[];
 }
@@ -146,6 +156,7 @@ export const ENCHANT_DEFS: readonly EnchantDef[] = [
     blurb: 'Dust-honed edge — cuts a fraction deeper.',
     slots: ['weapon'],
     stats: { damage: 4 },
+    damageType: 'physical',
     cost: [{ itemId: MAT_ENCHANT_DUST, count: 3 }],
   },
   {
@@ -173,6 +184,7 @@ export const ENCHANT_DEFS: readonly EnchantDef[] = [
     blurb: 'Starlight on the edge — finds the seam every time.',
     slots: ['weapon'],
     stats: { crit: 5 },
+    damageType: 'shock',
     cost: [{ itemId: MAT_STAR_ESSENCE, count: 3 }],
   },
   {
@@ -192,6 +204,9 @@ export const ENCHANT_DEFS: readonly EnchantDef[] = [
     blurb: 'Starlight and dust in equal measure — bright and hungry.',
     slots: ['weapon', 'accessory'],
     stats: { damage: 3, crit: 3 },
+    // Star essence is "cold to the touch" (the material def's own
+    // description) — the frost type is grounded in that text.
+    damageType: 'frost',
     cost: [
       { itemId: MAT_STAR_ESSENCE, count: 2 },
       { itemId: MAT_ENCHANT_DUST, count: 2 },

@@ -18,6 +18,7 @@ import { Pickups } from '../engine/game/Pickups';
 import { Progression } from '../engine/game/Progression';
 import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit, BASE_CRIT_CTX } from '../engine/game/crit';
+import { displayedDamage } from '../engine/game/elemental';
 import type { LevelGain } from '../engine/game/progressionCurve';
 import {
   makeCampaignObjectives,
@@ -112,6 +113,8 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
     onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   }, {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    // UPGRADE LOOP (daily-mutators): live daily run's mutator set feeds spawn stat scaling.
+    mutators: () => engine.getDailyMutators(),
   });
   const variants = new VariantDirector(engine, enemies, projectiles);
 
@@ -130,7 +133,7 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll(BASE_CRIT_CTX); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
+      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll(BASE_CRIT_CTX); const dmg = applyCrit(raw, roll); const returned = target.damage(dmg, point, 'physical'); const dealt = displayedDamage(dmg, (target as { damageKind?: string }).damageKind, 'physical', returned); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dealt); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }

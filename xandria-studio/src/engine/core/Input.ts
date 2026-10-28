@@ -6,7 +6,7 @@
 export type Action =
   | 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'dash' | 'attack' | 'attack2'
   | 'interact' | 'pause' | 'boost' | 'brake' | 'reset' | 'confirm' | 'weapon1' | 'weapon2'
-  | 'deploy' | 'ability1' | 'ability2' | 'ability3';
+  | 'deploy' | 'ability1' | 'ability2' | 'ability3' | 'sneak';
 
 /**
  * ACCESSIBILITY PASS: the keyboard map is no longer a hardcoded const —

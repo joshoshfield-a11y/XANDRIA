@@ -11,17 +11,19 @@
  * never Math.random, never Date.now. Same seed + same action sequence
  * -> identical damage/heal rolls and identical follow offsets.
  *
- * ENEMY CONTRACT: untouched. Companion attacks call the EXISTING
+ * ENEMY CONTRACT: changed exactly once, by companion-combat-depth
+ * (see companionCombat.ts for the full disclosure): enemies may now
+ * target a summoned, living companion instead of the player, per the
+ * weight table (player 100, companion 40, taunt 160; out-of-range = 0;
+ * ties to the player). Companion attacks still call the EXISTING
  * Enemy.damage() path (the same method player melee/projectiles use),
  * so a companion kill flows through the existing EnemyManager.onDeath
  * path: loot rolls, currency rolls, quest hooks, standings, and the
  * blueprint's grantKillXp all fire exactly as for a player kill — the
  * companion kill is credited to the player by construction, with no
- * special-casing and no enemy/NPC behavior change. Enemies never target
- * companions (no lureTarget-style hook is added); companion targeting
- * is an ADDITIVE weight on the companion's own side only: the nearest
- * enemy wins, with a small bonus for wounded targets
- * (score = distance - (1 - hpFrac) * WOUND_BONUS).
+ * special-casing. Companion targeting on the companion's own side is
+ * unchanged: the nearest enemy wins, with a small bonus for wounded
+ * targets (score = distance - (1 - hpFrac) * WOUND_BONUS).
  *
  * RENDERING: companions ride the shared per-engine NpcInstancer through
  * the owner-agnostic registerEnemy({ renderRoot }) path (the deployables
@@ -59,6 +61,13 @@ import {
 } from './voxelGeo';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import type { Enemy } from './EnemyAI';
+import {
+  COMPANION_REVIVE_COST,
+  applyGuardReduction,
+  isCompanionStance,
+  pickEnemyTarget,
+  type CompanionStance,
+} from './companionCombat';
 
 /** Salt for the companion stream — off the DEPLOY/GATHER/ENEMY streams. */
 export const COMPANION_SALT = 0xc0ff1e;
@@ -167,6 +176,12 @@ export interface CompanionState {
   /** custom name (defaults to the def name, renameable in the panel) */
   name: string;
   hp: number;
+  /**
+   * Combat stance (companion-combat-depth; 'normal' when a save predates
+   * stances). Only the ACTIVE entry's stance is read; switching
+   * companions keeps each entry's own stance.
+   */
+  stance: CompanionStance;
 }
 
 /** Persisted companion save shape (rides the profile's companions field). */
@@ -358,7 +373,7 @@ export class CompanionsManager implements MapLocalEntitySystem {
     this.instancer = NpcInstancer.for(engine);
     if (opts.initial) this.restore(opts.initial);
     else {
-      this.roster = COMPANION_DEFS.map((d) => ({ defId: d.id, name: d.name, hp: d.maxHp }));
+      this.roster = COMPANION_DEFS.map((d) => ({ defId: d.id, name: d.name, hp: d.maxHp, stance: 'normal' as CompanionStance }));
     }
   }
 
@@ -390,7 +405,7 @@ export class CompanionsManager implements MapLocalEntitySystem {
     if (!def) { this.opts.toast(`Unknown companion ${defId}.`); return false; }
     let entry = this.roster.find((s) => s.defId === defId);
     if (!entry) {
-      entry = { defId, name: def.name, hp: def.maxHp };
+      entry = { defId, name: def.name, hp: def.maxHp, stance: 'normal' };
       this.roster.push(entry);
     }
     if (this.entity && this.activeId === defId) return true; // already live
@@ -441,7 +456,7 @@ export class CompanionsManager implements MapLocalEntitySystem {
     return entry.hp - before;
   }
 
-  /** Damage the active companion (test seam + future enemy hooks); 0 HP = downed, not deleted. */
+  /** Damage the active companion (test seam + campfire-test wounding); 0 HP = downed, not deleted. */
   damageActive(n: number): number {
     const entry = this.activeState;
     if (!entry) return 0;
@@ -449,6 +464,60 @@ export class CompanionsManager implements MapLocalEntitySystem {
     entry.hp = Math.max(0, entry.hp - n);
     if (this.entity && entry.hp <= 0) this.entity.root.visible = false;
     return before - entry.hp;
+  }
+
+  /** Current stance of the active companion ('normal' when nothing is summoned). */
+  get activeStance(): CompanionStance {
+    return this.activeState?.stance ?? 'normal';
+  }
+
+  /** Set the active companion's stance (panel toggle). Invalid values refused. */
+  setStance(stance: CompanionStance): boolean {
+    const entry = this.activeState;
+    if (!entry || !isCompanionStance(stance)) return false;
+    entry.stance = stance;
+    this.persist();
+    return true;
+  }
+
+  /**
+   * Enemy-hit path (companion-combat-depth): the ONLY route by which
+   * enemy damage reaches a companion (blueprint wires EnemyManager
+   * onCompanionHit here). Applies the guard reduction, then damage.
+   * If the hit drops the companion to 0 HP it FALLS: dismissed to the
+   * panel (roster entry kept at 0 HP, not deleted) with a revive-cost
+   * toast — never a player death, never a run end. Returns HP lost
+   * (after guard reduction), or 0 when nothing is summoned/live.
+   */
+  takeEnemyHit(rawDamage: number): number {
+    const entry = this.activeState;
+    if (!entry || !this.entity || entry.hp <= 0) return 0;
+    const dealt = this.damageActive(applyGuardReduction(rawDamage, entry.stance));
+    if (entry.hp <= 0) {
+      const name = entry.name;
+      this.despawnEntity();
+      this.activeId = null;
+      this.opts.toast(`${name} falls! Revive from the panel for ${COMPANION_REVIVE_COST} scrap.`);
+      this.persist();
+    }
+    return dealt;
+  }
+
+  /**
+   * Revive a fallen roster entry (hp 0 -> full HP). Does NOT summon:
+   * the player summons again from the panel. The scrap cost is charged
+   * by the CALLER (panel via Wallet.spend) before calling this — this
+   * method only restores HP, so a failed payment can never revive.
+   * Returns false when the entry is not fallen / unknown.
+   */
+  revive(defId: string): boolean {
+    const entry = this.roster.find((s) => s.defId === defId);
+    const def = entry && companionDefOf(defId);
+    if (!entry || !def || entry.hp > 0) return false;
+    entry.hp = def.maxHp;
+    this.persist();
+    this.opts.toast(`${entry.name} is ready to fight again.`);
+    return true;
   }
 
   /**
@@ -494,12 +563,13 @@ export class CompanionsManager implements MapLocalEntitySystem {
         defId: def.id,
         name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 40) : def.name,
         hp: Math.max(0, Math.min(def.maxHp, Math.floor(typeof raw.hp === 'number' && isFinite(raw.hp) ? raw.hp : def.maxHp))),
+        stance: isCompanionStance((raw as { stance?: unknown }).stance) ? (raw as { stance: CompanionStance }).stance : 'normal',
       });
     }
     // Roster always covers all three defs (a save from an older shape
     // must never lock a companion out).
     for (const def of COMPANION_DEFS) {
-      if (!seen.has(def.id)) this.roster.push({ defId: def.id, name: def.name, hp: def.maxHp });
+      if (!seen.has(def.id)) this.roster.push({ defId: def.id, name: def.name, hp: def.maxHp, stance: 'normal' });
     }
     this.activeId = save.activeId && companionDefOf(save.activeId) ? save.activeId : null;
   }
@@ -536,6 +606,48 @@ export class CompanionsManager implements MapLocalEntitySystem {
     try { this.instancer.unregister(this.entity); } catch { /* never strand the rest */ }
     try { this.engine.scene.remove(this.entity.root); } catch { /* never strand the rest */ }
     this.entity = null;
+    // No live companion -> no enemy may keep a companion target.
+    this.clearEnemyTargets();
+  }
+
+  /** Clear every enemy's companionTargetPos (dismiss / fall / departure). */
+  private clearEnemyTargets(): void {
+    try {
+      for (const e of this.opts.getEnemies()) e.companionTargetPos = null;
+    } catch { /* targeting cleanup must never break the frame */ }
+  }
+
+  /**
+   * Per-frame enemy target assignment (companion-combat-depth; mirrors
+   * the deployables lure assignment, runs before EnemyManager.update).
+   * For each live enemy, picks player vs companion per the weight
+   * table and writes companionTargetPos (live root position reference)
+   * or null. Dead enemies and the no-companion case always get null.
+   */
+  private assignEnemyTargets(): void {
+    const c = this.entity;
+    const entry = this.activeState;
+    const playerPos = this.opts.getPlayerPos();
+    let enemies: readonly Enemy[] = [];
+    try { enemies = this.opts.getEnemies(); } catch { return; }
+    if (!c || !entry || entry.hp <= 0) {
+      for (const e of enemies) {
+        try { e.companionTargetPos = null; } catch { /* never break the frame */ }
+      }
+      return;
+    }
+    for (const e of enemies) {
+      try {
+        if (!e.alive) { e.companionTargetPos = null; continue; }
+        const pick = pickEnemyTarget({
+          playerDist: e.position.distanceTo(playerPos),
+          companionDist: e.position.distanceTo(c.root.position),
+          stance: entry.stance,
+          kind: e.spec.kind,
+        });
+        e.companionTargetPos = pick === 'companion' ? c.root.position : null;
+      } catch { /* one enemy's targeting must never break the frame */ }
+    }
   }
 
   /** MapLocalEntitySystem departure: remove the rendered follower only. Roster survives. */
@@ -568,6 +680,9 @@ export class CompanionsManager implements MapLocalEntitySystem {
     const c = this.entity;
     const entry = this.activeState;
     if (!c || !entry) return;
+    // Enemy retaliation targets are assigned BEFORE EnemyManager.update
+    // reads them (same ordering rationale as deployables' lure hook).
+    this.assignEnemyTargets();
     const playerPos = this.opts.getPlayerPos();
     // -- follow: lerp toward the seeded offset; teleport if far behind
     const target = new THREE.Vector3(
@@ -591,8 +706,9 @@ export class CompanionsManager implements MapLocalEntitySystem {
       return;
     }
     const def = c.def;
-    // -- attack via the existing damage path (kill credit: see header)
-    if (def.damage > 0 && def.attackRange > 0) {
+    // -- attack via the existing damage path (kill credit: see header).
+    // Guard stance does NOT attack (damage reduction instead).
+    if (def.damage > 0 && def.attackRange > 0 && entry.stance !== 'guard') {
       this.attackCd -= dt;
       if (this.attackCd <= 0) {
         const targetEnemy = pickCompanionTarget(

@@ -14,6 +14,7 @@ import { makeHumanoid, type CharacterRig } from '../gfx/Characters';
 import { resolveSkinDef, applySkin, skinOptionsForSpec } from '../gfx/Skins';
 import { clearVoxelArmor, clearVoxelCape } from '../gfx/VoxelArmor';
 import { loadProfile } from './Profile';
+import { STEALTH_TABLE } from './stealth';
 import { applyCosmeticsToRig, type CosmeticSelection } from './cosmetics';
 import { loadRigFromURL, type BoneMapping } from '../gfx/RigAdapter';
 import type { PlayerSpec } from '@spec';
@@ -71,6 +72,17 @@ export class CharacterController {
   /** landing squash (polish wave): 1→0 progress + impact-scaled depth, fed to rig.animate as `land` */
   private landT = 0;
   private landDepth = 0;
+  /**
+   * UPGRADE LOOP (stealth-system): hold-to-sneak state, player-scoped.
+   * Read fresh from input every physics step (hold Ctrl / SNEAK touch
+   * button). Sneaking halves move speed (STEALTH_TABLE), silences
+   * movement noise, and shrinks enemy detection radius. Not persisted:
+   * holding the key IS the state. No rig crouch pose exists (the rig
+   * has no crouch channel) — the HUD chip is the sneak read.
+   */
+  sneaking = false;
+  /** true while a dash burst is running (feeds the noise model). */
+  get dashing(): boolean { return this.dashT > 0; }
 
   constructor(
     private engine: Engine,
@@ -213,9 +225,13 @@ export class CharacterController {
 
     // movement intent in camera space
     const ax = input.axes;
-    const run = this.spec.abilities.includes('sprint') && input.pressed('sprint');
+    // UPGRADE LOOP (stealth-system): hold-to-sneak. Sneaking disables
+    // sprint and halves speed; the state is re-read every step.
+    this.sneaking = input.pressed('sneak');
+    const run = !this.sneaking && this.spec.abilities.includes('sprint') && input.pressed('sprint');
     const boost = this.speedBoostT > 0 ? 1.5 : 1;
-    let targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost * this.speedScalar;
+    let targetSpeed = this.spec.speed * (run ? 1.65 : 1) * boost * this.speedScalar
+      * (this.sneaking ? STEALTH_TABLE.sneakSpeedMultiplier : 1);
 
     const sin = Math.sin(camYaw), cos = Math.cos(camYaw);
     const dir = new THREE.Vector3(ax.x * cos - ax.y * sin, 0, -ax.x * sin - ax.y * cos);

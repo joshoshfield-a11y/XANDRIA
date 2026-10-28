@@ -37,6 +37,7 @@ import { scatterAmberGlow } from '../engine/gfx/AmberGlow';
 import { PlayerAvatar } from './common';
 import { buildItemKit, type BlueprintItemKit } from './itemKit';
 import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit } from '../engine/game/crit';
+import { displayedDamage } from '../engine/game/elemental';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import {
   resolveCraftingEnabled,
@@ -150,6 +151,8 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
     onPhase: (e, phase) => { bossPhaseBanner(engine, phase); combatPulse(); },
   }, {
     pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    // UPGRADE LOOP (daily-mutators): live daily run's mutator set feeds spawn stat scaling.
+    mutators: () => engine.getDailyMutators(),
   });
   const variants = new VariantDirector(engine, enemies, projectiles);
 
@@ -162,7 +165,7 @@ export function buildTowerDefense(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { const raw = p.damage; const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: 0 }); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
+      if (target) { const raw = p.damage; const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: 0 }); const dmg = applyCrit(raw, roll); const type = itemKit?.outgoingDamageType() ?? 'physical'; const returned = target.damage(dmg, point, type); const dealt = displayedDamage(dmg, (target as { damageKind?: string }).damageKind, type, returned); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dealt); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }

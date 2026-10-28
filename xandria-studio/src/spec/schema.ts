@@ -694,6 +694,20 @@ export interface CustomSpec {
    */
   boss?: BossCustom;
   /**
+   * Wandering world-boss wave: generator flag for the roaming world-boss
+   * event. EXPLICIT OPT-IN ONLY — absent (or enabled:false) means no world
+   * boss spawns and no existing map changes behavior. When enabled, the
+   * WorldBossEvent places one boss from the existing boss defs at a seeded
+   * open-field position (Rng(mapSeed ^ WORLDBOSS_SALT)), the boss roams a
+   * seeded patrol loop with telegraphed attacks only, and despawns on a
+   * seeded timer or on kill. The boss-arena rules do NOT apply here (no
+   * arena, no tether); when this flag is on, the arena encounter stands
+   * down for the map so the two systems never bind the same brute.
+   * Config-only — never touches the seed. Read by
+   * resolveWorldBossEnabled / planWorldBoss (engine/game/worldBoss).
+   */
+  worldBoss?: WorldBossCustom;
+  /**
    * Skills wave: Studio-authored skill tuning. Master toggle + XP gain
    * multiplier. Config-only — never touches the seed. Read by
    * resolveSkillsEnabled / resolveSkillsXpMultiplier (engine/game/skills);
@@ -726,6 +740,32 @@ export interface CustomSpec {
    * writes these fields.
    */
   weatherCycles?: WeatherCyclesCustom;
+  /**
+   * UPGRADE LOOP (hazard-zones): Studio-authored hazard-zone controls.
+   * Master toggle + per-def instance counts (0..4). Config-only — never
+   * touches the seed. Read by resolveHazardsEnabled /
+   * resolveHazardCount (engine/game/hazardZones); the Studio world tab
+   * writes these fields.
+   */
+  hazards?: HazardsCustom;
+}
+
+/**
+ * Wandering world-boss wave: the generator flag for the roaming event.
+ * All fields optional; absent = the event is off.
+ */
+export interface WorldBossCustom {
+  /**
+   * master toggle. Default false — the event is explicit opt-in only, so
+   * existing maps never gain a roaming boss by accident.
+   */
+  enabled?: boolean;
+  /** boss def id from BOSS_DEFS (default: seeded pick); unknown ids fall back. */
+  bossId?: string;
+  /** despawn timer in seconds (30..900); absent = seeded 240..420s. */
+  lifetimeSeconds?: number;
+  /** patrol loop radius in meters (8..60); absent = 28. */
+  patrolRadius?: number;
 }
 
 /**
@@ -868,6 +908,14 @@ export interface QuestsCustom {
    */
   radiantCount?: number;
   /**
+   * Timed-quests wave: timed board size 1..4 (default 3 of the 4
+   * variants; the 4th cycles in on re-rolls). Only the count is
+   * authored — which offers appear is seeded per map seed via
+   * TIMED_QUEST_SALT. Read by resolveTimedCount
+   * (engine/game/timedQuests).
+   */
+  timedCount?: number;
+  /**
    * Curated-quest-rewards wave: per-quest reward overrides, keyed by quest
    * template slug (e.g. 'first_blood', 'spare_parts'). {xp?, items?} merge
    * over the curated tables (engine/game/questRewards); unknown slugs are
@@ -924,11 +972,24 @@ export interface BestiaryCustom {
 }
 
 /**
+ * UPGRADE LOOP (hazard-zones): Studio-authored hazard-zone controls.
+ * All fields optional; absent = the seeded hazard set spawns untouched.
+ */
+export interface HazardsCustom {
+  /**
+   * master hazard-zone toggle (default true). When false, no zones
+   * spawn and the map stays hazard-free.
+   */
+  enabled?: boolean;
+  /** per-def instance counts (0..4), keyed by hazard def id. */
+  counts?: Record<string, number>;
+}
+
+/**
  * UPGRADE LOOP (weather-cycles): Studio-authored weather-cycle controls.
  * All fields optional; absent = the seeded cycle runs untouched.
  */
-export interface WeatherCyclesCustom {
-  /**
+export interface WeatherCyclesCustom {  /**
    * master weather-cycle toggle (default true). When false, the manager
    * stays inert and the authored static spec.theme weather/timeOfDay look
    * is kept.
@@ -1712,6 +1773,8 @@ export function validateSpec(spec: unknown, opts?: ValidateSpecOptions): Validat
             err('custom.quests.sideQuestCount', 'must be an integer 1..12');
           if (qu.radiantCount !== undefined && !(Number.isInteger(qu.radiantCount) && (qu.radiantCount as number) >= 1 && (qu.radiantCount as number) <= 5))
             err('custom.quests.radiantCount', 'must be an integer 1..5');
+          if (qu.timedCount !== undefined && !(Number.isInteger(qu.timedCount) && (qu.timedCount as number) >= 1 && (qu.timedCount as number) <= 4))
+            err('custom.quests.timedCount', 'must be an integer 1..4');
           if (qu.rewardOverrides !== undefined) {
             if (!isObj(qu.rewardOverrides)) err('custom.quests.rewardOverrides', 'must be an object');
             else for (const [slug, ov] of Object.entries(qu.rewardOverrides)) {

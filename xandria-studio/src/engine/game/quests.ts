@@ -126,14 +126,35 @@ export interface QuestDef {
    * decides (the blueprint default is +20 to 'freeholds').
    */
   standingReward?: { factionId: string; amount: number };
+  /**
+   * timed-quests wave: a game-time countdown. Present ONLY on timed
+   * defs (built by engine/game/timedQuests.ts and registered through
+   * registerTimedDefs). limitSeconds is game-time seconds of
+   * QuestManager.update(dt) accumulation — never wall-clock — and
+   * rewardScale multiplies the def's base XP and item counts at BUILD
+   * time, so turn-in grants the scaled reward through the existing
+   * curated-reward lines with no grant-path change. On expiry the
+   * quest's status becomes 'failed' (see QuestStatus); reaccept()
+   * restarts it. Timed defs never chain and never carry a standing
+   * gate (enforced by registerTimedDefs, like radiant defs).
+   */
+  timed?: { limitSeconds: number; rewardScale: number };
 }
 
-export type QuestStatus = 'locked' | 'available' | 'active' | 'complete' | 'turned-in';
+export type QuestStatus = 'locked' | 'available' | 'active' | 'complete' | 'turned-in' | 'failed';
 
 interface QuestRuntime {
   def: QuestDef;
   status: QuestStatus;
   progress: number[];
+  /**
+   * timed-quests wave: game-time seconds accumulated while this quest
+   * was 'active', via update(dt) only. Never sampled from a wall clock,
+   * so pause / loading / portal-transition time (periods when
+   * update() is not called) consumes nothing. Carried in portal
+   * snapshots so portal travel preserves the timer exactly.
+   */
+  elapsedSeconds: number;
 }
 
 /** Validate a QuestDef the way the item-def validator does: loud on bad content. */
@@ -175,10 +196,24 @@ export function validateQuestDef(def: QuestDef): string[] {
         errs.push(`quest ${def.id}: rewards.bonus[${i}].count must be an integer >= 1`);
     }
   }
+  if (def.timed !== undefined) {
+    const t = def.timed;
+    if (!t || typeof t !== 'object') errs.push(`quest ${def.id}: timed must be an object`);
+    else {
+      if (!Number.isFinite(t.limitSeconds) || t.limitSeconds <= 0)
+        errs.push(`quest ${def.id}: timed.limitSeconds must be a positive finite number (game-time seconds)`);
+      if (!Number.isFinite(t.rewardScale) || t.rewardScale <= 0)
+        errs.push(`quest ${def.id}: timed.rewardScale must be a positive finite number`);
+    }
+  }
   return errs;
 }
 
-/** Master quest toggle (default true). Authorable via spec.custom.quests. */
+/** Format a game-time countdown (seconds) as M:SS for the tracker/panels. */
+export function formatTimedRemaining(seconds: number): string {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
 export function resolveQuestsEnabled(spec: GameSpec): boolean {
   return spec.custom?.quests?.enabled ?? true;
 }
@@ -461,7 +496,7 @@ export interface QuestManagerOpts {
 /** Portal-safe quest snapshot (mirrors Progression.portalSnapshot). */
 export interface QuestPortalSnapshot {
   version: 1;
-  states: Record<string, { status: QuestStatus; progress: number[] }>;
+  states: Record<string, { status: QuestStatus; progress: number[]; elapsed?: number }>;
   /**
    * Side-quests wave: distinct maps / biomes visited (explore 'maps' /
    * 'biomes' objectives). Optional so story-wave snapshots restore cleanly.
@@ -473,6 +508,12 @@ export interface NpcQuestActions {
   accept: QuestDef[];
   turnIn: QuestDef[];
   locked: QuestDef[];
+  /**
+   * timed-quests wave: failed timed quests this giver can offer again.
+   * The dialogue shows them as Retry buttons (reaccept()); the timed
+   * board panel shows the same path as Try again.
+   */
+  failed: QuestDef[];
 }
 
 export class QuestManager {
@@ -480,6 +521,13 @@ export class QuestManager {
   private readonly byId = new Map<string, QuestRuntime>();
   private lastTransitions: number;
   private readonly autoAccept: boolean;
+  /**
+   * timed-quests wave: last whole-second countdown value displayed per
+   * timed quest id. update() refreshes the tracker only when a whole
+   * second ticks over, so the countdown is event-driven (≤1 DOM update
+   * per second per active timed quest) with zero per-frame DOM cost.
+   */
+  private readonly lastWholeRemaining = new Map<string, number>();
   /** side-quests wave: distinct maps/biomes visited (explore objectives) */
   private readonly visitedMaps = new Set<string>();
   private readonly visitedBiomes = new Set<string>();
@@ -492,6 +540,7 @@ export class QuestManager {
       def,
       status: 'locked' as QuestStatus,
       progress: def.objectives.map(() => 0),
+      elapsedSeconds: 0,
     }));
     for (const q of this.quests) this.byId.set(q.def.id, q);
     if (this.quests.length > 0) {
@@ -541,12 +590,107 @@ export class QuestManager {
       if (def.requiresQuests && def.requiresQuests.length > 0) continue;
       if (def.minStanding !== undefined) continue;
       if (this.byId.has(def.id)) continue;
-      const runtime: QuestRuntime = { def, status: 'available', progress: def.objectives.map(() => 0) };
+      const runtime: QuestRuntime = { def, status: 'available', progress: def.objectives.map(() => 0), elapsedSeconds: 0 };
       this.quests.push(runtime);
       this.byId.set(def.id, runtime);
       changed = true;
     }
     if (changed) this.refreshTracker();
+  }
+
+  /**
+   * Timed-quests wave: register timed defs AFTER construction (the
+   * timed board generates them from the live map seed, which does not
+   * exist at construction time — the same shape as registerRadiantDefs).
+   * Additive only: a def is accepted only when it passes
+   * validateQuestDef, carries a timed countdown, has no chain and no
+   * standing gate, is not already registered, and is not radiant;
+   * anything else is skipped (never throws — the board must survive a
+   * bad offer without taking the manager down). Registered defs start
+   * 'available' and are never auto-accepted, even in autoAccept genres
+   * (auto-accept runs at construction only — the board's Accept button
+   * and the villager dialogue are the accept paths for timed quests).
+   */
+  registerTimedDefs(defs: QuestDef[]): void {
+    let changed = false;
+    for (const def of defs) {
+      if (!def || def.timed === undefined) continue;
+      if (def.radiant === true) continue;
+      if (validateQuestDef(def).length > 0) continue;
+      if (def.requiresQuests && def.requiresQuests.length > 0) continue;
+      if (def.minStanding !== undefined) continue;
+      if (this.byId.has(def.id)) continue;
+      const runtime: QuestRuntime = {
+        def,
+        status: 'available',
+        progress: def.objectives.map(() => 0),
+        elapsedSeconds: 0,
+      };
+      this.quests.push(runtime);
+      this.byId.set(def.id, runtime);
+      changed = true;
+    }
+    if (changed) this.refreshTracker();
+  }
+
+  /**
+   * Timed-quests wave: drop a timed def from the roster. Only timed
+   * defs in 'available', 'turned-in', or 'failed' states are removable
+   * this way — an active/complete timed quest must go through
+   * abandon()/turnIn() so progress is never silently discarded.
+   * Unknown ids and non-timed defs are no-ops. The board calls this
+   * when it re-rolls a slot (turned-in def out, fresh offer in).
+   */
+  removeTimedDef(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.def.timed === undefined) return false;
+    if (q.status !== 'available' && q.status !== 'turned-in' && q.status !== 'failed') return false;
+    this.quests.splice(this.quests.indexOf(q), 1);
+    this.byId.delete(id);
+    this.lastWholeRemaining.delete(id);
+    this.refreshTracker();
+    return true;
+  }
+
+  /**
+   * Timed-quests wave: re-accept a FAILED timed quest. The countdown
+   * restarts from the full limit and objective progress resets to
+   * zero — the retry is a fresh attempt, never a resume. Returns false
+   * for unknown ids, non-timed defs, and any status other than
+   * 'failed': story/side/radiant quests are untouched by this method,
+   * and a failed quest grants no partial reward on either side of the
+   * retry (expiry grants nothing; the retry must complete in time to
+   * earn the scaled reward through the normal turn-in path).
+   */
+  reaccept(id: string): boolean {
+    const q = this.byId.get(id);
+    if (!q || q.def.timed === undefined || q.status !== 'failed') return false;
+    q.status = 'active';
+    q.progress = q.def.objectives.map(() => 0);
+    q.elapsedSeconds = 0;
+    this.lastWholeRemaining.delete(id);
+    this.opts.toast(`Quest re-accepted: ${q.def.name} — ${formatTimedRemaining(q.def.timed.limitSeconds)} on the clock`);
+    this.refreshTracker();
+    return true;
+  }
+
+  /**
+   * Timed-quests wave: game-time seconds left on a timed quest's
+   * countdown (limit minus elapsed, clamped at 0). Null for unknown
+   * ids and non-timed defs. A failed quest reports 0; a quest that
+   * has not started yet reports the full limit.
+   */
+  timeRemaining(id: string): number | null {
+    const q = this.byId.get(id);
+    if (!q || !q.def.timed) return null;
+    return Math.max(0, q.def.timed.limitSeconds - q.elapsedSeconds);
+  }
+
+  /** Timed-quests wave: game-time seconds already spent on a timed quest (0 for unknown/non-timed). */
+  elapsedOf(id: string): number {
+    const q = this.byId.get(id);
+    if (!q || !q.def.timed) return 0;
+    return q.elapsedSeconds;
   }
 
   /**
@@ -571,15 +715,18 @@ export class QuestManager {
    * Radiant-quests wave: abandon an ACTIVE radiant quest. The def leaves
    * the roster entirely (progress discarded — the board re-rolls the
    * slot deterministically, so the player is never left with a dead
-   * slot). Returns false for unknown ids, non-radiant defs, and
-   * non-active statuses: story/side quests can never be abandoned, so
-   * their lifecycle is exactly unchanged by this method's existence.
+   * slot). Timed-quests wave: the same rule covers ACTIVE timed quests
+   * (their countdown is discarded with the def). Returns false for
+   * unknown ids, non-radiant/non-timed defs, and non-active statuses:
+   * story/side quests can never be abandoned, so their lifecycle is
+   * exactly unchanged by this method's existence.
    */
   abandon(id: string): boolean {
     const q = this.byId.get(id);
-    if (!q || q.def.radiant !== true || q.status !== 'active') return false;
+    if (!q || (q.def.radiant !== true && q.def.timed === undefined) || q.status !== 'active') return false;
     this.quests.splice(this.quests.indexOf(q), 1);
     this.byId.delete(id);
+    this.lastWholeRemaining.delete(id);
     this.opts.toast(`Quest abandoned: ${q.def.name}`);
     this.refreshTracker();
     return true;
@@ -636,6 +783,48 @@ export class QuestManager {
     } else {
       this.lastTransitions = t;
     }
+    this.tickTimedQuests(_dt);
+  }
+
+  /**
+   * Timed-quests wave: the game-time countdown. Runs AFTER the explore
+   * advances above, so a quest completed by a portal crossing in this
+   * same update is 'complete' and its timer stops instead of failing.
+   * Only 'active' timed quests consume game-time; dt is the frame
+   * loop's game-time step (never a wall-clock sample), so the timer
+   * pauses whenever update() is not called (pause, loading, portal
+   * transition) and preserves exactly across portal travel via the
+   * snapshot/restore pair. Expiry flips the quest to 'failed' with no
+   * partial reward — the board/dialogue re-accept path (reaccept())
+   * is the only way back in.
+   */
+  private tickTimedQuests(dt: number): void {
+    const step = Number.isFinite(dt) && dt > 0 ? dt : 0;
+    const expired: QuestRuntime[] = [];
+    for (const q of [...this.quests]) {
+      if (q.status !== 'active' || !q.def.timed) continue;
+      q.elapsedSeconds += step;
+      if (q.elapsedSeconds >= q.def.timed.limitSeconds) expired.push(q);
+    }
+    for (const q of expired) {
+      q.status = 'failed';
+      this.lastWholeRemaining.delete(q.def.id);
+      this.opts.toast(`Quest failed: ${q.def.name} — time ran out`);
+    }
+    // Countdown display: refresh the tracker only when a whole second
+    // ticks over for a displayed timed quest (event-driven, not
+    // per-frame). Expiry always refreshes (the failed quest leaves the
+    // tracker and the board/dialogue re-accept surfaces appear).
+    let secondChanged = false;
+    for (const q of this.quests) {
+      if (q.status !== 'active' || !q.def.timed) continue;
+      const whole = Math.max(0, Math.ceil(q.def.timed.limitSeconds - q.elapsedSeconds));
+      if (this.lastWholeRemaining.get(q.def.id) !== whole) {
+        this.lastWholeRemaining.set(q.def.id, whole);
+        secondChanged = true;
+      }
+    }
+    if (expired.length > 0 || secondChanged) this.refreshTracker();
   }
 
   /** Current standing for a faction (opts.standingOf, or 0 when unwired). */
@@ -770,6 +959,7 @@ export class QuestManager {
       accept: this.quests.filter((q) => q.status === 'available' && giverMatch(q.def)).map((q) => q.def),
       turnIn: this.quests.filter((q) => q.status === 'complete' && giverMatch(q.def)).map((q) => q.def),
       locked: this.quests.filter((q) => q.status === 'locked' && giverMatch(q.def)).map((q) => q.def),
+      failed: this.quests.filter((q) => q.status === 'failed' && q.def.timed !== undefined && giverMatch(q.def)).map((q) => q.def),
     };
   }
 
@@ -834,7 +1024,15 @@ export class QuestManager {
   portalSnapshot(): QuestPortalSnapshot {
     const states: QuestPortalSnapshot['states'] = {};
     for (const q of this.quests) {
-      states[q.def.id] = { status: q.status, progress: [...q.progress] };
+      // timed-quests wave: the countdown elapsed rides the snapshot so
+      // portal travel preserves the timer exactly (no wall-clock is
+      // involved anywhere, so the transition itself consumes nothing
+      // beyond what update() is called with while playing).
+      states[q.def.id] = {
+        status: q.status,
+        progress: [...q.progress],
+        ...(q.def.timed !== undefined ? { elapsed: q.elapsedSeconds } : {}),
+      };
     }
     return {
       version: 1,
@@ -846,11 +1044,13 @@ export class QuestManager {
   /**
    * Restore a portalSnapshot(). Defensive: unknown ids are dropped, corrupt
    * statuses clamp to 'locked', progress clamps to [0, objective count],
-   * visited sets accept only string arrays (re-visits re-count honestly).
+   * timed elapsed clamps to [0, limit] (a quest restored at its limit
+   * fails on the next update tick, honestly), visited sets accept only
+   * string arrays (re-visits re-count honestly).
    */
   portalRestore(snap: QuestPortalSnapshot | null | undefined): void {
     if (!snap || snap.version !== 1 || !snap.states || typeof snap.states !== 'object') return;
-    const valid: QuestStatus[] = ['locked', 'available', 'active', 'complete', 'turned-in'];
+    const valid: QuestStatus[] = ['locked', 'available', 'active', 'complete', 'turned-in', 'failed'];
     for (const q of this.quests) {
       const s = snap.states[q.def.id];
       if (!s) continue;
@@ -859,6 +1059,15 @@ export class QuestManager {
         const v = s.progress?.[i];
         return Number.isFinite(v) ? Math.max(0, Math.min(o.count, Math.floor(v as number))) : 0;
       });
+      if (q.def.timed !== undefined) {
+        const e = s.elapsed;
+        q.elapsedSeconds = Number.isFinite(e)
+          ? Math.max(0, Math.min(q.def.timed.limitSeconds, e as number))
+          : 0;
+        this.lastWholeRemaining.delete(q.def.id);
+      } else {
+        q.elapsedSeconds = 0;
+      }
     }
     this.visitedMaps.clear();
     this.visitedBiomes.clear();
@@ -884,6 +1093,14 @@ export class QuestManager {
         return `${mark} ${o.desc} (${p}/${o.count})`;
       });
       if (q.status === 'complete') lines.push('✓ Complete — turn it in');
+      // timed-quests wave: the game-time countdown rides the tracker as
+      // one more event-driven line (refreshed only on whole-second ticks
+      // and state changes — see tickTimedQuests). Failed quests never
+      // reach the tracker (the board/dialogue re-accept surfaces own
+      // that state), and turned-in quests are gone from it.
+      if (q.status === 'active' && q.def.timed !== undefined) {
+        lines.push(`⏱ ${formatTimedRemaining(q.def.timed.limitSeconds - q.elapsedSeconds)} left`);
+      }
       out.push({ name: q.def.name, status: q.status, lines });
     }
     return out;

@@ -99,6 +99,11 @@ test('crafting: gather -> craft -> equip, desktop + mobile', async ({ page }) =>
     // >5m from stations: the 1.5m teleport offset keeps the node the
     // unambiguous nearest target (station radius 3.5)
     return nodes
+      // Gathering-nodes phase: the roster now carries herb + crystal kinds
+      // this spec never crafts with — scope to the three kinds it tests
+      // (their material map below only covers these; other kinds would
+      // resolve material undefined).
+      .filter((n: any) => n.kind === 'ore' || n.kind === 'fiber' || n.kind === 'scrap')
       .filter((n: any) => stations.every((s: any) =>
         Math.hypot(s.root.position.x - n.root.position.x, s.root.position.z - n.root.position.z) > 5))
       .map((n: any) => ({

@@ -32,6 +32,11 @@ import {
   lootTableForBestiary,
   bossLootForBestiary,
 } from '../game/loot';
+/**
+ * ELEMENTAL-DAMAGE-TYPES: the codex resistance section renders the
+ * SAME resistance table Enemy.damage() uses (elemental.ts) — observe-only.
+ */
+import { resistanceLines } from '../game/elemental';
 
 export interface BestiaryPanelOpts {
   container: HTMLElement;
@@ -355,6 +360,19 @@ export class BestiaryPanel {
         wk.append(el(doc, 'div', `font-size:11.5px;color:${TEXT}`, '▸ ' + line));
       }
       body.append(wk);
+    }
+
+    // resistances (unlocked only) — from the SAME table Enemy.damage()
+    // uses (elemental.ts), so the codex can never lie about them.
+    // Boss entries render the 'boss' row; other entries their kind row.
+    if (!locked) {
+      const rs = el(doc, 'div', 'display:flex;flex-direction:column;gap:2px');
+      rs.append(el(doc, 'div', `font-size:11px;font-weight:700;color:${DIM};letter-spacing:0.08em`, 'RESISTANCES — DAMAGE TYPES'));
+      for (const line of resistanceLines(def.id, def.id === BESTIARY_BOSS_ID)) {
+        const row = el(doc, 'div', `font-size:11.5px;color:${line.color}`, line.text);
+        rs.append(row);
+      }
+      body.append(rs);
     }
 
     // loot table (unlocked only) — from the same tables the roller uses

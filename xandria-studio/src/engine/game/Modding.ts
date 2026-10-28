@@ -29,6 +29,7 @@
  */
 import type * as THREE from 'three';
 import type { Engine } from '../Engine';
+import type { DamageType } from './elemental';
 import type { Enemy } from './EnemyAI';
 import type { EnemyKind, ObjectiveStage } from '@spec';
 import type { Pickup } from './Pickups';
@@ -39,6 +40,15 @@ import type { PlayerAvatar } from '../../blueprints/common';
 /** Payloads delivered to each hook tap. */
 export interface HookPayloads {
   onKill: { enemy: Enemy };
+  /**
+   * ELEMENTAL-DAMAGE-TYPES: a hit landed on an enemy, after the
+   * elemental step (order step 5) and before shield/armor. Observe-only:
+   * the future status wave taps this to apply burn/chill/stun from the
+   * type's statusHook; zero taps = no-op. `amount` is the typed amount
+   * that entered Enemy.damage(); `multiplier` is the kind's table
+   * multiplier for the type (1.0 for physical / unknown kinds).
+   */
+  onElementalHit: { enemy: Enemy; type: DamageType; amount: number; multiplier: number };
   /** the player took damage (amount actually subtracted from health) */
   onPlayerDamage: { amount: number };
   /** UPGRADE LOOP (run-journal): the player avatar died (one life consumed).

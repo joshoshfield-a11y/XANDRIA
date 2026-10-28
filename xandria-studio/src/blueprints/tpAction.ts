@@ -7,6 +7,7 @@ import type { GameSpec } from '@spec';
 import type { Engine } from '../engine/Engine';
 import { makeCameraRig } from '../engine/game/Cameras';
 import { EnemyManager } from '../engine/game/EnemyAI';
+import { STEALTH_TABLE, noiseRadiusFor } from '../engine/game/stealth';
 import { resolveEnemyDensity } from '../engine/game/enemyTuning';
 import { resolveEliteChance } from '../engine/game/eliteAffixes';
 import { NpcInstancer } from '../engine/game/npcInstancing';
@@ -53,6 +54,8 @@ import { QuestTalkSession } from '../engine/game/questTalk';
 import { QuestTracker } from '../engine/ui/QuestTracker';
 import { RadiantBoard } from '../engine/game/radiantQuests';
 import { RadiantBoardPanel } from '../engine/ui/RadiantBoardPanel';
+import { TimedBoard } from '../engine/game/timedQuests';
+import { TimedBoardPanel } from '../engine/ui/TimedBoardPanel';
 import { GatheringManager, GatheringInteractionSession } from '../engine/game/gathering';
 import { resolveCraftingEnabled, ensureCraftingItemDefs, buildRecipePool } from '../engine/game/crafting';
 import { ensureLootItemDefs } from '../engine/game/loot';
@@ -61,12 +64,14 @@ import { ensureEnchantItemDefs } from '../engine/game/enchantments';
 import { StationManager, CraftingInteractionSession } from '../engine/game/stations';
 import { DeployablesManager } from '../engine/game/deployables';
 import { CompanionsManager } from '../engine/game/companions';
+import { COMPANION_REVIVE_COST } from '../engine/game/companionCombat';
 import { CompanionPanel } from '../engine/ui/CompanionPanel';
 import { CampManager, CampInteractionSession } from '../engine/game/camp';
 import { MountManager } from '../engine/game/mounts';
 import { MountPanel } from '../engine/ui/MountPanel';
 import { SkillSystem, resolveSkillsEnabled } from '../engine/game/skills';
-import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit } from '../engine/game/crit';
+import { CRIT_PROJECTILE_SALT, CritRoller, applyCrit, synergyCritCtx } from '../engine/game/crit';
+import { displayedDamage } from '../engine/game/elemental';
 import { wireCombatAbilities } from '../engine/game/combatAbilities';
 import { BestiaryManager, BESTIARY_TIER_NAMES } from '../engine/game/bestiary';
 import { SkillsPanel } from '../engine/ui/SkillsPanel';
@@ -80,6 +85,7 @@ import {
 } from '../engine/game/economy';
 import { ShopPanel } from '../engine/ui/ShopPanel';
 import { FactionStandings, localStorageFactionsAdapter, factionOfVendor } from '../engine/game/factions';
+import { DialogueEngine, DialogueState, FIRST_QUEST_REF, localStorageDialogueAdapter } from '../engine/game/dialogue';
 import { StandingsPanel } from '../engine/ui/StandingsPanel';
 import { DynamicEventManager, EventInteractionSession, EVENT_DEFS, EVENT_SALT, planDynamicEvents, buildMerchantStock, resolveEventsEnabled } from '../engine/game/dynamicEvents';
 import { TradePanel } from '../engine/ui/TradePanel';
@@ -87,6 +93,7 @@ import { AchievementsPanel } from '../engine/ui/AchievementsPanel';
 import { AchievementManager } from '../engine/game/achievements';
 import { BestiaryPanel } from '../engine/ui/BestiaryPanel';
 import { WeatherCycleManager } from '../engine/game/weatherCycles';
+import { HazardZoneManager } from '../engine/game/hazardZones';
 import { resolveGatheringDensity } from '../engine/game/crafting';
 import { Scatter } from '../engine/world/Scatter';
 import { attachLightShafts } from '../engine/gfx/LightShafts';
@@ -97,6 +104,7 @@ import { makeGoalFlag } from '../engine/gfx/Characters';
 import { PlayerAvatar } from './common';
 import { buildItemKit, type BlueprintItemKit } from './itemKit';
 import { wireBossFights } from './bosses';
+import { WorldBossEvent } from '../engine/game/worldBoss';
 
 export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const { scene, terrain, hud } = engine;
@@ -116,6 +124,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // live object across portal transitions. Rank-ups toast; the levelup
   // audio cue fires inside SkillSystem.addXp.
   const skills = new SkillSystem(engine, {
+    // SKILL-SYNERGIES: persist ranks per seed (the save/reload leg);
+    // synergies derive from ranks, so they persist with them.
+    persist: true,
     onRankUp: (def, rank) => {
       engine.hud.toast(`${def.name} rank ${rank}!`);
     },
@@ -188,6 +199,16 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // Constructed before enemies/quests/shop so every hook below can
   // close over it; onChange is assigned after the panel exists.
   const standings = new FactionStandings(localStorageFactionsAdapter(spec.meta.seed));
+  // Dialogue-branching wave: player-scoped dialogue state (never in
+  // portalEntities, so portal travel leaves it untouched by
+  // construction). Restored from guarded localStorage keyed by spec
+  // seed, so a full page reload keeps visited nodes / choices / flags
+  // for this spec. Constructed before quests/talk so every hook below
+  // can close over it; engine.dialogueState exposes it to
+  // PortalManager.portalParts for snapshot/restore.
+  const dialogueState = new DialogueState(localStorageDialogueAdapter(spec.meta.seed));
+  engine.dialogueState = dialogueState;
+  const dialogueEngine = new DialogueEngine();
   // vendor-economy wave: merchant NPCs get their OWN map-local roster
   // (id 'vendors', VENDOR_SALT stream) — one NpcManager each, so the
   // villager roster's seeded spawns stay byte-identical to before this
@@ -230,11 +251,20 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // FIX 5: combat music intensity — pulsed up by combat events, decays to baseline
   let combatT = 0;
   const combatPulse = () => { combatT = 1; };
+  // STEALTH-SYSTEM: last HUD sneak-chip state (setSneaking called on change only).
+  let lastSneakChip = false;
 
   const enemies = new EnemyManager(engine, projectiles, {
     // UPGRADE LOOP (weather-cycles): night makes the heavy kinds hit
     // harder — additive multiplier read lazily off the weather manager.
     onPlayerHit: (dmg, from, kind) => { avatar.damage(dmg * (weather?.enemyDamageMult(kind) ?? 1), from); camRig.shake(0.55); combatPulse(); },
+    // UPGRADE LOOP (companion-combat-depth): melee hits against a
+    // companion-targeted enemy land on the companion (guard reduction
+    // + fall handling live in CompanionsManager.takeEnemyHit) — never
+    // on the player. Night damage applies identically (same lazy
+    // weather read as onPlayerHit). Ranged projectiles never route
+    // here (player-body collision channel — see companionCombat).
+    onCompanionHit: (dmg, from, kind) => { companions?.takeEnemyHit(dmg * (weather?.enemyDamageMult(kind) ?? 1)); combatPulse(); },
     onDeath: (e) => {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
@@ -268,6 +298,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     playerLevel: () => prog.level,
     // UPGRADE LOOP (difficulty-modes): player difficulty mode feeds spawn stat scaling.
     difficulty: () => engine.getDifficultyMode(),
+    // UPGRADE LOOP (daily-mutators): live daily run's mutator set feeds spawn stat scaling.
+    mutators: () => engine.getDailyMutators(),
     ngPlus: () => engine.getNgPlusCycle(),
     // UPGRADE LOOP (elite-affixes): spec elite chance (default 0 = no elites).
     eliteChance: () => resolveEliteChance(spec),
@@ -288,7 +320,25 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const abilities = wireCombatAbilities(engine, spec, avatar, enemies, {
     damageMult: () => prog.damageMult() * (itemKit?.damageMult() ?? 1),
     // CRIT-SYSTEM: ability crits scale with equipped weapon tier + smithing rank.
-    critCtx: () => ({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }),
+    critCtx: () => {
+      // SKILL-SYNERGIES: synergy crit bonuses ride the crit context so
+      // melee/projectile/ability rolls use the same math as the HUD.
+      const cb = skills.synergyCritBonuses();
+      return {
+        tier: itemKit?.equippedWeaponRarity() ?? null,
+        skillRank: skills.rankOf('smithing'),
+        synergyChanceBonus: cb.chanceBonus,
+        synergyMultiplierBonus: cb.multiplierBonus,
+      };
+    },
+  });
+  // STEALTH-SYSTEM: every attack (melee, gun, ability — all emit
+  // onAttack) is a one-shot noise event: enemies within the attack
+  // noise radius become suspicious, never directly alerted. The
+  // avatar is read lazily (assigned above); the hook only fires in
+  // play, never during construction.
+  engine.hooks.tap('onAttack', () => {
+    enemies.emitNoise(avatar.ctrl.position, STEALTH_TABLE.attackNoiseRadius);
   });
   // UPGRADE LOOP (mounts): player-scoped mount manager — rides the live
   // object across portal transitions (NOT a portal entity; the avatar
@@ -328,6 +378,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     sell: { addScrap: (n) => wallet.add(n), sellMult: DEFAULT_SELL_MULT },
     // CRIT-SYSTEM: inventory panel's CRIT STATS section reads smithing rank here.
     smithingRank: () => skills.rankOf('smithing'),
+    // SKILL-SYNERGIES: the inventory HUD's CRIT STATS section reads the
+    // same synergy bonuses the damage rolls use.
+    synergyCrit: () => skills.synergyCritBonuses(),
   });
   // items-expansion wave: enemy loot drops — seeded per-map drop tables
   // off the EnemyManager die() path, granted as world pickups the player
@@ -378,6 +431,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   // (which syncs the board) can reference them before construction.
   let radiantBoard: RadiantBoard | null = null;
   let radiantBoardPanel: RadiantBoardPanel | null = null;
+  let timedBoard: TimedBoard | null = null;
+  let timedBoardPanel: TimedBoardPanel | null = null;
   const questsEnabled = resolveQuestsEnabled(spec);
   const questTracker = questsEnabled ? new QuestTracker(engine.container) : null;
   // HUD-polish: keep the touch pause button clear of the tracker when quests re-render.
@@ -408,7 +463,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         // quest wave: an open quest dialogue live-refreshes when its quest
         // completes underneath it (talk objective fired on open). The thunk
         // is lazy — talkSession is constructed just below.
-        onQuestsChanged: () => { talkSession?.refreshOpenDialogue(); radiantBoard?.sync(); radiantBoardPanel?.render(); },
+        onQuestsChanged: () => { talkSession?.refreshOpenDialogue(); radiantBoard?.sync(); radiantBoardPanel?.render(); timedBoard?.sync(); timedBoardPanel?.render(); },
       })
     : null;
   engine.questManager = quests;
@@ -427,10 +482,33 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
         onChanged: () => radiantBoardPanel?.render(),
       })
     : null;
+  // timed-quests wave: the clock board over the same manager. Offers
+  // generate from the live portal world seed, register as available
+  // timed defs, and re-roll deterministically when a slot is
+  // abandoned or turned in; failed slots stay for Try again.
+  // Construction precedes the radiant panel on purpose:
+  // registering the timed defs fires onQuestsChanged, and no
+  // panel may render while a board is still being constructed.
+  timedBoard = questsEnabled && quests
+    ? new TimedBoard({
+        manager: quests,
+        spec,
+        getMapSeed: () => engine.portalManager?.worldSeedValue ?? spec.meta.seed,
+        onChanged: () => timedBoardPanel?.render(),
+      })
+    : null;
   radiantBoardPanel = questsEnabled && radiantBoard
     ? new RadiantBoardPanel({
         container: engine.container,
         board: () => radiantBoard,
+        isModalOpen: () => talkSession?.isDialogueOpen ?? false,
+      })
+    : null;
+
+  timedBoardPanel = questsEnabled && timedBoard
+    ? new TimedBoardPanel({
+        container: engine.container,
+        board: () => timedBoard,
         isModalOpen: () => talkSession?.isDialogueOpen ?? false,
       })
     : null;
@@ -636,6 +714,43 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
           spawnSeed: npc.spawnSeed,
           keeperName: npc.name,
         }),
+        // Dialogue-branching wave: the tree engine + player-scoped
+        // state + live context. Effects ride existing seams only:
+        // quest accept/turn-in via the manager (turn-in emits the same
+        // onQuestTurnIn hook the quest buttons emit), standing via the
+        // factions store (its onChange fan-out persists + re-prices the
+        // shop through the untouched pricing math), items read-only.
+        dialogue: {
+          engine: dialogueEngine,
+          state: dialogueState,
+          context: () => ({
+            standingOf: (factionId) => standings.standingOf(factionId),
+            adjustStanding: (factionId, amount) => { standings.adjust(factionId, amount); },
+            questStatusOf: (ref) => {
+              const first = quests.defs[0];
+              if (ref === FIRST_QUEST_REF) return first ? quests.statusOf(first.id) : 'unknown';
+              return quests.statusOf(ref);
+            },
+            questAccept: (ref) => {
+              const id = ref === 'first-available'
+                ? quests.actionsForNpc('villager').accept[0]?.id ?? null
+                : ref;
+              return id ? quests.accept(id) : false;
+            },
+            questTurnIn: (ref) => {
+              const id = ref === 'first-complete'
+                ? quests.actionsForNpc('villager').turnIn[0]?.id ?? null
+                : ref;
+              if (!id) return false;
+              if (quests.turnIn(id)) {
+                engine.hooks.emit('onQuestTurnIn', { questId: id });
+                return true;
+              }
+              return false;
+            },
+            itemCount: (itemId) => itemKit?.inventory.count(itemId) ?? 0,
+          }),
+        },
       })
     : null;
   // UPGRADE LOOP (player-camp): the [E] Visit camp prompt + camp panel.
@@ -691,6 +806,22 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
       );
     },
   });
+  // wandering world-boss wave: the roaming boss event (seeded plan, beacon
+  // + toast, telegraphed attacks via the open-field boss encounter, boss
+  // loot path on kill, timer retreat). Explicit opt-in only
+  // (spec.custom.worldBoss.enabled); registers AFTER the enemy manager so
+  // portal arrivals spawn the roster first and the event's brute is never
+  // swept by the roster's own spawnForMap. Map-local lifecycle via
+  // engine.portalEntities ({ id: 'worldboss' }).
+  const worldBoss = new WorldBossEvent(engine, {
+    manager: enemies,
+    terrain,
+    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    bar: bossBar,
+    toast: (m) => engine.hud.toast(m),
+  });
+  engine.portalEntities.register(worldBoss);
+  worldBoss.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
   // skills wave: the skills panel (K key / SKILLS chip toggle). Never
   // opens while the crafting panel owns input. Not built when skills
   // are disabled in the spec.
@@ -712,6 +843,11 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     container: engine.container,
     manager: () => companions,
     isModalOpen: () => stationSession?.isPanelOpen ?? false,
+    // UPGRADE LOOP (companion-combat-depth): fallen companions revive
+    // for scrap through the existing Wallet — the panel revives ONLY
+    // when Wallet.spend returns true, so a failed payment never revives.
+    reviveCost: () => COMPANION_REVIVE_COST,
+    spendForRevive: (cost) => wallet.spend(cost),
   });
   // achievements wave: the achievement codex panel (J key / trophy chip).
   // Never opens while the crafting panel (or quest dialogue, where one
@@ -751,7 +887,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   projectiles.onHit = (p, hitBody, point) => {
     if (p.friendly) {
       const target = enemies.enemies.find((e) => e.alive && e.body === hitBody);
-      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll({ tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') }); const dmg = applyCrit(raw, roll); target.damage(dmg, point); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dmg); }
+      if (target) { const raw = p.damage * prog.damageMult(); const roll = projCrit.roll(synergyCritCtx(itemKit?.equippedWeaponRarity() ?? null, skills.rankOf('smithing'), skills.synergyCritBonuses())); const dmg = applyCrit(raw, roll); const type = itemKit?.outgoingDamageType() ?? 'physical'; const returned = target.damage(dmg, point, type); const dealt = displayedDamage(dmg, (target as { damageKind?: string }).damageKind, type, returned); combatPulse(); engine.juice.spawnText(engine.camera, point, roll.crit ? 'crit' : 'playerDamage', dealt); }
     } else if (hitBody === avatar.ctrl.body) {
       avatar.damage(p.damage, point);
     }
@@ -876,6 +1012,21 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   engine.portalEntities.register(weather);
   weather.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
 
+  // UPGRADE LOOP (hazard-zones): seeded environmental hazard zones on the
+  // weather-cycles + dynamic-events systems (telegraphed ground hazards
+  // with additive damage through the avatar.damage path). Map-local
+  // lifecycle like the other ambient systems: despawned on portal
+  // departure, rebuilt from the derived map seed on arrival. Constructed
+  // here (after avatar + camRig) — the damage sink shakes the camera like
+  // the storm-strike sink above.
+  const hazards = new HazardZoneManager(engine, spec, {
+    pois: landmarks.placed.map((p) => ({ x: p.pos.x, z: p.pos.z, r: p.radius })),
+    playerPos: () => avatar.ctrl.position,
+    damagePlayer: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+  });
+  engine.portalEntities.register(hazards);
+  hazards.spawnForMap(spec.meta.seed); // portals contract: meta.seed IS this map's build seed
+
   // --- boss aura
   const bossAura = spec.objective.type === 'boss'
     ? new THREE.PointLight(new THREE.Color(spec.theme.palette.accent), 2, 30)
@@ -926,7 +1077,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // otherwise — byte-identical behavior with no buff)
     if (engine.input.justPressed('attack') && engine.state === 'playing') {
       if (spec.player.weapon === 'sword' || spec.player.weapon === 'none') {
-        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult() * (itemKit?.damageMult() ?? 1) * camp.workbenchDamageMult(), { tier: itemKit?.equippedWeaponRarity() ?? null, skillRank: skills.rankOf('smithing') });
+        avatar.melee(avatar.ctrl.yaw, 2.6, 1.3, 25 * prog.damageMult() * (itemKit?.damageMult() ?? 1) * camp.workbenchDamageMult() * camp.restedDamageMult(), synergyCritCtx(itemKit?.equippedWeaponRarity() ?? null, skills.rankOf('smithing'), skills.synergyCritBonuses()), itemKit?.outgoingDamageType() ?? 'physical');
       } else {
         // shoot toward camera forward
         const dir = new THREE.Vector3();
@@ -966,7 +1117,24 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // run before EnemyManager.update so companion kills land through the
     // existing onDeath path before the enemy roster sweep.
     companions?.update(dt);
-    enemies.update(dt, avatar.ctrl.position, t);
+    // STEALTH-SYSTEM: per-frame enemy perception — sneak state + the
+    // continuous movement-noise radius. Sneaking is silent (radius 0)
+    // and shrinks detection; sprinting is the loudest movement.
+    const pv = avatar.ctrl.velocity;
+    const moving = Math.hypot(pv.x, pv.z) > 0.5;
+    enemies.update(dt, avatar.ctrl.position, t, {
+      sneaking: avatar.ctrl.sneaking,
+      noiseRadius: noiseRadiusFor({
+        moving,
+        sneaking: avatar.ctrl.sneaking,
+        sprinting: engine.input.pressed('sprint'),
+        dashing: avatar.ctrl.dashing,
+      }),
+    });
+    if (avatar.ctrl.sneaking !== lastSneakChip) {
+      lastSneakChip = avatar.ctrl.sneaking;
+      engine.hud.setSneaking(lastSneakChip);
+    }
     npcManager.update(dt); // gameplay wave (B): ambient villagers tick
     vendorManager.update(dt); // vendor-economy wave: merchants tick (same instancer frame)
     gathering.update(dt); // crafting wave (B): static node submits into the shared instancer frame
@@ -1019,13 +1187,18 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     // boss-fights wave: arena tether + telegraphed attacks + boss bar
     // (the encounter no-ops when the spec's boss flag is off)
     bosses.update(dt, avatar.ctrl.position);
+    // wandering world-boss wave: patrol steering + telegraphs + despawn
+    // timer (the event no-ops when its opt-in flag is off)
+    worldBoss.update(dt, avatar.ctrl.position);
     // UPGRADE LOOP (weather-cycles): advance the cycle clock (lights, fog,
     // particles, lightning). Owns the sky blend while active.
     weather?.update(dt);
+    // UPGRADE LOOP (hazard-zones): advance the hazard tick clocks
+    // (telegraphs, then additive damage ticks through avatar.damage).
+    hazards.update(dt);
 
     // camera
     camRig.update(dt, avatar.ctrl.position, avatar.ctrl.velocity, avatar.ctrl.yaw);
   });
 
-  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather, deployables, companions, companionPanel, camp, campSession, mounts, mountsPanel, standings, standingsPanel , abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel };
-}
+  return { avatar, enemies, skills, skillsPanel, bestiary, bestiaryPanel, achievements, achievementsPanel, npcs: npcManager, vendors: vendorManager, gathering, stations, stationSession, gatheringSession, talkSession, quests, questTracker, pickups, objectives, assets, itemKit, itemWorld: itemKit?.itemWorld ?? null, bosses, bossBar, worldBoss, prog, wallet, shopPanel, vendorDefs, events, eventSession, tradePanel, weather, hazards, deployables, companions, companionPanel, camp, campSession, mounts, mountsPanel, standings, standingsPanel, dialogueEngine, dialogueState, abilities: abilities.manager, abilityBar: abilities.bar, radiantBoard, radiantBoardPanel, timedBoard, timedBoardPanel };}

@@ -27,10 +27,25 @@ export interface DialogueQuestAction {
   label: string;
 }
 
+/**
+ * Dialogue-branching wave: one tree choice rendered as a button. Locked
+ * choices stay visible and disabled (with the lock reason) so a gated
+ * branch reads as locked, never as absent.
+ */
+export interface DialogueTreeChoice {
+  /** choice id (data-dialogue-choice) */
+  id: string;
+  label: string;
+  locked: boolean;
+  /** human lock reason(s), joined for display */
+  lockReason?: string;
+}
+
 export class DialoguePanel {
   private root: HTMLDivElement;
   private nameEl: HTMLDivElement;
   private lineEl: HTMLDivElement;
+  private choicesEl: HTMLDivElement;
   private actionsEl: HTMLDivElement;
   private onKey: (e: KeyboardEvent) => void;
   private disposed = false;
@@ -79,11 +94,19 @@ export class DialoguePanel {
     const actions = doc.createElement('div');
     actions.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
 
-    root.append(name, line, actions, dismiss);
+    // Dialogue-branching wave: the tree-choice list sits above the quest
+    // actions (choices first, quest Accept/Turn in below — the same panel,
+    // the same z-index 9500, the same dismiss control).
+    const choices = doc.createElement('div');
+    choices.setAttribute('data-dialogue-choices', '');
+    choices.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px';
+
+    root.append(name, line, choices, actions, dismiss);
     container.appendChild(root);
     this.root = root as HTMLDivElement;
     this.nameEl = name as HTMLDivElement;
     this.lineEl = line as HTMLDivElement;
+    this.choicesEl = choices as HTMLDivElement;
     this.actionsEl = actions as HTMLDivElement;
 
     // Capture phase: the panel owns E/Escape while open, so the
@@ -115,6 +138,12 @@ export class DialoguePanel {
     if (this.disposed) return;
     this.nameEl.textContent = line.role ? `${line.name} — ${line.role}` : line.name;
     this.lineEl.textContent = `\u201c${line.greeting}\u201d`;
+    // optional chaining: the unit-test DOM stubs implement setAttribute
+    // but not removeAttribute; real browsers always have both.
+    this.lineEl.removeAttribute?.('data-dialogue-text');
+    this.root.removeAttribute?.('data-dialogue-node');
+    // no tree on this path — clear any stale tree choices
+    while (this.choicesEl.firstChild) this.choicesEl.firstChild.remove();
     // quest actions (rebuilt every show — no stale buttons)
     while (this.actionsEl.firstChild) this.actionsEl.firstChild.remove();
     for (const a of actions ?? []) {
@@ -129,6 +158,71 @@ export class DialoguePanel {
       ].join(';');
       const id = a.id;
       btn.addEventListener('click', () => onAction?.(id));
+      this.actionsEl.append(btn);
+    }
+    this.root.style.display = 'block';
+    this.open_ = true;
+  }
+
+  /**
+   * Dialogue-branching wave: render one tree node — speaker line, choice
+   * buttons (locked choices disabled with their reason), then the usual
+   * quest action buttons below. Re-rendering swaps content in place, so
+   * choosing a branch re-shows the next node without closing the panel.
+   * Touch targets: choice buttons are >= 28px tall (8px vertical padding
+   * + 13px text), the HUD-polish floor. The panel keeps its z-index 9500
+   * and its capture-phase E/Escape ownership.
+   */
+  showTree(opts: {
+    name: string;
+    role?: string;
+    text: string;
+    nodeId: string;
+    choices: DialogueTreeChoice[];
+    actions?: DialogueQuestAction[];
+    onChoice?: (id: string) => void;
+    onAction?: (id: string) => void;
+  }): void {
+    if (this.disposed) return;
+    this.nameEl.textContent = opts.role ? `${opts.name} — ${opts.role}` : opts.name;
+    this.lineEl.textContent = `\u201c${opts.text}\u201d`;
+    this.lineEl.setAttribute('data-dialogue-text', opts.text);
+    this.root.setAttribute('data-dialogue-node', opts.nodeId);
+    while (this.choicesEl.firstChild) this.choicesEl.firstChild.remove();
+    for (const c of opts.choices) {
+      const btn = this.doc.createElement('button') as HTMLButtonElement;
+      btn.textContent = c.locked && c.lockReason ? `${c.label} — ${c.lockReason}` : c.label;
+      btn.setAttribute('data-dialogue-choice', c.id);
+      if (c.locked) {
+        btn.setAttribute('data-dialogue-locked', 'true');
+        btn.setAttribute('aria-disabled', 'true');
+        (btn as HTMLButtonElement).disabled = true;
+      }
+      btn.style.cssText = [
+        'background:rgba(255,181,69,0.12)', 'color:#ffcf7a',
+        'border:1px solid rgba(255,181,69,0.55)', 'border-radius:6px',
+        // HUD-polish floor: 8px vertical padding keeps the target >= 28px.
+        'padding:8px 12px', 'min-height:28px', 'font-size:13px', 'font-weight:600',
+        'cursor:pointer', 'font-family:inherit', 'text-align:left',
+        c.locked ? 'opacity:0.45;cursor:not-allowed' : '',
+      ].join(';');
+      const id = c.id;
+      btn.addEventListener('click', () => opts.onChoice?.(id));
+      this.choicesEl.append(btn);
+    }
+    while (this.actionsEl.firstChild) this.actionsEl.firstChild.remove();
+    for (const a of opts.actions ?? []) {
+      const btn = this.doc.createElement('button') as HTMLButtonElement;
+      btn.textContent = a.label;
+      btn.setAttribute('data-quest-action', a.id);
+      btn.style.cssText = [
+        'background:rgba(255,181,69,0.12)', 'color:#ffcf7a',
+        'border:1px solid rgba(255,181,69,0.55)', 'border-radius:6px',
+        'padding:7px 12px', 'font-size:13px', 'font-weight:600',
+        'cursor:pointer', 'font-family:inherit', 'text-align:left',
+      ].join(';');
+      const id = a.id;
+      btn.addEventListener('click', () => opts.onAction?.(id));
       this.actionsEl.append(btn);
     }
     this.root.style.display = 'block';

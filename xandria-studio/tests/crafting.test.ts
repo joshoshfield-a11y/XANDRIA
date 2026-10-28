@@ -16,6 +16,8 @@ import {
   MAT_ORE,
   MAT_FIBER,
   MAT_SCRAP,
+  MAT_HERB,
+  MAT_CRYSTAL,
   MATERIAL_IDS,
   STATION_IDS,
   STATION_ANVIL,
@@ -96,6 +98,7 @@ describe('recipe pool determinism', () => {
     // deployable kits (alwaysInPool, no gates) ride along too. MERGE
     // (deployables x tutorial): the basic Fiber Weave Vest rides along
     // too, so no seed's pool can lock out level-1 equippable crafting.
+    // Gathering-nodes phase: the herb/crystal sinks ride along too.
     const ALWAYS = [
       'recipe_alloy_greaves',
       'recipe_starfall_warbrand',
@@ -107,6 +110,8 @@ describe('recipe pool determinism', () => {
       'recipe_deploy_spike_trap',
       'recipe_deploy_lure_totem',
       'recipe_fiber_weave',
+      'recipe_herb_poultice',
+      'recipe_crystal_lens',
     ];
     const expectPool = (rawSize: number, seededLen: number) => {
       const pool = buildRecipePool(specWithCrafting(7, { recipes: { poolSize: rawSize } }));
@@ -153,10 +158,13 @@ describe('recipe pool determinism', () => {
 
 describe('material + crafted item defs', () => {
   it('material ids are the fixed B contract and typed material', () => {
-    expect(MATERIAL_IDS).toEqual([MAT_ORE, MAT_FIBER, MAT_SCRAP]);
+    // Gathering-nodes phase: herb + crystal join the fixed contract.
+    expect(MATERIAL_IDS).toEqual([MAT_ORE, MAT_FIBER, MAT_SCRAP, MAT_HERB, MAT_CRYSTAL]);
     expect(MAT_ORE).toBe('mat_ore');
     expect(MAT_FIBER).toBe('mat_fiber');
     expect(MAT_SCRAP).toBe('mat_scrap');
+    expect(MAT_HERB).toBe('mat_herb');
+    expect(MAT_CRYSTAL).toBe('mat_crystal');
     const defs = materialItemDefs();
     for (const id of MATERIAL_IDS) {
       expect(defs[id].type).toBe('material');

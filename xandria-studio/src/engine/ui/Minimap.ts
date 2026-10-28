@@ -21,7 +21,7 @@
 import type { Engine } from '../Engine';
 import type { LandmarkSystem } from '../world/LandmarkSystem';
 import type { DynamicEventManager } from '../game/dynamicEvents';
-
+import { NODE_DEFS } from '../game/gathering';import type { HazardZoneManager } from '../game/hazardZones';
 /** Tiles per side of the fog grid (covers the whole map). */
 export const FOG_TILES = 128;
 /** Exploration reveal radius in meters. */
@@ -198,7 +198,9 @@ export class Minimap {
   private lastRZ = Infinity;
   private scanT = 0;
   private lastBeaconSig = '';
-  private disposed = false;
+  private lastNodeSig = '';
+  /** UPGRADE LOOP (quest-waypoints): last waypoint marker signature. */
+  private lastWaypointSig = '';  private lastHazardSig = '';  private disposed = false;
 
   constructor(container: HTMLElement, engine: Engine) {
     this.engine = engine;
@@ -317,6 +319,32 @@ export class Minimap {
   }
 
   /**
+   * UPGRADE LOOP (hazard-zones): the hazard manager, observe-only. The
+   * minimap never writes hazard state — it reads the current map's zone
+   * roster and draws markers above the fog, like the event beacons.
+   */
+  private hazards(): HazardZoneManager | undefined {
+    return this.engine.portalEntities.byId('hazards') as unknown as HazardZoneManager | undefined;
+  }
+
+  /**
+   * Test/introspection seam: the current map's hazard markers that pass
+   * the fog rule — a marker is shown only when its tile is revealed.
+   * Empty when no fog state exists yet for the current map.
+   */
+  get hazardMarkers(): Array<{ defId: string; x: number; z: number; color: string; telegraphing: boolean }> {
+    const mgr = this.hazards();
+    const state = this.fogByKey.get(this.currentKey);
+    if (!mgr || !state) return [];
+    const out: Array<{ defId: string; x: number; z: number; color: string; telegraphing: boolean }> = [];
+    for (const m of mgr.markerView()) {
+      if (!state.fog.isRevealed(m.x, m.z)) continue; // fog rules respected
+      out.push({ defId: m.defId, x: m.x, z: m.z, color: m.color, telegraphing: m.telegraphing });
+    }
+    return out;
+  }
+
+  /**
    * UPGRADE LOOP (player-camp): the camp manager, observe-only. The
    * minimap never writes camp state — it reads the current map's site
    * (discovered on arrival) and draws the camp marker above the fog,
@@ -332,6 +360,48 @@ export class Minimap {
     const c = this.camp();
     if (!c || !c.discovered || !c.site) return null;
     return { x: c.site.x, z: c.site.z };
+  }
+
+/** Gathering manager, when the blueprint registered one (structural read only). */
+  private gathering(): {
+    nodes: ReadonlyArray<{
+      kind: string;
+      retired: boolean;
+      nodeState?: string;
+      interactable: { id: string };
+      root: { position: { x: number; z: number } };
+    }>;
+  } | undefined {
+    return this.engine.portalEntities.byId('gathering') as unknown as
+      | { nodes: ReadonlyArray<{
+        kind: string; retired: boolean; nodeState?: string;
+        interactable: { id: string };
+        root: { position: { x: number; z: number } };
+      }> }
+      | undefined;
+  }
+
+  /**
+   * Markers redraw() draws, and the e2e seam for the minimap leg:
+   * LIVE gathering nodes whose fog tile is already revealed. Observe
+   * only — this reads node state and fog state, never mutates either.
+   * Depleted/awaiting/regrowing nodes are not marked (nothing to
+   * harvest there yet); unrevealed tiles stay dark per fog rules.
+   */
+  gatheringMarkers(): Array<{ id: string; kind: string; x: number; z: number; color: string }> {
+    const state = this.fogByKey.get(this.currentKey);
+    const mgr = this.gathering();
+    if (!state || !mgr) return [];
+    const out: Array<{ id: string; kind: string; x: number; z: number; color: string }> = [];
+    for (const n of mgr.nodes) {
+      if (n.retired) continue;
+      if (n.nodeState !== undefined && n.nodeState !== 'live') continue;
+      const p = n.root.position;
+      if (!state.fog.isRevealed(p.x, p.z)) continue;
+      const def = (NODE_DEFS as Record<string, { minimapColor: string }>)[n.kind];
+      out.push({ id: n.interactable.id, kind: n.kind, x: p.x, z: p.z, color: def?.minimapColor ?? '#ffffff' });
+    }
+    return out;
   }
 
   private getOrCreateState(key: string, worldSize: number): MapFogState {
@@ -359,6 +429,19 @@ export class Minimap {
 
   /** Test/introspection seam: current map key. */
   get activeKey(): string { return this.currentKey; }
+
+  /**
+   * UPGRADE LOOP (world-atlas): fog-reveal fraction for one map coord
+   * (0 when the map has no fog state yet — it has not been walked this
+   * session). Session-only: resetRun() clears every grid, so this is
+   * the current session's exploration, never a persisted fact. Read-only.
+   */
+  coverageFor(mx: number, my: number): number {
+    const state = this.fogByKey.get(`${mx},${my}`);
+    if (!state) return 0;
+    const c = state.fog.coverage;
+    return Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0;
+  }
 
   get coverage(): number {
     return this.fogByKey.get(this.currentKey)?.fog.coverage ?? 0;
@@ -400,7 +483,8 @@ export class Minimap {
       let dirty = false;
       if (this.scanLandmarks(state, bp.x, bp.z)) dirty = true;
       if (this.scanBeacons()) dirty = true;
-      if (dirty) this.redraw();
+      if (this.scanNodes()) dirty = true;
+      if (this.scanWaypoint()) dirty = true;      if (this.scanHazards()) dirty = true;      if (dirty) this.redraw();
       else if (moved) this.redraw(); // marker moved even if nothing else changed
     }
     this.updateFooter(state);
@@ -422,6 +506,7 @@ export class Minimap {
       this.scanLandmarks(state, abp.x, abp.z);
     }
     this.scanBeacons();
+    this.scanHazards();
     this.redraw();
   }
 
@@ -549,6 +634,23 @@ export class Minimap {
     return fresh;
   }
 
+  /** Node-set change scan: returns true when the live-node roster changed. */
+  private scanNodes(): boolean {
+    const mgr = this.gathering();
+    let sig = '';
+    if (mgr) {
+      for (const n of mgr.nodes) {
+        const p = n.root.position;
+        sig += `${n.kind}:${Math.round(p.x)},${Math.round(p.z)},${n.retired ? 0 : 1};`;
+      }
+    }
+    if (sig !== this.lastNodeSig) {
+      this.lastNodeSig = sig;
+      return true;
+    }
+    return false;
+  }
+
   /** Event-beacon change scan: returns true when the active-beacon set changed. */
   private scanBeacons(): boolean {
     const mgr = this.events();
@@ -562,6 +664,37 @@ export class Minimap {
     }
     if (sig !== this.lastBeaconSig) {
       this.lastBeaconSig = sig;
+      return true;
+    }
+    return false;
+  }
+
+  /** Quest-waypoint change scan: returns true when the waypoint marker changed. */
+  private scanWaypoint(): boolean {
+    const w = this.engine.waypoints?.minimapMarker() ?? null;
+    const sig = w ? `${Math.round(w.x / 2)},${Math.round(w.z / 2)}` : '';
+    if (sig !== this.lastWaypointSig) {
+      this.lastWaypointSig = sig;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Hazard-marker change scan: returns true when the zone roster or any
+   * zone's telegraph state changed (telegraph flips recolor the marker).
+   * The fog rule itself is applied at draw/getter time, not in the sig.
+   */
+  private scanHazards(): boolean {
+    const mgr = this.hazards();
+    let sig = '';
+    if (mgr) {
+      for (const m of mgr.markerView()) {
+        sig += `${Math.round(m.x)},${Math.round(m.z)},${m.telegraphing ? 1 : 0};`;
+      }
+    }
+    if (sig !== this.lastHazardSig) {
+      this.lastHazardSig = sig;
       return true;
     }
     return false;
@@ -629,6 +762,20 @@ export class Minimap {
           ctx.closePath(); ctx.fill();
         }
       }
+      // Hazard markers (hazard-zones wave): def-colored diamonds above
+      // the fog, drawn ONLY when the zone's tile is revealed — fog rules
+      // respected. Telegraphing zones paint in the warning color.
+      const hz = this.hazards();
+      if (hz) {
+        for (const m of hz.markerView()) {
+          if (!state.fog.isRevealed(m.x, m.z)) continue;
+          const [px, py] = toPx(m.x, m.z);
+          ctx.fillStyle = m.color;
+          ctx.beginPath();
+          ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
+          ctx.closePath(); ctx.fill();
+        }
+      }
       // Camp marker (player-camp wave): green diamond above the fog,
       // drawn only when the current map's site is discovered (arrival).
       const camp = this.camp();
@@ -639,6 +786,27 @@ export class Minimap {
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(px, py - 5); ctx.lineTo(px + 5, py); ctx.lineTo(px, py + 5); ctx.lineTo(px - 5, py);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+      // Live gathering nodes on revealed fog tiles (observe-only, see
+      // gatheringMarkers): small dots in the node's table color.
+      for (const m of this.gatheringMarkers()) {
+        const [px, py] = toPx(m.x, m.z);
+        ctx.fillStyle = m.color;
+        ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+      // Quest waypoint marker (quest-waypoints wave): amber diamond
+      // above the fog, drawn ONLY when its tile is revealed — the fog
+      // rules apply to the waypoint exactly as to landmarks (an
+      // unrevealed objective stays hidden on the minimap).
+      const wp = this.engine.waypoints?.minimapMarker() ?? null;
+      if (wp && state.fog.isRevealed(wp.x, wp.z)) {
+        const [px, py] = toPx(wp.x, wp.z);
+        ctx.fillStyle = '#ffb545';
+        ctx.strokeStyle = '#0a0e14';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(px, py - 6); ctx.lineTo(px + 6, py); ctx.lineTo(px, py + 6); ctx.lineTo(px - 6, py);
         ctx.closePath(); ctx.fill(); ctx.stroke();
       }
       // Player marker: heading triangle from camYaw.
@@ -678,7 +846,8 @@ export class Minimap {
     this.lastRZ = Infinity;
     this.scanT = 0;
     this.lastBeaconSig = '';
-    this.bakeMs = 0;
+    this.lastNodeSig = '';
+    this.lastWaypointSig = '';    this.lastHazardSig = '';    this.bakeMs = 0;
     this.redraws = 0;
     this.lastRedrawMs = 0;
   }

@@ -47,6 +47,48 @@ export interface InventorySellHooks {
 import type { SetUiReport } from '../game/setBonuses';
 import type { CritStats } from '../game/crit';
 import { ENCHANT_DEFS } from '../game/enchantments';
+import { ELEMENTAL_TABLE } from '../game/elemental';
+import {
+  type GearLoadout,
+  type ApplyLoadoutResult,
+  loadoutPieceCount,
+} from '../game/loadouts';
+
+/**
+ * Loadout hooks (loadout-presets wave). When present the HUD offers a
+ * LOADOUTS section; persistence lives with the caller (itemKit reads /
+ * writes the active save slot's profile) — the HUD only renders and
+ * reports. Absent on panels built without an item kit.
+ */
+export interface LoadoutHooks {
+  /** Current 3-slot rack (fresh copies). */
+  list: () => GearLoadout[];
+  /** Snapshot the live equip set under a name (slot-validated). */
+  capture: (name: string) => GearLoadout;
+  /** Overwrite one slot with a snapshot (persisted by the caller). */
+  save: (index: number, loadout: GearLoadout) => void;
+  /** Rename one slot; false when the name is blank / index bad. */
+  rename: (index: number, name: string) => boolean;
+  /** Clear one slot back to its default empty state. */
+  clear: (index: number) => void;
+  /** Apply one slot through the equip/unequip path (combat-guarded). */
+  apply: (index: number) => ApplyLoadoutResult;
+  /** Live combat guard (Engine.inCombat) for the apply refusal message. */
+  inCombat: () => boolean;
+}
+
+import { isSetPiece, type SalvageYield } from '../game/salvage';
+
+/**
+ * Optional salvage integration (gear-salvage wave). When present the
+ * HUD forwards clearFromLoadouts to Inventory.salvage(), which fires
+ * it only when zero units of the salvaged id remain (the
+ * loadout-snapshot rule — see engine/game/salvage.ts). Absent on
+ * trees without the loadout-presets wave: the hook is simply never
+ * called, and salvaging works identically.
+ */
+export interface InventorySalvageHooks {
+  clearFromLoadouts?: (itemId: string) => void;}
 
 export const RARITY_COLORS: Record<ItemRarity, string> = {
   common: '#9a9a9a',
@@ -99,7 +141,25 @@ const CSS = `
   border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 10px; cursor:pointer; }
 .xinv .enchrow button:hover { border-color:rgba(255,210,63,.7); }
 .xinv .enchrow button:disabled { opacity:.45; cursor:default; }
-.xinv .tip { position:fixed; z-index:30; max-width:260px; pointer-events:none;
+.xinv .loadouts { margin-top:6px; }
+.xinv .loadrow { font-size:12px; padding:6px 8px; border:1px solid rgba(140,180,220,.22); border-radius:8px;
+  margin-bottom:6px; background:rgba(16,24,40,.55); }
+.xinv .loadrow .ln { font-weight:700; color:#ffd23f; }
+.xinv .loadrow .ls { opacity:.75; font-size:11px; margin-left:6px; }
+.xinv .loadrow .la { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+.xinv .loadrow button { min-height:28px; background:rgba(30,42,64,.9); color:#e8ecf1;
+  border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 10px; cursor:pointer; }
+.xinv .loadrow button:hover { border-color:rgba(255,210,63,.7); }
+.xinv .loadrow input { min-height:28px; background:rgba(20,28,44,.95); color:#e8ecf1;
+  border:1px solid rgba(255,210,63,.6); border-radius:6px; font-size:12px; padding:2px 8px; max-width:180px; }.xinv .salvs { margin-top:6px; }
+.xinv .salvrow { font-size:12px; padding:6px 8px; border:1px solid rgba(140,180,220,.22); border-radius:8px;
+  margin-bottom:6px; background:rgba(16,24,40,.55); }
+.xinv .salvrow .sn { font-weight:700; color:#ffd23f; }
+.xinv .salvrow .ss { opacity:.75; font-size:11px; margin-left:6px; }
+.xinv .salvrow .sy { font-size:11px; margin-top:2px; color:#7dffa8; }
+.xinv .salvrow button { min-height:28px; background:rgba(30,42,64,.9); color:#e8ecf1;
+  border:1px solid rgba(140,180,220,.35); border-radius:6px; font-size:12px; padding:2px 10px; cursor:pointer; margin-top:4px; }
+.xinv .salvrow button:hover { border-color:rgba(255,210,63,.7); }.xinv .tip { position:fixed; z-index:30; max-width:260px; pointer-events:none;
   background:rgba(8,11,18,.96); border:1px solid rgba(140,180,220,.4); border-radius:8px;
   padding:10px 12px; font-size:12px; }
 .xinv .tip .tn { font-size:13px; font-weight:700; margin-bottom:2px; }
@@ -188,16 +248,26 @@ export class InventoryHUD {
   // Enchantments wave: enchant-action section (reads live inventory state).
   private enchSection: HTMLDivElement;
   private enchRows: HTMLDivElement;
-
+  // Loadout-presets wave: loadout section (reads the rack via hooks).
+  private loadoutHooks: LoadoutHooks | null = null;
+  private loadoutSection: HTMLDivElement;
+  private loadoutRows: HTMLDivElement;
+  /** Slot index currently in inline-rename mode (null = none). */
+  private renamingIndex: number | null = null;  // Gear-salvage wave: salvage section (reads live inventory state).
+  private salvSection: HTMLDivElement;
+  private salvRows: HTMLDivElement;
+  private salvageHooks: InventorySalvageHooks | null = null;
   constructor(
     private container: HTMLElement,
     private inventory: Inventory,
-    opts?: { input?: Input; sell?: InventorySellHooks | null; setReport?: () => SetUiReport; critReport?: () => CritStats },
+    opts?: { input?: Input; sell?: InventorySellHooks | null; setReport?: () => SetUiReport; critReport?: () => CritStats; loadouts?: LoadoutHooks | null; salvageHooks?: InventorySalvageHooks | null },
   ) {
     if (opts?.input) this.input = opts.input;
     if (opts?.sell) this.sellHooks = opts.sell;
+    if (opts?.salvageHooks) this.salvageHooks = opts.salvageHooks;
     if (opts?.setReport) this.setReport = opts.setReport;
     if (opts?.critReport) this.critReport = opts.critReport;
+    if (opts?.loadouts) this.loadoutHooks = opts.loadouts;
     if (typeof document !== 'undefined') {
       const style = document.createElement('style');
       style.textContent = CSS;
@@ -249,6 +319,18 @@ export class InventoryHUD {
     this.setSection.appendChild(this.setRows);
     this.panel.appendChild(this.setSection);
 
+    // Loadout-presets wave: named equip-set snapshots (save / rename /
+    // apply / delete). Renders from the hooks' rack on every refresh().
+    this.loadoutSection = document.createElement('div');
+    this.loadoutSection.className = 'loadouts';
+    const loadSec = document.createElement('div');
+    loadSec.className = 'sec';
+    loadSec.textContent = 'LOADOUTS';
+    this.loadoutSection.appendChild(loadSec);
+    this.loadoutRows = document.createElement('div');
+    this.loadoutSection.appendChild(this.loadoutRows);
+    this.panel.appendChild(this.loadoutSection);
+
     // CRIT-SYSTEM: live crit stats (equipped weapon tier + smithing rank).
     this.critSection = document.createElement('div');
     this.critSection.className = 'crits';
@@ -273,6 +355,20 @@ export class InventoryHUD {
     this.enchRows = document.createElement('div');
     this.enchSection.appendChild(this.enchRows);
     this.panel.appendChild(this.enchSection);
+
+    // Gear-salvage wave: per-backpack-gear salvage rows with exact
+    // yield previews (confirm step before anything is dismantled).
+    // Equipped gear never appears here — equipped items are never
+    // salvageable, so only backpack units are listed.
+    this.salvSection = document.createElement('div');
+    this.salvSection.className = 'salvs';
+    const salvSec = document.createElement('div');
+    salvSec.className = 'sec';
+    salvSec.textContent = 'SALVAGE';
+    this.salvSection.appendChild(salvSec);
+    this.salvRows = document.createElement('div');
+    this.salvSection.appendChild(this.salvRows);
+    this.panel.appendChild(this.salvSection);
 
     const packSec = document.createElement('div');
     packSec.className = 'sec';
@@ -410,6 +506,7 @@ export class InventoryHUD {
     mkButton('Mark shown junk', () => this.markShownJunk());
     if (this.sellHooks) mkButton('Sell junk', () => this.sellJunkFlow());
     mkButton('Destroy junk', () => this.destroyJunkFlow());
+    mkButton('Salvage junk', () => this.salvageJunkFlow());
     this.panel.appendChild(actions);
 
     const confirm = document.createElement('div');
@@ -544,6 +641,76 @@ export class InventoryHUD {
     });
   }
 
+  /** "2× Iron Ore, 1× Plant Fiber" from a yield list (def names, textContent-safe). */
+  private yieldText(yields: readonly SalvageYield[]): string {
+    return yields
+      .map((y) => `${y.count}× ${this.inventory.getDef(y.itemId)?.name ?? y.itemId}`)
+      .join(', ');
+  }
+
+  /** Salvage-one-unit flow: exact-yield preview, inline confirm, then salvage. */
+  private salvageOneFlow(itemId: string): void {
+    const def = this.inventory.getDef(itemId);
+    if (!def) return;
+    const preview = this.inventory.salvagePreview(itemId);
+    if (!preview) {
+      this.toast(`${def.name} cannot be salvaged`);
+      this.refresh();
+      return;
+    }
+    this.askConfirm(`Salvage ${def.name} for ${this.yieldText(preview)}? The item will be dismantled.`, () => {
+      const r = this.inventory.salvage(itemId, {
+        onClearLoadout: this.salvageHooks?.clearFromLoadouts,
+      });
+      if (!r.ok) {
+        this.toast(`Cannot salvage: ${r.reason ?? 'failed'}`);
+      } else {
+        this.toast(`Salvaged ${def.name} → ${this.yieldText(r.yields ?? [])}`);
+      }
+      this.clampCursor();
+      this.refresh();
+    });
+  }
+
+  /** Salvage-all-junk flow: reuses the junk-marking path + inline confirm. */
+  private salvageJunkFlow(): void {
+    const preview = this.inventory.previewSalvageAllJunk();
+    if (preview.plan.length === 0) {
+      this.toast(
+        preview.skipped.length > 0
+          ? 'Junk cannot be salvaged (equipped or not gear)'
+          : 'No junk to salvage',
+      );
+      return;
+    }
+    const units = preview.plan.reduce((n, p) => n + p.units, 0);
+    const merged: SalvageYield[] = [];
+    for (const p of preview.plan) {
+      for (const y of p.yields) {
+        const e = merged.find((v) => v.itemId === y.itemId);
+        if (e) e.count += y.count;
+        else merged.push({ ...y });
+      }
+    }
+    const skipNote =
+      preview.skipped.length > 0
+        ? ` (${preview.skipped.length} junk item${preview.skipped.length === 1 ? '' : 's'} skipped: ${preview.skipped.map((s) => s.reason).join(', ')})`
+        : '';
+    this.askConfirm(`Salvage ${units} junk item${units === 1 ? '' : 's'} for ${this.yieldText(merged)}?${skipNote}`, () => {
+      const r = this.inventory.salvageAllJunk({
+        onClearLoadout: this.salvageHooks?.clearFromLoadouts,
+      });
+      const done = r.salvaged.reduce((n, s) => n + s.units, 0);
+      if (done === 0) {
+        this.toast('Nothing salvaged');
+      } else {
+        this.toast(`Salvaged ${done} junk item${done === 1 ? '' : 's'} → ${this.yieldText(r.yields)}`);
+      }
+      this.clampCursor();
+      this.refresh();
+    });
+  }
+
   private clampCursor(): void {
     if (this.cursor.area === 'pack') {
       const max = Math.max(0, this.viewSlots.length - 1);
@@ -653,8 +820,10 @@ export class InventoryHUD {
       cell.classList.toggle('cursor', this.openFlag && this.cursor.area === 'equip' && this.cursor.index === j);
     }
     this.renderSetRows();
+    this.renderLoadoutRows();
     this.renderCritRows();
     this.renderEnchantRows();
+    this.renderSalvageRows();
   }
 
   /** Transient feedback line inside the panel. */
@@ -703,6 +872,19 @@ export class InventoryHUD {
     sub.textContent = `weapon: ${report.tier} · smithing rank ${report.skillRank}`;
     row.appendChild(sub);
     this.critRows.appendChild(row);
+    // ELEMENTAL-DAMAGE-TYPES: live outgoing damage type (weapon enchant
+    // or physical). Rendered in the same loadout-readout section as the
+    // crit stats; the type is the inventory's own resolver, so this row
+    // can never disagree with the damage the avatar actually deals.
+    const detail = this.inventory.outgoingDamageTypeDetail();
+    const elem = document.createElement('div');
+    elem.className = 'elemrow';
+    const def = ELEMENTAL_TABLE[detail.type];
+    elem.textContent = detail.enchantId
+      ? `DAMAGE TYPE ${def.label} — via ${ENCHANT_DEFS.find((e) => e.id === detail.enchantId)?.name ?? detail.enchantId}`
+      : `DAMAGE TYPE ${def.label}`;
+    elem.style.color = def.color;
+    this.critRows.appendChild(elem);
   }
 
   private renderSetRows(): void {
@@ -745,6 +927,146 @@ export class InventoryHUD {
   }
 
   /**
+   * Loadout-presets wave: render the LOADOUTS section. One row per rack
+   * slot: name + piece summary + Apply / Save / Rename / Delete. Apply
+   * stays enabled during combat on purpose — the refusal is a visible,
+   * state-driven toast at click time (the pure apply path refuses whole
+   * while in combat), not a silently disabled button. All buttons are
+   * >=28px touch targets (CSS above). textContent everywhere.
+   */
+  private renderLoadoutRows(): void {
+    this.loadoutRows.innerHTML = '';
+    if (!this.loadoutHooks) {
+      this.loadoutSection.style.display = 'none';
+      return;
+    }
+    this.loadoutSection.style.display = '';
+    let rack: GearLoadout[];
+    try {
+      rack = this.loadoutHooks.list();
+    } catch {
+      return;
+    }
+    rack.forEach((loadout, index) => {
+      const row = document.createElement('div');
+      row.className = 'loadrow';
+      row.dataset.loadoutIndex = String(index);
+      row.dataset.loadoutName = loadout.name;
+      const head = document.createElement('div');
+      const nm = document.createElement('span');
+      nm.className = 'ln';
+      nm.textContent = loadout.name;
+      const pieces = loadoutPieceCount(loadout);
+      const summary = document.createElement('span');
+      summary.className = 'ls';
+      summary.textContent = pieces === 0
+        ? 'empty'
+        : `${pieces}/5 pieces: ${EQUIP_SLOTS.filter((s) => loadout.equipped[s])
+          .map((s) => this.inventory.getDef(loadout.equipped[s]!)?.name ?? loadout.equipped[s])
+          .join(', ')}`;
+      head.append(nm, summary);
+      row.appendChild(head);
+
+      if (this.renamingIndex === index) {
+        const acts = document.createElement('div');
+        acts.className = 'la';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = loadout.name;
+        input.setAttribute('aria-label', `Rename ${loadout.name}`);
+        input.maxLength = 24;
+        const finish = (commitRename: boolean) => {
+          const idx = this.renamingIndex;
+          this.renamingIndex = null;
+          if (commitRename && idx !== null) {
+            const ok = this.loadoutHooks!.rename(idx, input.value);
+            this.toast(ok ? `Renamed to "${this.loadoutHooks!.list()[idx]?.name ?? input.value}"` : 'Rename needs a non-empty name');
+          }
+          this.refresh();
+        };
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+          else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+          e.stopPropagation();
+        });
+        const okBtn = document.createElement('button');
+        okBtn.type = 'button';
+        okBtn.className = 'load-rename-confirm';
+        okBtn.textContent = 'Save name';
+        okBtn.addEventListener('click', () => finish(true));
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'load-rename-cancel';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => finish(false));
+        acts.append(input, okBtn, cancelBtn);
+        row.appendChild(acts);
+        this.loadoutRows.appendChild(row);
+        return;
+      }
+
+      const acts = document.createElement('div');
+      acts.className = 'la';
+      const mkBtn = (cls: string, text: string, onClick: () => void): HTMLButtonElement => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = cls;
+        b.dataset.loadoutIndex = String(index);
+        b.textContent = text;
+        b.addEventListener('click', onClick);
+        acts.appendChild(b);
+        return b;
+      };
+      mkBtn('load-apply', 'Apply', () => {
+        let result: ApplyLoadoutResult;
+        try {
+          result = this.loadoutHooks!.apply(index);
+        } catch {
+          this.toast('Loadout apply failed');
+          return;
+        }
+        if (!result.ok) {
+          this.toast('Cannot change loadout in combat');
+          return;
+        }
+        const parts: string[] = [];
+        if (result.applied.length > 0) parts.push(`applied ${result.applied.length} slot${result.applied.length === 1 ? '' : 's'}`);
+        if (result.missing.length > 0) {
+          const names = result.missing.map((m) => this.inventory.getDef(m.itemId ?? '')?.name ?? m.itemId ?? m.slot);
+          parts.push(`missing: ${names.join(', ')}`);
+        }
+        if (result.blocked.length > 0) parts.push(`${result.blocked.length} blocked (backpack full?)`);
+        if (parts.length === 0) parts.push('already equipped');
+        this.toast(`Loadout "${loadout.name}": ${parts.join(' · ')}`);
+        this.refresh();
+      });
+      mkBtn('load-save', 'Save current set', () => {
+        const snap = this.loadoutHooks!.capture(loadout.name);
+        this.loadoutHooks!.save(index, snap);
+        const n = loadoutPieceCount(snap);
+        this.toast(`Saved "${loadout.name}" (${n}/5 pieces)`);
+        this.refresh();
+      });
+      mkBtn('load-rename', 'Rename', () => {
+        this.renamingIndex = index;
+        this.refresh();
+        const input = this.loadoutRows.querySelector<HTMLInputElement>('.loadrow input');
+        input?.focus();
+        input?.select();
+      });
+      mkBtn('load-delete', 'Delete', () => {
+        this.askConfirm(`Delete loadout "${loadout.name}"? This clears the saved set.`, () => {
+          this.loadoutHooks!.clear(index);
+          this.toast(`Deleted loadout "${loadout.name}"`);
+          this.refresh();
+        });
+      });
+      row.appendChild(acts);
+      this.loadoutRows.appendChild(row);
+    });
+  }
+
+  /**
    * Enchantments wave: render the ENCHANTMENTS section. One row per
    * equipped equippable item: its current enchant (or "unenchanted"),
    * apply buttons for every slot-applicable enchant (with exact cost
@@ -782,9 +1104,12 @@ export class InventoryHUD {
       const cur = this.inventory.getEnchant(itemId);
       const curDef = cur ? ENCHANT_DEFS.find((e) => e.id === cur) : undefined;
       st.textContent = curDef
-        ? `enchanted: ${curDef.name}`
+        ? `enchanted: ${curDef.name}${curDef.damageType ? ` · ${ELEMENTAL_TABLE[curDef.damageType].label} damage` : ''}`
         : 'unenchanted';
-      if (curDef) row.dataset.enchantId = curDef.id;
+      if (curDef) {
+        row.dataset.enchantId = curDef.id;
+        if (curDef.damageType) row.dataset.damageType = curDef.damageType;
+      }
       head.append(nm, st);
       row.appendChild(head);
       const acts = document.createElement('div');
@@ -814,7 +1139,7 @@ export class InventoryHUD {
           b.dataset.enchantId = ench.id;
           const costText = ench.cost.map((c) => `${c.count}× ${this.inventory.getDef(c.itemId)?.name ?? c.itemId}`).join(', ');
           const short = ench.cost.some((c) => this.inventory.count(c.itemId) < c.count);
-          b.textContent = `${ench.name} (${costText})`;
+          b.textContent = `${ench.name}${ench.damageType ? ` — ${ELEMENTAL_TABLE[ench.damageType].label}` : ''} (${costText})`;
           b.disabled = short;
           b.title = short ? 'Not enough materials' : `Apply ${ench.name}`;
           b.addEventListener('click', () => {
@@ -828,6 +1153,66 @@ export class InventoryHUD {
       }
       row.appendChild(acts);
       this.enchRows.appendChild(row);
+    }
+  }
+
+  /**
+   * Gear-salvage wave: render the SALVAGE section. One row per distinct
+   * salvageable backpack gear id (slot order): name, count, enchant /
+   * set-piece badges, the exact yield preview for the next unit, and
+   * a Salvage button that goes through the two-step confirm. Equipped
+   * gear never renders here (never salvageable). Hidden when the
+   * backpack holds no salvageable gear. textContent everywhere.
+   */
+  private renderSalvageRows(): void {
+    this.salvRows.innerHTML = '';
+    const seen = new Set<string>();
+    const rows: Array<{ itemId: string; def: ItemDef; count: number }> = [];
+    for (const entry of this.inventory.getBackpack()) {
+      if (!entry || seen.has(entry.itemId)) continue;
+      seen.add(entry.itemId);
+      if (!this.inventory.isSalvageable(entry.itemId).ok) continue;
+      const def = this.inventory.getDef(entry.itemId);
+      if (!def) continue;
+      rows.push({ itemId: entry.itemId, def, count: entry.count });
+    }
+    if (rows.length === 0) {
+      this.salvSection.style.display = 'none';
+      return;
+    }
+    this.salvSection.style.display = '';
+    for (const { itemId, def, count } of rows) {
+      const row = document.createElement('div');
+      row.className = 'salvrow';
+      row.dataset.itemId = itemId;
+      const head = document.createElement('div');
+      const nm = document.createElement('span');
+      nm.className = 'sn';
+      nm.textContent = def.name;
+      const st = document.createElement('span');
+      st.className = 'ss';
+      const badges: string[] = [];
+      if (count > 1) badges.push(`×${count}`);
+      const enchId = this.inventory.getEnchant(itemId);
+      const enchDef = enchId ? ENCHANT_DEFS.find((e) => e.id === enchId) : undefined;
+      if (enchDef) badges.push(`enchanted: ${enchDef.name} (refund included)`);
+      if (isSetPiece(itemId)) badges.push('set piece (bonus materials included)');
+      st.textContent = badges.join(' · ');
+      head.append(nm, st);
+      row.appendChild(head);
+      const preview = this.inventory.salvagePreview(itemId);
+      const y = document.createElement('div');
+      y.className = 'sy';
+      y.textContent = preview ? `Salvage → ${this.yieldText(preview)}` : 'Cannot be salvaged';
+      row.appendChild(y);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'salvage-one';
+      b.dataset.itemId = itemId;
+      b.textContent = 'Salvage 1';
+      b.addEventListener('click', () => this.salvageOneFlow(itemId));
+      row.appendChild(b);
+      this.salvRows.appendChild(row);
     }
   }
 
