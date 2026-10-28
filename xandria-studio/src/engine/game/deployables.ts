@@ -48,6 +48,11 @@ import type { ItemDef } from '@spec';
 import type { CraftingRecipe } from './crafting';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import type { Enemy } from './EnemyAI';
+import {
+  STATUS_TRAP_SALT,
+  StatusRoller,
+  tryApplyStatus,
+} from './statusEffects';
 
 /** Salt for the deploy-placement stream — off the GATHER/ENEMY/CRAFT streams. */
 export const DEPLOY_SALT = 0xde9107;
@@ -394,6 +399,12 @@ export interface DeployablesManagerOpts {
   getEnemies: () => Enemy[];
   /** heal the player by n HP (blueprint passes avatar.heal) */
   healPlayer: (n: number) => void;
+  /**
+   * STATUS-EFFECTS: clear the player's statuses when a campfire heal
+   * tick lands in radius (the campfire-aura cleanse). Optional — a
+   * manager without a status system heals exactly as before.
+   */
+  clearPlayerStatuses?: () => void;
   /** player feedback (blueprint passes engine.hud.toast) */
   toast: (m: string) => void;
   /** inventory to consume deployable items from (null = deploy disabled) */
@@ -425,11 +436,19 @@ export class DeployablesManager implements MapLocalEntitySystem {
   private deployIndex = 0;
   private mapSeed: number;
   private readonly scratch = new THREE.Vector3();
+  /**
+   * STATUS-EFFECTS: dedicated seeded stream for spike-trap poison
+   * rolls (mapSeed ^ STATUS_TRAP_SALT, re-seeded on every spawnForMap
+   * like the loot stream — the trap roll sequence never disturbs the
+   * deploy tick magnitudes, which derive from (seed, tickIndex)).
+   */
+  private statusRoller: StatusRoller;
 
   constructor(private readonly engine: Engine, opts: DeployablesManagerOpts) {
     this.opts = opts;
     this.enabled = opts.enabled ?? true;
     this.mapSeed = opts.mapSeed ?? engine.spec.meta.seed;
+    this.statusRoller = new StatusRoller((this.mapSeed ^ STATUS_TRAP_SALT) >>> 0);
     // the per-engine singleton — buckets shared with NPCs/enemies/nodes
     this.instancer = NpcInstancer.for(engine);
   }
@@ -544,6 +563,10 @@ export class DeployablesManager implements MapLocalEntitySystem {
         if (mag !== null && mag > 0 && d.root.position.distanceTo(playerPos) <= d.def.radius) {
           d.totalApplied += mag;
           this.opts.healPlayer(mag);
+          // STATUS-EFFECTS: standing in a campfire's light cleanses —
+          // the aura clear rides the existing heal tick (one clear per
+          // tick at most; clearAll on an empty tracker is a no-op).
+          try { this.opts.clearPlayerStatuses?.(); } catch { /* cleanse must never break the frame */ }
         }
       } else if (d.def.effectKind === 'damage') {
         const mag = d.pollTick(now);
@@ -553,6 +576,9 @@ export class DeployablesManager implements MapLocalEntitySystem {
             if (!e.alive) continue;
             if (e.position.distanceTo(d.root.position) <= d.def.radius) {
               try { e.damage(mag, d.root.position); hit = true; } catch { /* a trap must never break the frame */ }
+              // STATUS-EFFECTS: spike-trap hits may poison (table
+              // chance, dedicated stream, after the damage lands).
+              tryApplyStatus(e, 'poison', this.statusRoller.next(), now);
             }
           }
           if (hit) d.totalApplied += mag;
@@ -620,5 +646,7 @@ export class DeployablesManager implements MapLocalEntitySystem {
     this.despawnAll();
     this.mapSeed = mapSeed;
     this.deployIndex = 0;
+    // STATUS-EFFECTS: fresh map, fresh trap-status stream.
+    this.statusRoller = new StatusRoller((mapSeed ^ STATUS_TRAP_SALT) >>> 0);
   }
 }

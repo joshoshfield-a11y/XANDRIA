@@ -25,6 +25,20 @@ import type { Projectiles } from './Projectiles';
 import type { MapLocalEntitySystem } from '../world/MapEntities';
 import { Rng, hashString } from '../core/Rng';
 import { buildLootRng, rollLoot, type LootDrop } from './loot';
+/**
+ * STATUS-EFFECTS (upgrade loop): data-driven DoT/slow/stun statuses.
+ * The tracker is per-enemy run state (map-local — it dies with the
+ * enemy on despawn). Application funnels through applyStatus() (the
+ * single funnel the elemental wave's hook will tap); ticks are driven
+ * by game time in update(). No damage() signature change, no behavior
+ * contract change beyond the additive status math.
+ */
+import {
+  StatusTracker,
+  statusDefOf,
+  type ApplyOutcome,
+  type StatusId,
+} from './statusEffects';
 import { buildCurrencyRng, rollCurrencyDrops } from './economy';
 import { LOOT_SALT } from './loot';
 /**
@@ -304,6 +318,12 @@ export class Enemy {
   volatile = false;
   /** UPGRADE LOOP (elite-affixes): attacker position of the last hit taken. */
   private lastDamageFrom: THREE.Vector3 | null = null;
+  /**
+   * STATUS-EFFECTS: per-enemy status instances (one per status id,
+   * refresh-not-stack). Ticked by game time in update(); dies with the
+   * enemy on despawn (map-local run state, never persisted).
+   */
+  readonly statuses = new StatusTracker();
 
   /**
    * ENEMIES WAVE C: the instancible render root — rig group for
@@ -585,6 +605,68 @@ export class Enemy {
   }
 
   /**
+   * STATUS-EFFECTS: the single application funnel. Callers roll the
+   * chance on their own dedicated seeded stream and pass the draw;
+   * a missed roll never applies or refreshes. Fresh application fires
+   * one pooled particle burst in the status color + the onStatusApplied
+   * hook (observe-only); refresh extends the duration silently (no
+   * burst, no toast — the instance was already visible). Dead enemies
+   * take no statuses. Never throws (a status must never break a hit).
+   */
+  applyStatus(id: StatusId, opts: { roll: number; now: number }): ApplyOutcome {
+    if (!this.alive) return { applied: false, refreshed: false };
+    let outcome: ApplyOutcome;
+    try {
+      outcome = this.statuses.apply(id, opts.now, { roll: opts.roll });
+    } catch {
+      return { applied: false, refreshed: false };
+    }
+    if (!outcome.applied) return outcome;
+    try {
+      this.engine.hooks.emit('onStatusApplied', { enemy: this, id, refreshed: outcome.refreshed });
+    } catch { /* observe-only taps must never break a hit */ }
+    if (!outcome.refreshed) {
+      const def = statusDefOf(id);
+      try {
+        this.engine.particles?.burst(this.position, {
+          count: 10, color: def?.color ?? '#ffffff', color2: '#ffffff',
+          speed: 3, life: 0.5, size: 1.4, gravity: 0,
+        });
+      } catch { /* VFX must never break a hit */ }
+    }
+    return outcome;
+  }
+
+  /** STATUS-EFFECTS: speed multiplier from active statuses (1 = unslowed). */
+  statusSpeedMult(): number {
+    return this.statuses.speedMult();
+  }
+
+  /** STATUS-EFFECTS: true while a stunning status (shock) is active. */
+  isStunned(): boolean {
+    return this.statuses.stunned();
+  }
+
+  /** STATUS-EFFECTS: ids of currently active statuses (table order). */
+  activeStatuses(): StatusId[] {
+    return this.statuses.activeIds();
+  }
+
+  /**
+   * STATUS-EFFECTS: tick damage — flat table damage, bypassing the
+   * shield pool and knockback (a burn does not shove), respecting the
+   * elite damage-taken multiplier, with the existing hit-flash pulse
+   * as the only feedback. Death goes through the normal die() path.
+   */
+  tickDamage(amount: number): void {
+    if (!this.alive || !(amount > 0)) return;
+    this.health -= amount * this.damageTakenMult;
+    this.rig?.flash();
+    this.instancer?.flash(this);
+    if (this.health <= 0) this.die();
+  }
+
+  /**
    * Boss phase transitions at ≤66% (phase 1, enraged) and ≤33% HP
    * (phase 2, desperate). Each phase multiplies speed and aggression and
    * fires onPhase so the blueprint can show a banner ("The Warden enrages!").
@@ -712,6 +794,26 @@ export class Enemy {
     const tgt = this.lureTarget ?? this.companionTargetPos ?? playerPos;
     this.lastTarget = this.lureTarget ? 'lure' : this.companionTargetPos ? 'companion' : 'player';
     const dist = pos.distanceTo(tgt);
+    // STATUS-EFFECTS: game-time tick drive (t is engine.time). Tick
+    // damage can kill: a tick-killed enemy runs its corpse path and
+    // never reaches the movement machine below. Tick feedback reuses
+    // the pooled floating numbers (playerDamage kind) + the flash
+    // pulse inside tickDamage() — no new allocations, no shake.
+    this.statuses.update(t, (_id, amount) => {
+      this.tickDamage(amount);
+      try {
+        this.engine.juice?.spawnText(this.engine.camera, this.position, 'playerDamage', amount);
+      } catch { /* VFX must never break the frame */ }
+    });
+    if (!this.alive) { this.updateCorpse(dt, t); return; }
+    // STATUS-EFFECTS: stun (shock) freezes movement AND the attack
+    // cooldown — the attackCd decrement below is skipped, so the stun
+    // does not eat into the enemy's next attack window.
+    if (this.statuses.stunned()) {
+      if (this.body) { this.body.velocity.x = 0; this.body.velocity.z = 0; }
+      this.rig?.animate(t, 0, {});
+      return;
+    }
     this.attackCd -= dt;
 
     // UPGRADE LOOP (stealth-system): the effective detection radius is
@@ -760,7 +862,9 @@ export class Enemy {
         const b = this.body!;
         if (this.state === 'chase' || this.state === 'attack') {
           const dir = tgt.clone().sub(pos).setY(0).normalize();
-          const sp = this.spec.speed * this.speedMult * (this.state === 'attack' ? 0.4 : 1);
+          // STATUS-EFFECTS: frost-slow multiplies movement speed (min
+          // over active statuses; shock stuns outright above).
+          const sp = this.spec.speed * this.speedMult * this.statuses.speedMult() * (this.state === 'attack' ? 0.4 : 1);
           b.velocity.x = dir.x * sp;
           b.velocity.z = dir.z * sp;
           this.rig!.group.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI;
@@ -792,8 +896,8 @@ export class Enemy {
             this.wanderTarget = this.home.clone().add(new THREE.Vector3(this.rng.range(-8, 8), 0, this.rng.range(-8, 8)));
           }
           const dir = this.wanderTarget.clone().sub(pos).setY(0).normalize();
-          b.velocity.x = dir.x * this.spec.speed * this.speedMult * 0.3;
-          b.velocity.z = dir.z * this.spec.speed * this.speedMult * 0.3;
+          b.velocity.x = dir.x * this.spec.speed * this.speedMult * this.statuses.speedMult() * 0.3;
+          b.velocity.z = dir.z * this.spec.speed * this.speedMult * this.statuses.speedMult() * 0.3;
         }
         this.rig!.group.position.set(vpos.x, vpos.y - 0.85 * (this.kind === 'brute' ? 1.7 : 1), vpos.z);
         const planar = Math.hypot(b.velocity.x, b.velocity.z);
@@ -813,7 +917,7 @@ export class Enemy {
           const orbit = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar(Math.sin(t * 0.7 + this.hoverPhase) > 0 ? 1 : -1);
           dir.multiplyScalar(d > 10 ? 1 : -0.3).add(orbit.multiplyScalar(0.8)).normalize();
         }
-        const sp = this.spec.speed * this.speedMult;
+        const sp = this.spec.speed * this.speedMult * this.statuses.speedMult();
         b.velocity.x = dir.x * sp;
         b.velocity.z = dir.z * sp;
         b.velocity.y = (hoverY - pos.y) * 2.2;

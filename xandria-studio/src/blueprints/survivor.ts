@@ -98,7 +98,8 @@ export function buildSurvivor(engine: Engine, spec: GameSpec) {
   const combatPulse = () => { combatT = 1; };
 
   const enemies = new EnemyManager(engine, projectiles, {
-    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    // STATUS-EFFECTS: a landed melee hit may status the player (kind-gated).
+    onPlayerHit: (dmg, from, kind) => { const landed = avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); if (landed) avatar.tryStatusFromEnemyHit(kind, engine.time); },
     onDeath: (e) => {
       variants.onEnemyDeath(e);
       engine.score += 100;

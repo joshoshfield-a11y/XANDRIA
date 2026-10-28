@@ -554,6 +554,12 @@ export interface CampManagerOpts {
   inventory: () => { count(id: string): number; add(id: string, n?: number): number; remove(id: string, n?: number): number } | null;
   /** restore the player to full HP (blueprint passes avatar.heal(maxHealth)) */
   restoreHealth: () => void;
+  /**
+   * STATUS-EFFECTS: clear the player's statuses on rest (blueprint
+   * passes avatar.clearStatuses). Optional — a camp without a status
+   * system still rests exactly as before.
+   */
+  clearStatuses?: () => void;
   /** player feedback (blueprint passes engine.hud.toast) */
   toast: (m: string) => void;
   /** profile persistence hooks (default: the save-slot profile functions) */
@@ -819,6 +825,9 @@ export class CampManager implements MapLocalEntitySystem {
   rest(): CampActionResult {
     if (!this.built_.includes('rest')) return { ok: false, reason: 'Build the rest point first.' };
     this.opts.restoreHealth();
+    // STATUS-EFFECTS: resting cleanses — additive wiring into the
+    // existing rest path; the heal itself is unchanged.
+    try { this.opts.clearStatuses?.(); } catch { /* cleanse must never break a rest */ }
     const bonus = campRestTier(this.tierOf('rest'));
     if (bonus.buffDurationS > 0 && bonus.damageMult !== 1) {
       this.restedMult = bonus.damageMult;
@@ -826,8 +835,7 @@ export class CampManager implements MapLocalEntitySystem {
       this.opts.toast(`Rested — HP fully restored, +${Math.round((bonus.damageMult - 1) * 100)}% melee damage while rested`);
     } else {
       this.opts.toast('Rested — HP fully restored');
-    }
-    return { ok: true };
+    }    return { ok: true };
   }
 
   /** True while the rested bonus is live (game time). */

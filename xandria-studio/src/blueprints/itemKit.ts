@@ -118,7 +118,7 @@ export class BlueprintItemKit {
     const baseDamage = avatar.damage.bind(avatar);
     avatar.damage = (amount: number, from?: THREE.Vector3) => {
       const reduction = Math.min(0.6, (this.inventory.effectiveStats().defense ?? 0) / 200);
-      baseDamage(amount * (1 - reduction), from);
+      return baseDamage(amount * (1 - reduction), from);
     };
 
     // E: interact — via the Interactable contract (roadmap Priority 2).

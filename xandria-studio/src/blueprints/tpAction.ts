@@ -257,7 +257,7 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const enemies = new EnemyManager(engine, projectiles, {
     // UPGRADE LOOP (weather-cycles): night makes the heavy kinds hit
     // harder — additive multiplier read lazily off the weather manager.
-    onPlayerHit: (dmg, from, kind) => { avatar.damage(dmg * (weather?.enemyDamageMult(kind) ?? 1), from); camRig.shake(0.55); combatPulse(); },
+    onPlayerHit: (dmg, from, kind) => { const landed = avatar.damage(dmg * (weather?.enemyDamageMult(kind) ?? 1), from); camRig.shake(0.55); combatPulse(); if (landed) avatar.tryStatusFromEnemyHit(kind, engine.time); },
     // UPGRADE LOOP (companion-combat-depth): melee hits against a
     // companion-targeted enemy land on the companion (guard reduction
     // + fall handling live in CompanionsManager.takeEnemyHit) — never
@@ -586,6 +586,9 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
     getPlayerPos: () => avatar.ctrl.position,
     getEnemies: () => enemies.enemies,
     healPlayer: (n) => { avatar.heal(n); companions?.healActive(n); },
+    // STATUS-EFFECTS: campfire-aura cleanse — a heal tick landing in
+    // the campfire's radius clears the player's statuses.
+    clearPlayerStatuses: () => { avatar.clearStatuses(); },
     toast: (m) => engine.hud.toast(m),
     inventory: () => itemKit?.inventory ?? null,
     enabled: craftingEnabled,
@@ -627,6 +630,8 @@ export function buildThirdPersonAction(engine: Engine, spec: GameSpec) {
   const camp = new CampManager(engine, {
     inventory: () => itemKit?.inventory ?? null,
     restoreHealth: () => avatar.heal(avatar.maxHealth),
+    // STATUS-EFFECTS: resting at the camp's rest point cleanses.
+    clearStatuses: () => { avatar.clearStatuses(); },
     toast: (m) => engine.hud.toast(m),
   });
   engine.portalEntities.register(camp);

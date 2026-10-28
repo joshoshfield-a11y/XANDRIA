@@ -210,7 +210,8 @@ export function buildPlatformer(engine: Engine, spec: GameSpec) {
   const projectiles = null;
   let avatar: PlayerAvatar;
   const enemies = new EnemyManager(engine, null, {
-    onPlayerHit: (dmg, from) => avatar.damage(dmg, from),
+    // STATUS-EFFECTS: a landed melee hit may status the player (kind-gated).
+    onPlayerHit: (dmg, from, kind) => { const landed = avatar.damage(dmg, from); if (landed) avatar.tryStatusFromEnemyHit(kind, engine.time); },
     // platformer has no player weapons; walkers are stompable hazards —
     // if one dies (stomp/hazard/fall), it still feeds the XP economy, and
     // kills now count toward kill stages too (B1: onDeath never reported)

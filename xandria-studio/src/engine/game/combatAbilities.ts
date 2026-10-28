@@ -43,8 +43,13 @@ import type { GameSpec } from '@spec';
 import { Rng } from '../core/Rng';
 import type { FloatingTextKind } from './floatingText';
 import { BASE_CRIT_CTX, rollCrit, type CritCtx } from './crit';
-import { displayedDamage, type DamageType } from './elemental';
-
+import { displayedDamage, type DamageType } from './elemental';import {
+  STATUS_ABILITY_SALT,
+  StatusRoller,
+  applyStatusWithChain,
+  statusForAbility,
+  type StatusId,
+} from './statusEffects';
 /** Salt for the ability variance stream — off the loot/enemy streams. */
 export const ABILITY_SALT = 0xab17;
 
@@ -231,6 +236,15 @@ export interface AbilityManagerOpts {
   fx?: AbilityFx | null;
   /** spec toggle; default true (see resolveAbilitiesEnabled) */
   enabled?: boolean;
+  /**
+   * STATUS-EFFECTS: called once per damaging hit, AFTER the hit's
+   * damage (variance + crit) is computed and dealt, with the status
+   * this ability carries (ABILITY_STATUS in statusEffects.ts; null =
+   * no status). The applier owns the seeded status roll + chaining
+   * (wireCombatAbilities supplies it); unit-test fakes omit it and
+   * get no statuses. Never called for mend.
+   */
+  statusApplier?: (enemy: AbilityEnemies['enemies'][number], id: StatusId) => void;
 }
 
 export const MAX_ENERGY = 100;
@@ -251,6 +265,7 @@ export class AbilityManager {
   private dashDir = new THREE.Vector3();
   private dashSpeed = 0;
   private readonly rng: Rng;
+  private readonly statusApplier: AbilityManagerOpts['statusApplier'];
   private readonly damageMult: () => number;
   private readonly critCtx: () => CritCtx;
   private readonly fx: AbilityFx | null;
@@ -264,6 +279,7 @@ export class AbilityManager {
     this.avatar = opts.avatar;
     this.enemies = opts.enemies;
     this.rng = new Rng(((opts.seed ?? 0) ^ ABILITY_SALT) >>> 0);
+    this.statusApplier = opts.statusApplier;
     this.damageMult = opts.damageMult ?? (() => 1);
     this.critCtx = opts.critCtx ?? (() => BASE_CRIT_CTX);
     this.fx = opts.fx ?? null;
@@ -314,6 +330,7 @@ export class AbilityManager {
         if (d > 0 && to.normalize().dot(dir) < def.arcCos) continue;
         const dmg = this.rollDamage(def);
         damageDealt += this.dealDamage(e, dmg, origin, def);
+        this.tryStatus(e, def);
         targets++;
         if (dmg.crit) crits++;
       }
@@ -333,6 +350,7 @@ export class AbilityManager {
         if (d > def.radius) continue;
         const dmg = this.rollDamage(def);
         const dealt = this.dealDamage(e, dmg, origin, def);
+        this.tryStatus(e, def);
         if (dmg.crit) crits++;
         if (e.body && d > 0.001) {
           const push = to.normalize().multiplyScalar(def.knockback);
@@ -422,6 +440,20 @@ export class AbilityManager {
     const amount = displayedDamage(dmg.dmg, kind, def.damageType ?? 'physical', fallback);
     this.fx?.damageNumber(e.position, String(amount), def.color, dmg.crit ? 'crit' : 'playerDamage');
     return amount;
+  }
+
+  /**
+   * STATUS-EFFECTS: apply this ability's status (if any) to one hit
+   * enemy. Runs strictly after the hit's damage; the applier owns the
+   * roll stream and chaining. A throwing applier must never break a
+   * cast — guarded, like every other additive effect application.
+   */
+  private tryStatus(e: AbilityEnemies['enemies'][number], def: AbilityDef): void {
+    const id = statusForAbility(def.id);
+    if (!id || !this.statusApplier) return;
+    try {
+      this.statusApplier(e, id);
+    } catch { /* statuses must never break a cast */ }
   }
 
   /**
@@ -567,6 +599,11 @@ export function wireCombatAbilities(
   opts: { damageMult?: () => number; critCtx?: () => CritCtx } = {},
 ): WiredAbilities {
   const enabled = resolveAbilitiesEnabled(spec);
+  // STATUS-EFFECTS: one dedicated seeded stream for ability status
+  // rolls (STATUS_ABILITY_SALT) — it never touches the damage/crit
+  // streams, so ability damage replication is untouched. Chaining
+  // (shock) reads the live roster; chain targets force-apply.
+  const statusRoller = new StatusRoller(((spec.meta.seed ?? 0) ^ STATUS_ABILITY_SALT) >>> 0);
   const manager = new AbilityManager({
     avatar,
     enemies: enemies as unknown as AbilityEnemies,
@@ -574,6 +611,15 @@ export function wireCombatAbilities(
     damageMult: opts.damageMult,
     critCtx: opts.critCtx,
     enabled,
+    statusApplier: (enemy, id) => {
+      applyStatusWithChain(
+        enemy,
+        enemies.enemies as readonly unknown[],
+        id,
+        statusRoller.next(),
+        engine.time,
+      );
+    },
     fx: {
       burst: (pos, color) => {
         engine.particles.burst(pos, { count: 14, color, color2: '#ffffff', speed: 6, life: 0.5, size: 1.6, gravity: 0 });

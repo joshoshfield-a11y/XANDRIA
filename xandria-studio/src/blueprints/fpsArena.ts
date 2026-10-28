@@ -199,7 +199,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const combatPulse = () => { combatT = 1; };
 
   const enemies = new EnemyManager(engine, projectiles, {
-    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    // STATUS-EFFECTS: a landed melee hit may status the player (kind-gated).
+    onPlayerHit: (dmg, from, kind) => { const landed = avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); if (landed) avatar.tryStatusFromEnemyHit(kind, engine.time); },
     onDeath: (e) => {
       variants.onEnemyDeath(e); // splitter minis + visual cleanup first
       engine.score += Math.round(100 * fx.scoreMult());
@@ -481,7 +482,8 @@ export function buildFpsArena(engine: Engine, spec: GameSpec) {
   const { encounter: bosses, bar: bossBar } = wireBossFights(engine, spec, {
     manager: enemies,
     terrain,
-    onPlayerHit: (dmg, from) => { avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); },
+    // STATUS-EFFECTS: boss hits are brute-kind (burn) on the player-status table.
+    onPlayerHit: (dmg, from) => { const landed = avatar.damage(dmg, from); camRig.shake(0.55); combatPulse(); if (landed) avatar.tryStatusFromEnemyHit('brute', engine.time); },
   });
   const stationSession = craftingEnabled
     ? new CraftingInteractionSession(engine, stations, {

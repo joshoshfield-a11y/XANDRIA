@@ -61,6 +61,14 @@ export interface HookPayloads {
   onWin: { stats: Partial<RunStats> };
   onLose: { reason: string; stats: Partial<RunStats> };
   onTick: { dt: number; t: number };
+  /**
+   * STATUS-EFFECTS (upgrade loop): fired when a status is applied to (or
+   * refreshed on) an enemy via Enemy.applyStatus — observe-only, zero
+   * taps means zero behavior change. The elemental wave's reserved
+   * onElementalHit hook is the damage-side counterpart; this one is the
+   * status-side counterpart.
+   */
+  onStatusApplied: { enemy: Enemy; id: string; refreshed: boolean };
   /** WORLD-TIERS (upgrade loop): fired when the live map's world tier is (re)derived — boot, portal arrival, direct map jump. */
   onWorldTier: { tier: number; coord: { mx: number; my: number } };
   /**

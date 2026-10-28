@@ -37,7 +37,7 @@ import {
  * SAME resistance table Enemy.damage() uses (elemental.ts) — observe-only.
  */
 import { resistanceLines } from '../game/elemental';
-
+import { statusCodexLines } from '../game/statusEffects';
 export interface BestiaryPanelOpts {
   container: HTMLElement;
   /** DOM document (injectable for unit tests; default: globalThis.document) */
@@ -280,6 +280,15 @@ export class BestiaryPanel {
     this.cardsEl.append(eliteHead);
     for (const line of ELITE_CODEX_LINES) {
       this.cardsEl.append(el(doc, 'div', `font-size:12px;color:${TEXT};padding:4px 4px;line-height:1.45`, `${line.icon} ${line.name} — ${line.effect}`));
+    }
+    // STATUS-EFFECTS (upgrade loop): observe-only codex section from
+    // the SAME status table the damage paths use — the codex never
+    // lies about ticks, durations, or slows. Rendered for every codex
+    // open (no kill-count interaction, no behavior change).
+    const statusHead = el(doc, 'div', `font-size:12px;font-weight:700;color:#7af7ff;letter-spacing:0.06em;padding:10px 4px 2px`, 'STATUS EFFECTS — what your hits can leave behind');
+    this.cardsEl.append(statusHead);
+    for (const line of statusCodexLines()) {
+      this.cardsEl.append(el(doc, 'div', `font-size:12px;color:${TEXT};padding:4px 4px;line-height:1.45`, line));
     }
   }
 

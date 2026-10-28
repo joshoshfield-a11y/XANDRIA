@@ -364,6 +364,25 @@ import {
   AbilityBar,
   resolveAbilitiesEnabled,
 } from '../engine/game/combatAbilities';
+import {
+  ABILITY_STATUS,
+  ENEMY_KIND_STATUS,
+  STATUS_ABILITY_SALT,
+  STATUS_IDS,
+  STATUS_PLAYER_SALT,
+  STATUS_TABLE,
+  STATUS_TRAP_SALT,
+  StatusRoller,
+  StatusTracker,
+  applyStatusWithChain,
+  statusCodexLines,
+  statusDefOf,
+  statusForAbility,
+  statusForDamageType,
+  statusForEnemyKind,
+  statusTotalDamage,
+  tryApplyStatus,
+} from '../engine/game/statusEffects';
 import * as THREE from 'three';
 import {
   deriveWorldTier,
@@ -1555,6 +1574,40 @@ function boot() {
       /** Test seam: the live enemy manager. */
       liveEnemies: (): EnemyManager | null =>
         (blueprint as { enemies?: EnemyManager }).enemies ?? null,
+    };
+    // STATUS-EFFECTS (upgrade loop): test-mode seam for the status
+    // e2e harness — the tuning table, mappings, tracker/roller, and
+    // the live blueprint handles (avatar / enemies / camp / abilities).
+    (window.__XANDRIA__ as Record<string, unknown>).statusTest = {
+      STATUS_TABLE,
+      STATUS_IDS,
+      STATUS_ABILITY_SALT,
+      STATUS_PLAYER_SALT,
+      STATUS_TRAP_SALT,
+      ABILITY_STATUS,
+      ENEMY_KIND_STATUS,
+      StatusTracker,
+      StatusRoller,
+      statusDefOf,
+      statusForDamageType,
+      statusForAbility,
+      statusForEnemyKind,
+      statusTotalDamage,
+      statusCodexLines,
+      tryApplyStatus,
+      applyStatusWithChain,
+      /** Test seam: the live player avatar (statuses live on it). */
+      liveAvatar: (): PlayerAvatar | null =>
+        (blueprint as { avatar?: PlayerAvatar }).avatar ?? null,
+      /** Test seam: the live enemy manager. */
+      liveEnemies: (): EnemyManager | null =>
+        (blueprint as { enemies?: EnemyManager }).enemies ?? null,
+      /** Test seam: the live camp manager (rest cleanse). */
+      liveCamp: (): { rest(): { ok: boolean; reason?: string } } | null =>
+        (blueprint as { camp?: { rest(): { ok: boolean; reason?: string } } }).camp ?? null,
+      /** Test seam: the live ability manager. */
+      liveAbilities: (): AbilityManager | null =>
+        (blueprint as { abilities?: AbilityManager }).abilities ?? null,
     };
   }
   document.body.dataset.genre = spec.meta.genre;

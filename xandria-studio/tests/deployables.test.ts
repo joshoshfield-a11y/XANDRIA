@@ -56,6 +56,8 @@ import {
   deployableItemDefs,
   rollDeployTickMagnitude,
 } from '../src/engine/game/deployables';
+import { STATUS_TRAP_SALT, StatusTracker } from '../src/engine/game/statusEffects';
+import { Rng } from '../src/engine/core/Rng';
 
 beforeEach(() => {
   (globalThis as any).document = { createElement: (t: string) => makeEl(t), head: makeEl('head'), addEventListener() {}, removeEventListener() {} };
@@ -105,12 +107,14 @@ interface MgrOpts {
   inventory?: Inventory | null;
   enabled?: boolean;
   mapSeed?: number;
+  cleansed?: number[];
 }
 
 function makeManager(engine: Engine, o: MgrOpts = {}) {
   const player = o.player ?? new THREE.Vector3(0, 0, 0);
   const healed = o.healed ?? [];
   const toasts = o.toasts ?? [];
+  const cleansed = o.cleansed ?? [];
   const mgr = new DeployablesManager(engine, {
     getPlayerPos: () => player,
     getEnemies: () => (o.enemies ?? []) as any,
@@ -119,8 +123,10 @@ function makeManager(engine: Engine, o: MgrOpts = {}) {
     inventory: () => o.inventory ?? null,
     enabled: o.enabled,
     mapSeed: o.mapSeed ?? 4242,
+    // STATUS-EFFECTS: the campfire-aura cleanse hook.
+    clearPlayerStatuses: () => { cleansed.push(1); },
   });
-  return { mgr, player, healed, toasts };
+  return { mgr, player, healed, toasts, cleansed };
 }
 
 // ---------------------------------------------------------------- defs table
@@ -501,5 +507,57 @@ describe('deploy action seams', () => {
     const b = l.buttons.find((x) => x.action === 'deploy');
     expect(b).toBeTruthy();
     expect(b!.label).toBe('DEPLOY');
+  });
+});
+
+describe('STATUS-EFFECTS: deployable status hooks', () => {
+  it('campfire heal ticks invoke the cleanse hook once per tick, in radius only', () => {
+    const engine = makeEngine();
+    const inv = makeInventoryWith(['deploy_campfire']);
+    inv.add('deploy_campfire', 1);
+    const cleansed: number[] = [];
+    const { mgr, player } = makeManager(engine, { inventory: inv, cleansed });
+    mgr.tryDeploy();
+    const d = mgr.deployables[0];
+    const def = d.def;
+    // 2 ticks with the player in radius (player at origin, fire ~3m away,
+    // radius 6): one cleanse call per heal tick.
+    for (let i = 1; i <= 2; i++) {
+      (engine as any).time = i * def.tickInterval + 0.01;
+      mgr.update(0.016);
+    }
+    expect(cleansed).toHaveLength(2);
+    // Move the player out of the aura (the getter closes over this same
+    // Vector3): the next heal tick is out of range, so no new cleanse.
+    player.set(500, 0, 500);
+    (engine as any).time = 3 * def.tickInterval + 0.01;
+    mgr.update(0.016);
+    expect(cleansed).toHaveLength(2);
+  });
+
+  it('spike trap damage rolls poison on the dedicated seeded stream', () => {
+    const engine = makeEngine();
+    const inv = makeInventoryWith(['deploy_spike_trap']);
+    inv.add('deploy_spike_trap', 1);
+    const tracker = new StatusTracker();
+    const enemy = {
+      ...fakeEnemy(0, 0),
+      applyStatus(id: string, opts: { roll: number; now: number }) {
+        return tracker.apply(id, opts.now, { roll: opts.roll });
+      },
+    };
+    const { mgr } = makeManager(engine, { inventory: inv, enemies: [enemy as any] });
+    mgr.tryDeploy();
+    const d = mgr.deployables[0];
+    // Stand the enemy on the trap.
+    enemy.position.copy(d.root.position);
+    const def = d.def;
+    (engine as any).time = def.tickInterval + 0.01;
+    mgr.update(0.016);
+    expect(enemy.damaged).toHaveLength(1);
+    // The trap roller is seeded (mapSeed ^ STATUS_TRAP_SALT); draw 1
+    // decides poison. Replicate with the game's Rng.
+    const draw = new Rng((4242 ^ STATUS_TRAP_SALT) >>> 0).next();
+    expect(tracker.activeIds()).toEqual(draw < 0.3 ? ['poison'] : []);
   });
 });

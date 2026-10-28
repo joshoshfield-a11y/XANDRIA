@@ -9,8 +9,15 @@ import type { Projectiles } from '../engine/game/Projectiles';
 import type { GameSpec } from '@spec';
 import { CRIT_MELEE_SALT, CritRoller, applyCrit, BASE_CRIT_CTX, type CritCtx } from '../engine/game/crit';
 import { displayedDamage, type DamageType } from '../engine/game/elemental';
-import { applySneakBonus } from '../engine/game/stealth';
-
+import { applySneakBonus } from '../engine/game/stealth';import {
+  STATUS_PLAYER_SALT,
+  STATUS_TABLE,
+  StatusRoller,
+  StatusTracker,
+  statusForEnemyKind,
+  type ApplyOutcome,
+  type StatusId,
+} from '../engine/game/statusEffects';
 export interface PlayerAvatarEvents {
   onDeath?: () => void;
 }
@@ -32,6 +39,16 @@ export class PlayerAvatar {
    * on travel), so the stream continues across maps by construction.
    */
   private readonly meleeCrit: CritRoller;
+  /**
+   * STATUS-EFFECTS: the player's status instances (burn/poison/shock
+   * from enemy hits) + the dedicated seeded stream for enemy->player
+   * application rolls. Ticked by game time in update(); cleared on
+   * death/respawn and by camp rest / campfire aura. Frost-slow is
+   * never applied to the player (no controller change — disclosed);
+   * carried statuses deal tick damage only.
+   */
+  readonly statuses = new StatusTracker();
+  private readonly statusRoller: StatusRoller;
 
   constructor(
     protected engine: Engine,
@@ -44,6 +61,7 @@ export class PlayerAvatar {
     this.events = events;
     this.spawn = spawn.clone();
     this.meleeCrit = new CritRoller(((spec.meta.seed ?? 0) ^ CRIT_MELEE_SALT) >>> 0);
+    this.statusRoller = new StatusRoller(((spec.meta.seed ?? 0) ^ STATUS_PLAYER_SALT) >>> 0);
     this.maxHealth = spec.player.health;
     this.health = this.maxHealth;
     this.lives = spec.rules.lives;
@@ -88,13 +106,22 @@ export class PlayerAvatar {
   resyncLoadout(): void {
     this.maxHealth = this.spec.player.health;
     this.health = this.maxHealth;
+    // STATUS-EFFECTS: a fresh run starts status-free.
+    this.statuses.clearAll();
     this.lives = this.spec.rules.lives;
     this.engine.hud.setHealth(1);
     this.engine.hud.setLives(this.lives);
   }
 
-  damage(amount: number, from?: THREE.Vector3) {
-    if (this.iframes > 0 || this.engine.state !== 'playing') return;
+  /**
+   * Returns true when the hit landed (HP lost); false when blocked by
+   * iframes or a non-playing state. Callers use the result to gate
+   * additive on-hit effects (STATUS-EFFECTS: a blocked hit applies
+   * no status). Returning a value is additive — existing callers
+   * that ignore it are unaffected.
+   */
+  damage(amount: number, from?: THREE.Vector3): boolean {
+    if (this.iframes > 0 || this.engine.state !== 'playing') return false;
     this.health -= amount;
     this.iframes = 0.8;
     // daily-challenge scoring: report actual damage taken on the hook bus.
@@ -110,6 +137,7 @@ export class PlayerAvatar {
     // above the player (enemyDamage: '−' prefix + danger role).
     this.engine.juice.spawnText(this.engine.camera, this.ctrl.position.clone().add(new THREE.Vector3(0, 1.6, 0)), 'enemyDamage', amount);
     if (this.health <= 0) this.die();
+    return true;
   }
 
   heal(amount: number) {
@@ -125,6 +153,61 @@ export class PlayerAvatar {
   }
 
   addAmmo(n: number) { if (this.ammo !== Infinity) this.ammo = Math.min(999, this.ammo + n); }
+
+  /**
+   * STATUS-EFFECTS: apply (or refresh) a status on the player at game
+   * time `now`. Fresh application toasts once (refresh is silent).
+   * Frost-slow is refused on the player by design (see field doc) —
+   * the funnel still records the attempt as not-applied so callers
+   * never mistake it for a landed slow.
+   */
+  applyStatus(id: StatusId, opts: { roll: number; now: number }): ApplyOutcome {
+    if (id === 'frost-slow') return { applied: false, refreshed: false };
+    const outcome = this.statuses.apply(id, opts.now, { roll: opts.roll });
+    if (outcome.applied && !outcome.refreshed) {
+      const def = STATUS_TABLE[id];
+      this.engine.hud.toast(`${def.icon} ${def.name} — ${def.tickDamage} damage/${def.tickInterval}s for ${def.duration}s`);
+    }
+    return outcome;
+  }
+
+  /** STATUS-EFFECTS: clear every player status; returns cleared ids. */
+  clearStatuses(): StatusId[] {
+    return this.statuses.clearAll();
+  }
+
+  /** STATUS-EFFECTS: ids of currently active player statuses. */
+  activeStatuses(): StatusId[] {
+    return this.statuses.activeIds();
+  }
+
+  /**
+   * STATUS-EFFECTS: enemy melee hit -> player status attempt. The kind
+   * mapping lives in statusEffects.ts (ENEMY_KIND_STATUS); the roll
+   * draws from this avatar's dedicated seeded stream so the outcome
+   * replicates from (seed, hit sequence). Callers pass game time.
+   * Never throws — a status must never break a hit.
+   */
+  tryStatusFromEnemyHit(kind: string | undefined, now: number): boolean {
+    try {
+      const id = kind ? statusForEnemyKind(kind) : null;
+      if (!id) return false;
+      return this.applyStatus(id, { roll: this.statusRoller.next(), now }).applied;
+    } catch {
+      return false;
+    }
+  }
+
+  /** STATUS-EFFECTS: tick damage bypasses iframes (DoTs are not hits). */
+  private statusTickDamage(amount: number): void {
+    if (!(amount > 0) || this.health <= 0) return;
+    this.health -= amount;
+    this.engine.hud.setHealth(this.health / this.maxHealth);
+    try {
+      this.engine.juice.spawnText(this.engine.camera, this.ctrl.position.clone().add(new THREE.Vector3(0, 1.6, 0)), 'enemyDamage', amount);
+    } catch { /* VFX must never break the frame */ }
+    if (this.health <= 0) this.die();
+  }
 
   private die() {
     // UPGRADE LOOP (hardcore-ironman): one life. An ironman death never
@@ -142,6 +225,9 @@ export class PlayerAvatar {
       this.engine.lose('Ironman run ended — the slot is dead.');
       return;
     }
+    // STATUS-EFFECTS: death clears the player's statuses (respawn is a
+    // clean slate; the run-state rule, like the workbench buff).
+    this.statuses.clearAll();
     this.lives--;
     // run-journal wave: report player deaths on the hook bus. Additive —
     // no behavior change; zero taps in the normal flow (the onPlayerDamage
@@ -273,6 +359,11 @@ export class PlayerAvatar {
   update(dt: number, t: number) {
     this.iframes -= dt;
     this.fireCd -= dt;
+    // STATUS-EFFECTS: game-time tick drive (t is engine.time). A
+    // tick can kill: die() runs inside statusTickDamage, and the
+    // controller update below still runs once on the death frame
+    // (the pre-existing die() path tolerates it — respawn teleports).
+    this.statuses.update(t, (_id, amount) => this.statusTickDamage(amount));
     this.ctrl.update(dt, t);
   }
 

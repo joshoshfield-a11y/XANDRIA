@@ -142,9 +142,10 @@ export function wrapShieldDamage(engine: Engine, avatar: PlayerAvatar, fx: Effec
       );
       engine.audio.play('pickup', { pitch: 1.4, vol: 0.5 });
       engine.hud.setHealth(avatar.health / avatar.maxHealth);
-      if (amount <= 0) return;
+      // STATUS-EFFECTS: fully absorbed = the hit never landed on HP.
+      if (amount <= 0) return false;
     }
-    orig(amount, from);
+    return orig(amount, from);
   };
 }
 
